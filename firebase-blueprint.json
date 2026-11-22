@@ -1,0 +1,395 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile, studio preferences, staff invisible toggle, timed suspension, capability restrictions, and personal blocklist.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the user." },
+        "displayName": { "type": "string", "description": "Display name shown in chat rooms (1-40 chars)." },
+        "handle": { "type": "string", "description": "Short handle without spaces (2-30 chars)." },
+        "bio": { "type": "string", "description": "Short user bio (0-200 chars)." },
+        "avatarColorHex": { "type": "string", "description": "Hex color string (#RRGGBB)." },
+        "photoBase64": { "type": "string", "description": "Optional compressed JPEG Base64 profile picture (0-120000 chars)." },
+        "pushToTalkPreferred": { "type": "boolean", "description": "Default Push-to-Talk mic preference." },
+        "darkThemePreferred": { "type": "boolean", "description": "Legacy dark theme preference." },
+        "nightModeEnabled": { "type": "boolean", "description": "Optional Night Blue dark theme toggle (false = default Blue & White theme)." },
+        "invisibleModePreferred": { "type": "boolean", "description": "Admin or authorized Support preference to enter rooms invisibly." },
+        "globallyBanned": { "type": "boolean", "description": "Admin-controlled global platform ban flag." },
+        "disableCreateRoom": { "type": "boolean", "description": "Admin-controlled restriction disabling room creation." },
+        "disableEnterRoom": { "type": "boolean", "description": "Admin-controlled restriction disabling room entry." },
+        "disableMic": { "type": "boolean", "description": "Admin-controlled restriction disabling microphone broadcast." },
+        "disableVideo": { "type": "boolean", "description": "Admin-controlled restriction disabling camera video broadcast." },
+        "suspendedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which the user is suspended by Admin or Support (0 = not suspended)." },
+        "suspensionReason": { "type": "string", "description": "Optional reason shown to suspended user (0-200 chars)." },
+        "blockedUserIds": { "type": "array", "description": "Bounded list of up to 100 blocked UIDs." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": [
+        "userId", "displayName", "handle", "bio", "avatarColorHex",
+        "pushToTalkPreferred", "darkThemePreferred", "blockedUserIds",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "StaffRole": {
+      "title": "StaffRole",
+      "description": "Authoritative Admin and Support Staff assignments keyed by user UID, including per-member invisible permission.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID matching document ID." },
+        "email": { "type": "string", "description": "Optional staff email address (0-120 chars)." },
+        "displayName": { "type": "string", "description": "Staff display name (1-40 chars)." },
+        "staffTier": { "type": "string", "enum": ["ADMIN", "SUPPORT"], "description": "Staff privilege tier." },
+        "canEnterInvisible": { "type": "boolean", "description": "Whether Admin allows this Support member to enter rooms invisibly (always true for ADMIN)." },
+        "addedByUid": { "type": "string", "description": "UID of administrator who assigned the role." },
+        "addedByName": { "type": "string", "description": "Display name of administrator." },
+        "inviteId": { "type": "string", "description": "Optional staffInvites document ID when claimed via email invite." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
+      },
+      "required": ["userId", "email", "displayName", "staffTier", "addedByUid", "addedByName", "createdAt", "updatedAt"]
+    },
+    "StaffInvite": {
+      "title": "StaffInvite",
+      "description": "Email-based Support Staff invitation created by an Admin.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "description": "Lowercase Google email of invited Support staff." },
+        "displayName": { "type": "string", "description": "Label/name for the invited staff member." },
+        "staffTier": { "type": "string", "enum": ["ADMIN", "SUPPORT"], "description": "Invited tier (ADMIN or SUPPORT)." },
+        "canEnterInvisible": { "type": "boolean", "description": "Whether this Support invite grants invisible room entry permission." },
+        "addedByUid": { "type": "string", "description": "UID of inviting Admin." },
+        "addedByName": { "type": "string", "description": "Display name of inviting Admin." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
+      },
+      "required": ["email", "displayName", "staffTier", "addedByUid", "addedByName", "createdAt"]
+    },
+    "UserAlert": {
+      "title": "UserAlert",
+      "description": "Direct real-time alert sent by Admin or Support to a user, editable by Admin.",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string", "description": "UID of the recipient user." },
+        "targetName": { "type": "string", "description": "Display name of the recipient user." },
+        "senderId": { "type": "string", "description": "UID of sending Admin or Support staff." },
+        "senderName": { "type": "string", "description": "Display name of sender." },
+        "senderTier": { "type": "string", "enum": ["ADMIN", "SUPPORT"], "description": "Privilege tier of sender." },
+        "roomId": { "type": "string", "description": "Optional room ID context (0-128 chars)." },
+        "title": { "type": "string", "description": "Short alert headline (1-60 chars)." },
+        "message": { "type": "string", "description": "Alert body text (1-300 chars)." },
+        "severity": { "type": "string", "enum": ["INFO", "WARNING", "URGENT"], "description": "Visual severity level." },
+        "acknowledged": { "type": "boolean", "description": "Whether recipient has acknowledged the alert." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
+      },
+      "required": [
+        "targetUserId", "targetName", "senderId", "senderName", "senderTier",
+        "roomId", "title", "message", "severity", "acknowledged", "createdAt", "updatedAt"
+      ]
+    },
+    "ChatRoom": {
+      "title": "ChatRoom",
+      "description": "Live voice, video, and text chat room with integrated moderation settings.",
+      "type": "object",
+      "properties": {
+        "hostId": { "type": "string" },
+        "hostName": { "type": "string" },
+        "hostTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "title": { "type": "string" },
+        "topic": { "type": "string" },
+        "category": { "type": "string", "enum": ["VOICE_VIDEO", "MUSIC", "TECH", "LOUNGE", "GAMING", "LANGUAGE", "SAFE_SPACE"] },
+        "coverKey": { "type": "string", "enum": ["HERO", "MUSIC", "TECH", "DEBATE"] },
+        "visibility": { "type": "string", "enum": ["PUBLIC", "PRIVATE"] },
+        "status": { "type": "string", "enum": ["LIVE", "CLOSED"] },
+        "videoEnabled": { "type": "boolean" },
+        "autoModEnabled": { "type": "boolean" },
+        "autoModBlockMode": { "type": "boolean" },
+        "linksBlocked": { "type": "boolean" },
+        "roomLocked": { "type": "boolean" },
+        "stageMicLocked": { "type": "boolean" },
+        "adminMicPriorityActive": { "type": "boolean", "description": "True while App Owner Administrator holds exclusive microphone override in this room." },
+        "slowModeSeconds": { "type": "integer" },
+        "maxSpeakers": { "type": "integer" },
+        "participantCount": { "type": "integer" },
+        "moderatorIds": { "type": "array" },
+        "bannedUserIds": { "type": "array" },
+        "mutedUserIds": { "type": "array" },
+        "blockedWords": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "hostId", "hostName", "title", "topic", "category", "coverKey",
+        "visibility", "status", "videoEnabled", "autoModEnabled",
+        "autoModBlockMode", "linksBlocked", "roomLocked", "stageMicLocked",
+        "slowModeSeconds", "maxSpeakers", "participantCount",
+        "moderatorIds", "bannedUserIds", "mutedUserIds", "blockedWords",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "RoomParticipant": {
+      "title": "RoomParticipant",
+      "description": "Live stage/listener presence, staff tier color, invisible flag, and media status.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "roomId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "avatarColorHex": { "type": "string" },
+        "role": { "type": "string", "enum": ["HOST", "MODERATOR", "SPEAKER", "LISTENER"] },
+        "staffTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "invisible": { "type": "boolean" },
+        "micActive": { "type": "boolean" },
+        "camActive": { "type": "boolean" },
+        "handRaised": { "type": "boolean" },
+        "mutedByMod": { "type": "boolean" },
+        "speakingLevel": { "type": "number" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "roomId", "displayName", "avatarColorHex", "role",
+        "micActive", "camActive", "handRaised", "mutedByMod",
+        "speakingLevel", "joinedAt", "updatedAt"
+      ]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Real-time text chat message with staff tier color indicator.",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderRole": { "type": "string", "enum": ["HOST", "MODERATOR", "SPEAKER", "LISTENER", "SYSTEM"] },
+        "senderTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "text": { "type": "string" },
+        "messageType": { "type": "string", "enum": ["TEXT", "REACTION", "MOD_NOTICE", "JOIN_LEAVE"] },
+        "flaggedByAutoMod": { "type": "boolean" },
+        "deletedByMod": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "roomId", "senderId", "senderName", "senderRole", "text",
+        "messageType", "flaggedByAutoMod", "deletedByMod",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "ModerationLog": {
+      "title": "ModerationLog",
+      "description": "Immutable room moderation audit trail entry.",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "actorId": { "type": "string" },
+        "actorName": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "actionType": {
+          "type": "string",
+          "enum": [
+            "MUTE", "UNMUTE", "BOUNCE", "KICK", "SUSPEND", "BAN", "UNBAN",
+            "DELETE_MSG", "AUTO_MOD", "LOCK_ROOM", "STAGE_MUTE",
+            "PROMOTE_MOD", "DEMOTE_MOD", "SEND_ALERT", "STAFF_ROLE",
+            "EDIT_USER", "EDIT_ROOM", "CLOSE_ROOM", "SETTINGS"
+          ]
+        },
+        "reason": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roomId", "actorId", "actorName", "targetUserId", "targetName", "actionType", "reason", "createdAt"]
+    },
+    "SafetyReport": {
+      "title": "SafetyReport",
+      "description": "User-submitted safety incident report scoped to reporter, room host, and admins.",
+      "type": "object",
+      "properties": {
+        "reporterId": { "type": "string" },
+        "reporterName": { "type": "string" },
+        "roomId": { "type": "string" },
+        "roomTitle": { "type": "string" },
+        "roomHostId": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "category": { "type": "string", "enum": ["HARASSMENT", "HATE_SPEECH", "SPAM_SCAM", "INAPPROPRIATE_MEDIA", "IMPERSONATION", "OTHER"] },
+        "details": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "RESOLVED", "DISMISSED"] },
+        "resolutionNote": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "reporterId", "reporterName", "roomId", "roomTitle", "roomHostId",
+        "targetUserId", "targetName", "category", "details", "status",
+        "resolutionNote", "createdAt", "updatedAt"
+      ]
+    },
+    "DirectoryEntry": {
+      "title": "DirectoryEntry",
+      "description": "Public user discovery profile for browsing users, viewing profiles, finding friends, and starting private messages.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "handle": { "type": "string" },
+        "bio": { "type": "string" },
+        "avatarColorHex": { "type": "string" },
+        "photoBase64": { "type": "string" },
+        "staffTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "postCount": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "displayName", "handle", "avatarColorHex", "staffTier", "updatedAt"]
+    },
+    "Friendship": {
+      "title": "Friendship",
+      "description": "Two-way friendship or pending friend request keyed deterministically by sorted UIDs.",
+      "type": "object",
+      "properties": {
+        "userIds": { "type": "array", "description": "Exactly 2 UIDs [requesterId, recipientId] for array-contains queries." },
+        "requesterId": { "type": "string" },
+        "requesterName": { "type": "string" },
+        "requesterHandle": { "type": "string" },
+        "requesterColorHex": { "type": "string" },
+        "requesterTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "recipientId": { "type": "string" },
+        "recipientName": { "type": "string" },
+        "recipientHandle": { "type": "string" },
+        "recipientColorHex": { "type": "string" },
+        "recipientTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "status": { "type": "string", "enum": ["PENDING", "ACCEPTED"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userIds", "requesterId", "requesterName", "requesterHandle", "requesterColorHex", "requesterTier",
+        "recipientId", "recipientName", "recipientHandle", "recipientColorHex", "recipientTier",
+        "status", "createdAt", "updatedAt"
+      ]
+    },
+    "DirectThread": {
+      "title": "DirectThread",
+      "description": "Private 1-on-1 message thread keyed deterministically by sorted UIDs.",
+      "type": "object",
+      "properties": {
+        "participantIds": { "type": "array", "description": "Exactly 2 UIDs for array-contains queries." },
+        "userAId": { "type": "string" },
+        "userAName": { "type": "string" },
+        "userAColorHex": { "type": "string" },
+        "userATier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "userBId": { "type": "string" },
+        "userBName": { "type": "string" },
+        "userBColorHex": { "type": "string" },
+        "userBTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "lastMessageText": { "type": "string" },
+        "lastMessageSenderId": { "type": "string" },
+        "unreadByUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "participantIds", "userAId", "userAName", "userAColorHex", "userATier",
+        "userBId", "userBName", "userBColorHex", "userBTier",
+        "lastMessageText", "lastMessageSenderId", "unreadByUserIds",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Immutable 1-on-1 private message inside a DirectThread.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "participantIds": { "type": "array" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["threadId", "participantIds", "senderId", "senderName", "senderTier", "text", "createdAt"]
+    },
+    "ProfilePost": {
+      "title": "ProfilePost",
+      "description": "User-authored profile update containing text, an optional compressed JPEG photo, and community likes.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorHandle": { "type": "string" },
+        "authorColorHex": { "type": "string" },
+        "authorPhotoBase64": { "type": "string" },
+        "authorTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "text": { "type": "string" },
+        "imageBase64": { "type": "string" },
+        "likedByUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "authorId", "authorName", "authorHandle", "authorColorHex", "authorTier",
+        "text", "imageBase64", "likedByUserIds", "createdAt", "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles, preferences, timed suspensions, capability restrictions, and blocklists."
+    },
+    "/userDirectory/{userId}": {
+      "schema": { "$ref": "#/entities/DirectoryEntry" },
+      "description": "Minimal public user directory for friend search and direct messaging."
+    },
+    "/friendships/{friendshipId}": {
+      "schema": { "$ref": "#/entities/Friendship" },
+      "description": "Pending friend requests and accepted two-way friendships."
+    },
+    "/directThreads/{threadId}": {
+      "schema": { "$ref": "#/entities/DirectThread" },
+      "description": "Private 1-on-1 chat threads displayed on the Snapchat-style Chats home screen."
+    },
+    "/directThreads/{threadId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/DirectMessage" },
+      "description": "Private 1-on-1 messages scoped strictly to the two participants."
+    },
+    "/staffRoles/{userId}": {
+      "schema": { "$ref": "#/entities/StaffRole" },
+      "description": "Authoritative Admin and Support Staff role registry with per-member invisible permission."
+    },
+    "/staffInvites/{inviteId}": {
+      "schema": { "$ref": "#/entities/StaffInvite" },
+      "description": "Email-based Support Staff invitations managed by Admins."
+    },
+    "/userAlerts/{alertId}": {
+      "schema": { "$ref": "#/entities/UserAlert" },
+      "description": "Direct real-time safety alerts sent by Admins or Support Staff and editable by Admins."
+    },
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/ChatRoom" },
+      "description": "Live voice, video, and text chat rooms."
+    },
+    "/rooms/{roomId}/participants/{participantId}": {
+      "schema": { "$ref": "#/entities/RoomParticipant" },
+      "description": "Active participants, stage roles, staff color tiers, and stealth presence."
+    },
+    "/rooms/{roomId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Real-time text chat messages, reactions, and moderation notices."
+    },
+    "/rooms/{roomId}/modLogs/{logId}": {
+      "schema": { "$ref": "#/entities/ModerationLog" },
+      "description": "Immutable room moderation audit log."
+    },
+    "/safetyReports/{reportId}": {
+      "schema": { "$ref": "#/entities/SafetyReport" },
+      "description": "Safety incident reports visible to reporter, room host, and admins."
+    },
+    "/profilePosts/{postId}": {
+      "schema": { "$ref": "#/entities/ProfilePost" },
+      "description": "Public profile posts (text and/or photos) authored by users and viewable on their profile and Discovery feed."
+    }
+  }
+}

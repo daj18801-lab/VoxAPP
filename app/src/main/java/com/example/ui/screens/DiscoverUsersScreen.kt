@@ -1,0 +1,807 @@
+package com.example.ui.screens
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DynamicFeed
+import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.HourglassTop
+import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material.icons.rounded.PersonRemove
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.example.R
+import com.example.data.DirectoryEntry
+import com.example.data.Friendship
+import com.example.data.ProfilePost
+import com.example.data.StaffCapabilities
+import com.example.data.StaffTier
+import com.example.data.UiState
+import com.example.ui.components.ProfilePostCard
+import com.example.ui.components.SpeakingAvatarCircle
+import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.usernameColor
+import com.example.ui.theme.LiveCoral
+
+@Composable
+fun DiscoverUsersScreen(
+    currentUserId: String,
+    staffCapabilities: StaffCapabilities,
+    directoryEntries: List<DirectoryEntry>,
+    friendships: List<Friendship>,
+    recentPostsState: UiState<List<ProfilePost>>,
+    onOpenUserProfile: (String) -> Unit,
+    onSendFriendRequest: (DirectoryEntry) -> Unit,
+    onAcceptFriendRequest: (Friendship) -> Unit,
+    onRemoveOrDeclineFriendship: (Friendship) -> Unit,
+    onMessageUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
+    onToggleLikePost: (ProfilePost) -> Unit,
+    onDeletePost: (ProfilePost) -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Browse People, 1 = Posts Feed, 2 = Friends
+
+    val directoryByUid = remember(directoryEntries) {
+        directoryEntries.associateBy { it.userId }
+    }
+    val friendshipByOtherUid = remember(friendships, currentUserId) {
+        friendships.associateBy { it.otherUserId(currentUserId) }
+    }
+    val incomingRequests = remember(friendships, currentUserId) {
+        friendships.filter { it.isIncomingFor(currentUserId) }
+    }
+    val acceptedFriends = remember(friendships) {
+        friendships.filter { it.isAccepted() }
+    }
+    val outgoingRequests = remember(friendships, currentUserId) {
+        friendships.filter { it.isOutgoingFor(currentUserId) }
+    }
+
+    val browseUsers = remember(directoryEntries, currentUserId, searchQuery) {
+        val q = searchQuery.trim()
+        directoryEntries
+            .filter { it.userId != currentUserId }
+            .filter { entry ->
+                q.isEmpty() ||
+                    entry.displayName.contains(q, ignoreCase = true) ||
+                    entry.handle.contains(q, ignoreCase = true) ||
+                    entry.bio.contains(q, ignoreCase = true)
+            }
+            .sortedWith(
+                compareByDescending<DirectoryEntry> { it.photoBase64.isNotBlank() }
+                    .thenByDescending { it.postCount }
+                    .thenBy { it.displayName.lowercase() }
+            )
+    }
+
+    val allRecentPosts = (recentPostsState as? UiState.Success)?.data.orEmpty()
+    val filteredPosts = remember(allRecentPosts, searchQuery) {
+        val q = searchQuery.trim()
+        if (q.isEmpty()) allRecentPosts
+        else allRecentPosts.filter { post ->
+            post.authorName.contains(q, ignoreCase = true) ||
+                post.authorHandle.contains(q, ignoreCase = true) ||
+                post.text.contains(q, ignoreCase = true)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 840.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Header + Search + Segment Chips
+            item(key = "discover_header") {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Discover",
+                                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Text(
+                                text = "Browse ${browseUsers.size} people & community posts",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.size(46.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Explore,
+                                    contentDescription = "Discover users",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it.take(40) },
+                        placeholder = { Text(stringResource(R.string.hint_search_discover)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Search,
+                                contentDescription = "Search users",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "Clear search")
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(999.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surface,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("discover_search_input")
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val tabs = listOf(
+                            "People (${browseUsers.size})",
+                            "Posts (${allRecentPosts.size})",
+                            if (incomingRequests.isNotEmpty()) {
+                                "Friends (${acceptedFriends.size} · +${incomingRequests.size})"
+                            } else {
+                                "Friends (${acceptedFriends.size})"
+                            }
+                        )
+                        tabs.forEachIndexed { idx, label ->
+                            FilterChip(
+                                selected = selectedTab == idx,
+                                onClick = { selectedTab = idx },
+                                label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                shape = RoundedCornerShape(999.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                    selectedLabelColor = Color.White
+                                ),
+                                modifier = Modifier.testTag("discover_tab_$idx")
+                            )
+                        }
+                    }
+                }
+            }
+
+            when (selectedTab) {
+                // TAB 0: BROWSE USERS
+                0 -> {
+                    if (browseUsers.isEmpty()) {
+                        item(key = "discover_people_empty") {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Group,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(34.dp)
+                                    )
+                                    Text(
+                                        text = "No users found",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        text = "Everyone who signs into VoxStage appears here so you can browse profiles and view their posts.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        items(browseUsers, key = { "browse_${it.userId}" }) { person ->
+                            DiscoverUserCard(
+                                entry = person,
+                                currentUserId = currentUserId,
+                                friendship = friendshipByOtherUid[person.userId],
+                                onClickProfile = { onOpenUserProfile(person.userId) },
+                                onSendFriendRequest = { onSendFriendRequest(person) },
+                                onAcceptFriendRequest = { f -> onAcceptFriendRequest(f) },
+                                onMessageUser = {
+                                    onMessageUser(
+                                        person.userId,
+                                        person.displayName,
+                                        person.avatarColorHex,
+                                        person.tierEnum()
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // TAB 1: COMMUNITY POSTS FEED
+                1 -> {
+                    when (recentPostsState) {
+                        is UiState.Loading -> {
+                            item(key = "discover_posts_loading") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 40.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+
+                        is UiState.Error -> {
+                            item(key = "discover_posts_error") {
+                                Text(
+                                    text = recentPostsState.message,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                        }
+
+                        is UiState.Success -> {
+                            if (filteredPosts.isEmpty()) {
+                                item(key = "discover_posts_empty") {
+                                    Surface(
+                                        shape = RoundedCornerShape(20.dp),
+                                        color = MaterialTheme.colorScheme.surface,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(24.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.DynamicFeed,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(34.dp)
+                                            )
+                                            Text(
+                                                text = "No community posts yet",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                            )
+                                            Text(
+                                                text = "Visit your Profile tab to share the first photo or text update!",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                items(filteredPosts, key = { "feed_${it.id}" }) { post ->
+                                    ProfilePostCard(
+                                        post = post,
+                                        currentUserId = currentUserId,
+                                        canDelete = post.authorId == currentUserId || staffCapabilities.isStaff,
+                                        latestAuthorPhotoBase64 = directoryByUid[post.authorId]?.photoBase64,
+                                        onAuthorClick = { onOpenUserProfile(post.authorId) },
+                                        onToggleLike = { onToggleLikePost(post) },
+                                        onDelete = { onDeletePost(post) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // TAB 2: FRIENDS & REQUESTS
+                else -> {
+                    if (incomingRequests.isNotEmpty()) {
+                        item(key = "disc_in_header") {
+                            Text(
+                                text = "Friend Requests (${incomingRequests.size})",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        items(incomingRequests, key = { "disc_in_${it.id}" }) { req ->
+                            val otherId = req.otherUserId(currentUserId)
+                            val name = req.otherName(currentUserId)
+                            val handle = req.otherHandle(currentUserId)
+                            val color = req.otherColorHex(currentUserId)
+                            val tier = req.otherTier(currentUserId)
+                            val photo = directoryByUid[otherId]?.photoBase64.orEmpty()
+
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenUserProfile(otherId) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    SpeakingAvatarCircle(
+                                        displayName = name,
+                                        colorHex = color,
+                                        speakingLevel = 0f,
+                                        micActive = false,
+                                        size = 46.dp,
+                                        photoBase64 = photo
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = name,
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = usernameColor(tier)
+                                            )
+                                            StaffTierBadge(tier = tier)
+                                        }
+                                        Text(
+                                            text = "@$handle wants to be friends",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Button(
+                                        onClick = { onAcceptFriendRequest(req) },
+                                        shape = RoundedCornerShape(999.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                    ) {
+                                        Text("Accept", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                    IconButton(
+                                        onClick = { onRemoveOrDeclineFriendship(req) },
+                                        modifier = Modifier.size(48.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.Close, contentDescription = "Decline", tint = LiveCoral)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    item(key = "disc_friends_header") {
+                        Text(
+                            text = "My Friends (${acceptedFriends.size})",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                    }
+
+                    if (acceptedFriends.isEmpty()) {
+                        item(key = "disc_friends_empty") {
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "You haven't added friends yet. Switch to People to browse profiles and send friend requests!",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        items(acceptedFriends, key = { "disc_fr_${it.id}" }) { friend ->
+                            val otherId = friend.otherUserId(currentUserId)
+                            val name = friend.otherName(currentUserId)
+                            val handle = friend.otherHandle(currentUserId)
+                            val color = friend.otherColorHex(currentUserId)
+                            val tier = friend.otherTier(currentUserId)
+                            val photo = directoryByUid[otherId]?.photoBase64.orEmpty()
+
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenUserProfile(otherId) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    SpeakingAvatarCircle(
+                                        displayName = name,
+                                        colorHex = color,
+                                        speakingLevel = 0f,
+                                        micActive = false,
+                                        size = 48.dp,
+                                        photoBase64 = photo
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = name,
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = usernameColor(tier)
+                                            )
+                                            StaffTierBadge(tier = tier)
+                                        }
+                                        Text(
+                                            text = "@$handle · Tap to view posts",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Button(
+                                        onClick = { onMessageUser(otherId, name, color, tier) },
+                                        shape = RoundedCornerShape(999.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.ChatBubble, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Chat", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                    IconButton(
+                                        onClick = { onRemoveOrDeclineFriendship(friend) },
+                                        modifier = Modifier.size(48.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PersonRemove,
+                                            contentDescription = "Remove friend",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (outgoingRequests.isNotEmpty()) {
+                        item(key = "disc_out_header") {
+                            Text(
+                                text = "Sent Requests (${outgoingRequests.size})",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        items(outgoingRequests, key = { "disc_out_${it.id}" }) { req ->
+                            val otherId = req.otherUserId(currentUserId)
+                            val name = req.otherName(currentUserId)
+                            val handle = req.otherHandle(currentUserId)
+                            val color = req.otherColorHex(currentUserId)
+                            val tier = req.otherTier(currentUserId)
+                            val photo = directoryByUid[otherId]?.photoBase64.orEmpty()
+
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenUserProfile(otherId) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    SpeakingAvatarCircle(
+                                        displayName = name,
+                                        colorHex = color,
+                                        speakingLevel = 0f,
+                                        micActive = false,
+                                        size = 42.dp,
+                                        photoBase64 = photo
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = name,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = usernameColor(tier)
+                                        )
+                                        Text(
+                                            text = "@$handle · Pending",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = { onRemoveOrDeclineFriendship(req) },
+                                        shape = RoundedCornerShape(999.dp)
+                                    ) {
+                                        Text("Cancel", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item(key = "discover_bottom_spacer") {
+                Spacer(modifier = Modifier.height(72.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoverUserCard(
+    entry: DirectoryEntry,
+    currentUserId: String,
+    friendship: Friendship?,
+    onClickProfile: () -> Unit,
+    onSendFriendRequest: () -> Unit,
+    onAcceptFriendRequest: (Friendship) -> Unit,
+    onMessageUser: () -> Unit
+) {
+    val tier = entry.tierEnum()
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClickProfile)
+            .testTag("discover_user_card_${entry.userId}")
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SpeakingAvatarCircle(
+                    displayName = entry.displayName,
+                    colorHex = entry.avatarColorHex,
+                    speakingLevel = 0f,
+                    micActive = false,
+                    size = 56.dp,
+                    photoBase64 = entry.photoBase64
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = entry.displayName,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = usernameColor(tier),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        StaffTierBadge(tier = tier)
+                    }
+                    Text(
+                        text = "@${entry.handle} · ${entry.postCount} ${if (entry.postCount == 1L) "post" else "posts"}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (entry.bio.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = entry.bio,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onClickProfile,
+                    shape = RoundedCornerShape(999.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("discover_view_profile_${entry.userId}")
+                ) {
+                    Text("View Profile", style = MaterialTheme.typography.labelMedium)
+                }
+
+                when {
+                    friendship == null -> {
+                        Button(
+                            onClick = onSendFriendRequest,
+                            shape = RoundedCornerShape(999.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("discover_add_friend_${entry.userId}")
+                        ) {
+                            Icon(Icons.Rounded.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Add Friend", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+
+                    friendship.isAccepted() -> {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Check,
+                                    contentDescription = "Friends",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Friends",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+
+                    friendship.isIncomingFor(currentUserId) -> {
+                        Button(
+                            onClick = { onAcceptFriendRequest(friendship) },
+                            shape = RoundedCornerShape(999.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Accept", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+
+                    else -> {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Rounded.HourglassTop,
+                                    contentDescription = "Pending",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Pending",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    IconButton(
+                        onClick = onMessageUser,
+                        modifier = Modifier.testTag("discover_message_${entry.userId}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ChatBubble,
+                            contentDescription = "Message ${entry.displayName}",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}

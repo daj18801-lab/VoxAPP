@@ -1,0 +1,562 @@
+package com.example.ui.screens
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material.icons.rounded.PersonRemove
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.example.R
+import com.example.data.DirectoryEntry
+import com.example.data.Friendship
+import com.example.data.StaffTier
+import com.example.ui.components.SpeakingAvatarCircle
+import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.usernameColor
+import com.example.ui.theme.LiveCoral
+
+@Composable
+fun FriendsScreen(
+    currentUserId: String,
+    friendships: List<Friendship>,
+    directoryEntries: List<DirectoryEntry>,
+    onSendFriendRequest: (DirectoryEntry) -> Unit,
+    onAcceptFriendRequest: (Friendship) -> Unit,
+    onRemoveOrDeclineFriendship: (Friendship) -> Unit,
+    onMessageUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
+    onOpenUserProfile: (String) -> Unit = {}
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    val directoryPhotoByUid = remember(directoryEntries) {
+        directoryEntries.associate { it.userId to it.photoBase64 }
+    }
+
+    val incomingRequests = remember(friendships, currentUserId) {
+        friendships.filter { it.isIncomingFor(currentUserId) }
+    }
+    val acceptedFriends = remember(friendships, currentUserId, searchQuery) {
+        val q = searchQuery.trim()
+        friendships.filter { f ->
+            f.isAccepted() && (
+                q.isEmpty() ||
+                    f.otherName(currentUserId).contains(q, ignoreCase = true) ||
+                    f.otherHandle(currentUserId).contains(q, ignoreCase = true)
+                )
+        }
+    }
+    val outgoingRequests = remember(friendships, currentUserId) {
+        friendships.filter { it.isOutgoingFor(currentUserId) }
+    }
+
+    val connectedUserIds = remember(friendships, currentUserId) {
+        friendships.map { it.otherUserId(currentUserId) }.toSet() + currentUserId
+    }
+
+    val discoverPeople = remember(directoryEntries, connectedUserIds, searchQuery) {
+        val q = searchQuery.trim()
+        directoryEntries.filter { entry ->
+            !connectedUserIds.contains(entry.userId) && (
+                q.isEmpty() ||
+                    entry.displayName.contains(q, ignoreCase = true) ||
+                    entry.handle.contains(q, ignoreCase = true)
+                )
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 840.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item(key = "friends_header") {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Friends",
+                                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Text(
+                                text = "${friendships.count { it.isAccepted() }} friends · ${incomingRequests.size} pending requests",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.size(46.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Group,
+                                    contentDescription = "Friends hub",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it.take(40) },
+                        placeholder = { Text(stringResource(R.string.hint_search_friends)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Search,
+                                contentDescription = "Search friends",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "Clear search")
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(999.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surface,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("friends_search_input")
+                    )
+                }
+            }
+
+            // Incoming Friend Requests
+            if (incomingRequests.isNotEmpty()) {
+                item(key = "incoming_header") {
+                    Text(
+                        text = "Friend Requests (${incomingRequests.size})",
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                items(incomingRequests, key = { "in_${it.id}" }) { req ->
+                    val otherId = req.otherUserId(currentUserId)
+                    val name = req.otherName(currentUserId)
+                    val handle = req.otherHandle(currentUserId)
+                    val color = req.otherColorHex(currentUserId)
+                    val tier = req.otherTier(currentUserId)
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenUserProfile(otherId) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SpeakingAvatarCircle(
+                                displayName = name,
+                                colorHex = color,
+                                speakingLevel = 0f,
+                                micActive = false,
+                                size = 46.dp,
+                                photoBase64 = directoryPhotoByUid[otherId].orEmpty()
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = usernameColor(tier),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    StaffTierBadge(tier = tier)
+                                }
+                                Text(
+                                    text = "@$handle wants to be friends",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Button(
+                                    onClick = { onAcceptFriendRequest(req) },
+                                    shape = RoundedCornerShape(999.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                    modifier = Modifier.testTag("accept_friend_${req.id}")
+                                ) {
+                                    Icon(Icons.Rounded.Check, contentDescription = "Accept", modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Accept", style = MaterialTheme.typography.labelMedium)
+                                }
+                                IconButton(
+                                    onClick = { onRemoveOrDeclineFriendship(req) },
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Decline request",
+                                        tint = LiveCoral
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Accepted Friends List
+            item(key = "my_friends_header") {
+                Text(
+                    text = "My Friends (${acceptedFriends.size})",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+            }
+
+            if (acceptedFriends.isEmpty()) {
+                item(key = "friends_empty") {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.empty_friends_title),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = stringResource(R.string.empty_friends_subtitle),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(acceptedFriends, key = { "fr_${it.id}" }) { friend ->
+                    val otherId = friend.otherUserId(currentUserId)
+                    val name = friend.otherName(currentUserId)
+                    val handle = friend.otherHandle(currentUserId)
+                    val color = friend.otherColorHex(currentUserId)
+                    val tier = friend.otherTier(currentUserId)
+
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenUserProfile(otherId) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SpeakingAvatarCircle(
+                                displayName = name,
+                                colorHex = color,
+                                speakingLevel = 0f,
+                                micActive = false,
+                                size = 48.dp,
+                                photoBase64 = directoryPhotoByUid[otherId].orEmpty()
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = usernameColor(tier),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    StaffTierBadge(tier = tier)
+                                }
+                                Text(
+                                    text = "@$handle",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Button(
+                                onClick = { onMessageUser(otherId, name, color, tier) },
+                                shape = RoundedCornerShape(999.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                modifier = Modifier.testTag("chat_friend_$otherId")
+                            ) {
+                                Icon(Icons.Rounded.ChatBubble, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Chat", style = MaterialTheme.typography.labelMedium)
+                            }
+                            IconButton(
+                                onClick = { onRemoveOrDeclineFriendship(friend) },
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PersonRemove,
+                                    contentDescription = "Remove $name from friends",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Outgoing Sent Requests
+            if (outgoingRequests.isNotEmpty()) {
+                item(key = "outgoing_header") {
+                    Text(
+                        text = "Sent Requests (${outgoingRequests.size})",
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                items(outgoingRequests, key = { "out_${it.id}" }) { req ->
+                    val name = req.otherName(currentUserId)
+                    val handle = req.otherHandle(currentUserId)
+                    val color = req.otherColorHex(currentUserId)
+                    val tier = req.otherTier(currentUserId)
+
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SpeakingAvatarCircle(
+                                displayName = name,
+                                colorHex = color,
+                                speakingLevel = 0f,
+                                micActive = false,
+                                size = 42.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = usernameColor(tier)
+                                )
+                                Text(
+                                    text = "@$handle · Request pending",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = { onRemoveOrDeclineFriendship(req) },
+                                shape = RoundedCornerShape(999.dp)
+                            ) {
+                                Text("Cancel", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Find & Add Friends (Directory)
+            item(key = "discover_header") {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Add Friends (${discoverPeople.size})",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            if (discoverPeople.isEmpty()) {
+                item(key = "discover_empty") {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "No new people match your search right now. Anyone who signs into VoxStage appears here automatically.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                }
+            } else {
+                items(discoverPeople, key = { "dir_${it.userId}" }) { person ->
+                    val tier = person.tierEnum()
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenUserProfile(person.userId) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SpeakingAvatarCircle(
+                                displayName = person.displayName,
+                                colorHex = person.avatarColorHex,
+                                speakingLevel = 0f,
+                                micActive = false,
+                                size = 46.dp,
+                                photoBase64 = person.photoBase64
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = person.displayName,
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = usernameColor(tier),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    StaffTierBadge(tier = tier)
+                                }
+                                Text(
+                                    text = "@${person.handle}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.size(44.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = {
+                                            onMessageUser(
+                                                person.userId,
+                                                person.displayName,
+                                                person.avatarColorHex,
+                                                tier
+                                            )
+                                        },
+                                        modifier = Modifier.testTag("message_person_${person.userId}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.ChatBubble,
+                                            contentDescription = "Message ${person.displayName}",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                Button(
+                                    onClick = { onSendFriendRequest(person) },
+                                    shape = RoundedCornerShape(999.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.primary,
+                                        contentColor = Color.White
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                    modifier = Modifier.testTag("add_friend_${person.userId}")
+                                ) {
+                                    Icon(Icons.Rounded.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Add", style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item(key = "friends_bottom_spacer") {
+                Spacer(modifier = Modifier.height(72.dp))
+            }
+        }
+    }
+}

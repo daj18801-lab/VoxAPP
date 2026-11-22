@@ -1,0 +1,6 @@
+{
+  "name": "VoxStage",
+  "description": "Live voice and video chat rooms with real-time messaging and integrated moderation tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

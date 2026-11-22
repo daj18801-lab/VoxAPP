@@ -1,0 +1,499 @@
+package com.example.ui.screens
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.DynamicFeed
+import androidx.compose.material.icons.rounded.HourglassTop
+import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
+import com.example.data.DirectoryEntry
+import com.example.data.Friendship
+import com.example.data.StaffCapabilities
+import com.example.data.StaffTier
+import com.example.data.UiState
+import com.example.ui.components.FullScreenPhotoDialog
+import com.example.ui.components.ProfilePostCard
+import com.example.ui.components.SpeakingAvatarCircle
+import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.TopSnackbarOverlay
+import com.example.ui.components.showTopMessage
+import com.example.ui.components.usernameColor
+import com.example.viewmodel.UserProfileViewModel
+
+@Composable
+fun UserProfileScreen(
+    viewModel: UserProfileViewModel,
+    staffCapabilities: StaffCapabilities,
+    friendship: Friendship?,
+    onBack: () -> Unit,
+    onMessageUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
+    onSendFriendRequest: (DirectoryEntry) -> Unit,
+    onAcceptFriendRequest: (Friendship) -> Unit,
+    onRemoveOrDeclineFriendship: (Friendship) -> Unit
+) {
+    BackHandler(onBack = onBack)
+
+    val entryState by viewModel.directoryEntryState.collectAsStateWithLifecycle()
+    val postsState by viewModel.postsState.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+    var showFullAvatar by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        viewModel.snackbarEvents.collect { msg ->
+            snackbarHostState.showTopMessage(msg)
+        }
+    }
+
+    val entry = (entryState as? UiState.Success)?.data
+    val posts = (postsState as? UiState.Success)?.data.orEmpty()
+    val isSelf = viewModel.currentUserId == viewModel.targetUserId
+    val tier = entry?.tierEnum() ?: StaffTier.USER
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 2.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("user_profile_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "Back",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = entry?.displayName?.ifBlank { "User Profile" } ?: "User Profile",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = usernameColor(tier),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (entry != null) {
+                                Text(
+                                    text = "@${entry.handle}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+            }
+        }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 760.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // Profile Hero Header
+                item(key = "user_profile_hero") {
+                    Surface(
+                        shape = RoundedCornerShape(22.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        when (entryState) {
+                            is UiState.Loading -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(32.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+
+                            is UiState.Error -> {
+                                Text(
+                                    text = (entryState as UiState.Error).message,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(20.dp)
+                                )
+                            }
+
+                            is UiState.Success -> {
+                                val user = entry
+                                if (user == null) {
+                                    Text(
+                                        text = "This profile is not available yet.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(20.dp)
+                                    )
+                                } else {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(18.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        SpeakingAvatarCircle(
+                                            displayName = user.displayName,
+                                            colorHex = user.avatarColorHex,
+                                            speakingLevel = 0f,
+                                            micActive = false,
+                                            size = 92.dp,
+                                            photoBase64 = user.photoBase64,
+                                            modifier = Modifier
+                                                .clickable(enabled = user.photoBase64.isNotBlank()) {
+                                                    showFullAvatar = true
+                                                }
+                                                .testTag("user_profile_avatar")
+                                        )
+
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                text = user.displayName,
+                                                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = usernameColor(tier)
+                                            )
+                                            StaffTierBadge(tier = tier)
+                                        }
+
+                                        Text(
+                                            text = "@${user.handle}",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+
+                                        if (user.bio.isNotBlank()) {
+                                            Text(
+                                                text = user.bio,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+
+                                        // Stats Pill
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.DynamicFeed,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Text(
+                                                    text = "${posts.size} ${if (posts.size == 1) "Post" else "Posts"}",
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+
+                                        // Action Buttons (for other users)
+                                        if (!isSelf) {
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            ) {
+                                                Button(
+                                                    onClick = {
+                                                        onMessageUser(
+                                                            user.userId,
+                                                            user.displayName,
+                                                            user.avatarColorHex,
+                                                            tier
+                                                        )
+                                                    },
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = MaterialTheme.colorScheme.primary,
+                                                        contentColor = Color.White
+                                                    ),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(48.dp)
+                                                        .testTag("user_profile_message_button")
+                                                ) {
+                                                    Icon(
+                                                        Icons.Rounded.ChatBubble,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text("Message")
+                                                }
+
+                                                when {
+                                                    friendship == null -> {
+                                                        OutlinedButton(
+                                                            onClick = { onSendFriendRequest(user) },
+                                                            shape = RoundedCornerShape(999.dp),
+                                                            modifier = Modifier
+                                                                .weight(1f)
+                                                                .height(48.dp)
+                                                                .testTag("user_profile_add_friend_button")
+                                                        ) {
+                                                            Icon(
+                                                                Icons.Rounded.PersonAdd,
+                                                                contentDescription = null,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Text("Add Friend")
+                                                        }
+                                                    }
+
+                                                    friendship.isAccepted() -> {
+                                                        OutlinedButton(
+                                                            onClick = { onRemoveOrDeclineFriendship(friendship) },
+                                                            shape = RoundedCornerShape(999.dp),
+                                                            modifier = Modifier
+                                                                .weight(1f)
+                                                                .height(48.dp)
+                                                                .testTag("user_profile_friends_button")
+                                                        ) {
+                                                            Icon(
+                                                                Icons.Rounded.Check,
+                                                                contentDescription = null,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Text("Friends")
+                                                        }
+                                                    }
+
+                                                    friendship.isIncomingFor(viewModel.currentUserId) -> {
+                                                        Button(
+                                                            onClick = { onAcceptFriendRequest(friendship) },
+                                                            shape = RoundedCornerShape(999.dp),
+                                                            modifier = Modifier
+                                                                .weight(1f)
+                                                                .height(48.dp)
+                                                                .testTag("user_profile_accept_friend_button")
+                                                        ) {
+                                                            Icon(
+                                                                Icons.Rounded.Check,
+                                                                contentDescription = null,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Text("Accept")
+                                                        }
+                                                    }
+
+                                                    else -> {
+                                                        OutlinedButton(
+                                                            onClick = { onRemoveOrDeclineFriendship(friendship) },
+                                                            shape = RoundedCornerShape(999.dp),
+                                                            modifier = Modifier
+                                                                .weight(1f)
+                                                                .height(48.dp)
+                                                                .testTag("user_profile_cancel_request_button")
+                                                        ) {
+                                                            Icon(
+                                                                Icons.Rounded.HourglassTop,
+                                                                contentDescription = null,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Text("Requested")
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item(key = "posts_section_header") {
+                    Text(
+                        text = "Posts (${posts.size})",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                }
+
+                when (postsState) {
+                    is UiState.Loading -> {
+                        item(key = "posts_loading") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 32.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+
+                    is UiState.Error -> {
+                        item(key = "posts_error") {
+                            Text(
+                                text = (postsState as UiState.Error).message,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+
+                    is UiState.Success -> {
+                        if (posts.isEmpty()) {
+                            item(key = "posts_empty") {
+                                Surface(
+                                    shape = RoundedCornerShape(18.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(24.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DynamicFeed,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                        Text(
+                                            text = stringResource(R.string.empty_posts_title),
+                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                        Text(
+                                            text = stringResource(R.string.empty_other_posts_subtitle),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            items(posts, key = { it.id }) { post ->
+                                ProfilePostCard(
+                                    post = post,
+                                    currentUserId = viewModel.currentUserId,
+                                    canDelete = post.authorId == viewModel.currentUserId || staffCapabilities.isStaff,
+                                    latestAuthorPhotoBase64 = entry?.photoBase64,
+                                    onAuthorClick = null,
+                                    onToggleLike = { viewModel.toggleLikePost(post) },
+                                    onDelete = { viewModel.deletePost(post) }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item(key = "user_profile_bottom_spacer") {
+                    Spacer(modifier = Modifier.height(36.dp))
+                }
+            }
+        }
+        }
+
+        TopSnackbarOverlay(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
+    }
+
+    if (showFullAvatar && !entry?.photoBase64.isNullOrBlank()) {
+        FullScreenPhotoDialog(
+            photoBase64 = entry?.photoBase64.orEmpty(),
+            contentDescription = "${entry?.displayName.orEmpty()} profile picture",
+            onDismiss = { showFullAvatar = false }
+        )
+    }
+}
