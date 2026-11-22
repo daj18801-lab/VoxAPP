@@ -683,7 +683,7 @@ private fun AuthenticatedVoxStageApp(
                                 )
                             }
 
-                            composable(
+            
                                                         composable(
                                 route = ROUTE_ROOM,
                                 arguments = listOf(navArgument("roomId") { type = NavType.StringType })
