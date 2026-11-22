@@ -706,7 +706,7 @@ class RoomViewModel(
         }
     }
 
-    fun sendAlertToUser(
+
         fun sendAlertToUser(
         targetUserId: String,
         targetName: String,
