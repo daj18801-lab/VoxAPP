@@ -684,6 +684,7 @@ private fun AuthenticatedVoxStageApp(
                             }
 
                             composable(
+                                                        composable(
                                 route = ROUTE_ROOM,
                                 arguments = listOf(navArgument("roomId") { type = NavType.StringType })
                             ) { entry ->
@@ -694,6 +695,7 @@ private fun AuthenticatedVoxStageApp(
                                         initializer {
                                             val db = FirebaseFirestore.getInstance()
                                             RoomViewModel(
+                                                context = context,
                                                 repository = VoxStageRepository(db),
                                                 currentUserId = currentUserId,
                                                 roomId = roomId,
@@ -702,6 +704,7 @@ private fun AuthenticatedVoxStageApp(
                                         }
                                     }
                                 )
+
                                 val effectiveProfile = userProfile ?: UserProfile(
                                     userId = currentUserId,
                                     displayName = initialDisplayName.ifBlank { "Studio Host" },
