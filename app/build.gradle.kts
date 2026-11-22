@@ -48,4 +48,4 @@ android {
     debug {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
-  
+  }
