@@ -445,4 +445,476 @@ class RoomViewModel(
                 speakingLevel = level
             )
         }
+    }    fun sendChatMessage(rawText: String, profile: UserProfile, isReaction: Boolean = false) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        val caps = _staffCapabilities.value
+        if (!caps.isAdmin) {
+            if (profile.globallyBanned) {
+                _events.tryEmit("Your account is banned from sending messages.")
+                return
+            }
+            if (profile.currentlySuspended()) {
+                _events.tryEmit("You are suspended for ${profile.remainingSuspensionLabel()}.")
+                return
+            }
+            if (room.mutedUserIds.contains(currentUserId)) {
+                _events.tryEmit("You are currently muted in this room.")
+                return
+            }
+            if (room.bannedUserIds.contains(currentUserId)) {
+                _events.tryEmit("You are banned from this room.")
+                return
+            }
+        }
+
+        val isModOrStaff = room.hasModPrivileges(currentUserId, caps.tier)
+        if (!isModOrStaff && room.slowModeSeconds > 0L) {
+            val remaining = ModerationEngine.remainingSlowModeSeconds(
+                lastSentEpochMs = lastMessageSentMs,
+                slowModeSeconds = room.slowModeSeconds
+            )
+            if (remaining > 0) {
+                _events.tryEmit("Slow mode active — wait ${remaining}s before sending.")
+                startSlowModeCountdown(remaining)
+                return
+            }
+        }
+
+        val participants = (participantsState.value as? UiState.Success)?.data.orEmpty()
+        val myRole = participants.firstOrNull { it.userId == currentUserId }?.roleEnum()
+            ?: if (room.hostId == currentUserId) ParticipantRole.HOST
+            else if (caps.isStaff) ParticipantRole.MODERATOR
+            else ParticipantRole.SPEAKER
+
+        if (isReaction) {
+            viewModelScope.launch {
+                repository.sendMessage(
+                    roomId = roomId,
+                    senderName = profile.displayName,
+                    senderRole = myRole,
+                    senderTier = caps.tier,
+                    text = rawText,
+                    messageType = MessageType.REACTION,
+                    flaggedByAutoMod = false
+                ).onFailure { err ->
+                    _events.tryEmit(err.message ?: "Failed to send reaction")
+                }
+            }
+            return
+        }
+
+        when (val eval = ModerationEngine.evaluateMessage(rawText, room)) {
+            is AutoModEvaluation.Blocked -> {
+                _events.tryEmit(eval.reason)
+                if (eval.matchedTerms.isNotEmpty()) {
+                    viewModelScope.launch {
+                        repository.logAutoModTrigger(
+                            roomId = roomId,
+                            actorName = profile.displayName,
+                            reason = eval.reason
+                        )
+                    }
+                }
+            }
+
+            is AutoModEvaluation.Masked -> {
+                lastMessageSentMs = System.currentTimeMillis()
+                if (!isModOrStaff && room.slowModeSeconds > 0L) {
+                    startSlowModeCountdown(room.slowModeSeconds.toInt())
+                }
+                viewModelScope.launch {
+                    repository.sendMessage(
+                        roomId = roomId,
+                        senderName = profile.displayName,
+                        senderRole = myRole,
+                        senderTier = caps.tier,
+                        text = eval.sanitizedText,
+                        messageType = MessageType.TEXT,
+                        flaggedByAutoMod = true
+                    ).onSuccess {
+                        _events.tryEmit("Auto-Mod masked restricted words in your message.")
+                        repository.logAutoModTrigger(
+                            roomId = roomId,
+                            actorName = profile.displayName,
+                            reason = "Auto-Mod masked terms: ${eval.matchedTerms.joinToString(", ")}"
+                        )
+                    }.onFailure { err ->
+                        _events.tryEmit(err.message ?: "Could not send message")
+                    }
+                }
+            }
+
+            is AutoModEvaluation.Clean -> {
+                lastMessageSentMs = System.currentTimeMillis()
+                if (!isModOrStaff && room.slowModeSeconds > 0L) {
+                    startSlowModeCountdown(room.slowModeSeconds.toInt())
+                }
+                viewModelScope.launch {
+                    repository.sendMessage(
+                        roomId = roomId,
+                        senderName = profile.displayName,
+                        senderRole = myRole,
+                        senderTier = caps.tier,
+                        text = eval.text,
+                        messageType = MessageType.TEXT,
+                        flaggedByAutoMod = false
+                    ).onFailure { err ->
+                        _events.tryEmit(err.message ?: "Could not send message")
+                    }
+                }
+            }
+        }
     }
+
+    private fun startSlowModeCountdown(seconds: Int) {
+        slowModeJob?.cancel()
+        slowModeJob = viewModelScope.launch {
+            var remaining = seconds
+            while (remaining > 0) {
+                _slowModeCountdown.value = remaining
+                delay(1000L)
+                remaining--
+            }
+            _slowModeCountdown.value = 0
+        }
+    }
+
+    fun editRoomDetails(actorName: String, newTitle: String, newTopic: String) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.editRoomDetails(
+                room = room,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier,
+                newTitle = newTitle,
+                newTopic = newTopic
+            ).onSuccess {
+                val trimmed = newTitle.trim()
+                _events.tryEmit(if (trimmed.isEmpty()) "Room name deleted" else "Room renamed to \"$trimmed\"")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not edit room")
+            }
+        }
+    }
+
+    fun updateSafetySettings(
+        actorName: String,
+        autoModEnabled: Boolean? = null,
+        autoModBlockMode: Boolean? = null,
+        linksBlocked: Boolean? = null,
+        roomLocked: Boolean? = null,
+        stageMicLocked: Boolean? = null,
+        slowModeSeconds: Long? = null,
+        videoEnabled: Boolean? = null,
+        blockedWords: List<String>? = null,
+        actionType: ModActionType = ModActionType.SETTINGS,
+        reason: String = "Updated safety settings"
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.updateRoomModerationSettings(
+                room = room,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier,
+                autoModEnabled = autoModEnabled ?: room.autoModEnabled,
+                autoModBlockMode = autoModBlockMode ?: room.autoModBlockMode,
+                linksBlocked = linksBlocked ?: room.linksBlocked,
+                roomLocked = roomLocked ?: room.roomLocked,
+                stageMicLocked = stageMicLocked ?: room.stageMicLocked,
+                slowModeSeconds = slowModeSeconds ?: room.slowModeSeconds,
+                videoEnabled = videoEnabled ?: room.videoEnabled,
+                blockedWords = blockedWords ?: room.blockedWords,
+                actionType = actionType,
+                reason = reason
+            ).onSuccess {
+                _events.tryEmit(reason)
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not update room safety")
+            }
+        }
+    }
+
+    fun toggleMuteParticipant(
+        targetUserId: String,
+        targetName: String,
+        actorName: String,
+        mute: Boolean
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setParticipantMuted(
+                room = room,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier,
+                mute = mute,
+                reason = if (mute) "Muted by $actorName" else "Unmuted by $actorName"
+            ).onSuccess {
+                _events.tryEmit(if (mute) "Muted $targetName" else "Unmuted $targetName")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Action failed")
+            }
+        }
+    }
+
+    fun bounceUser(
+        targetUserId: String,
+        targetName: String,
+        actorName: String,
+        reason: String
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.bounceParticipant(
+                room = room,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier,
+                reason = reason
+            ).onSuccess {
+                _events.tryEmit("Bounced $targetName from the room")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not bounce user")
+            }
+        }
+    }
+
+    fun suspendUser(
+        targetUserId: String,
+        targetName: String,
+        actorName: String,
+        durationMinutes: Long,
+        reason: String
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.suspendUserForMinutes(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier,
+                durationMinutes = durationMinutes,
+                reason = reason,
+                room = room
+            ).onSuccess {
+                _events.tryEmit("Suspended $targetName for${durationMinutes}m")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not suspend user")
+            }
+        }
+    }
+
+    fun sendAlertToUser(
+        targetUserId: String,
+        targetName: String,
+        senderName: String,
+        title: String,
+        message: String,
+        severity: AlertSeverity
+    ) {
+        viewModelScope.launch {
+            repository.sendUserAlert(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                senderName = senderName,
+                senderTier = _staffCapabilities.value.tier,
+    fun adminEditUserInRoom(
+        targetUserId: String,
+        displayName: String,
+        handle: String,
+        bio: String,
+        globallyBanned: Boolean,
+        disableCreateRoom: Boolean,
+        disableEnterRoom: Boolean,
+        disableMic: Boolean,
+        disableVideo: Boolean,
+        suspendedUntilMillis: Long,
+        suspensionReason: String,
+        actorName: String
+    ) {
+        viewModelScope.launch {
+            repository.adminEditUserProfileAndRestrictions(
+                targetUserId = targetUserId,
+                displayName = displayName,
+                handle = handle,
+                bio = bio,
+                globallyBanned = globallyBanned,
+                disableCreateRoom = disableCreateRoom,
+                disableEnterRoom = disableEnterRoom,
+                disableMic = disableMic,
+                disableVideo = disableVideo,
+                suspendedUntilMillis = suspendedUntilMillis,
+                suspensionReason = suspensionReason,
+                actorName = actorName,
+                roomId = roomId
+            ).onSuccess {
+                _events.tryEmit("Updated user $displayName")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not edit user")
+            }
+        }
+    }
+
+    fun changeParticipantRole(
+        targetUserId: String,
+        targetName: String,
+        actorName: String,
+        newRole: ParticipantRole
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setParticipantRole(
+                room = room,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier,
+                newRole = newRole
+            ).onSuccess {
+                _events.tryEmit("$targetName is now ${newRole.label}")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not update role")
+            }
+        }
+    }
+
+    fun kickOrBanUser(
+        targetUserId: String,
+        targetName: String,
+        actorName: String,
+        ban: Boolean,
+        reason: String
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.kickOrBanParticipant(
+                room = room,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier,
+                ban = ban,
+                reason = reason
+            ).onSuccess {
+                _events.tryEmit(if (ban) "Banned $targetName" else "Kicked $targetName from room")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not remove user")
+            }
+        }
+    }
+
+    fun unbanUser(targetUserId: String, actorName: String) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.unbanUser(room, targetUserId, actorName, _staffCapabilities.value.tier)
+                .onSuccess { _events.tryEmit("User unbanned") }
+                .onFailure { err -> _events.tryEmit(err.message ?: "Could not unban user") }
+        }
+    }
+
+    fun redactMessage(message: ChatMessage, actorName: String) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.redactMessage(room, message, actorName, _staffCapabilities.value.tier)
+                .onSuccess { _events.tryEmit("Message redacted") }
+                .onFailure { err -> _events.tryEmit(err.message ?: "Could not redact message") }
+        }
+    }
+
+    fun submitReport(
+        reporterName: String,
+        targetUserId: String,
+        targetName: String,
+        category: ReportCategory,
+        details: String
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.submitSafetyReport(
+                room = room,
+                reporterName = reporterName,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                category = category,
+                details = details
+            ).onSuccess {
+                _events.tryEmit("Safety report submitted for review")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not submit report")
+            }
+        }
+    }
+
+    fun blockUser(targetUserId: String, targetName: String, currentBlocked: List<String>) {
+        viewModelScope.launch {
+            repository.setUserBlocked(targetUserId, block = true, currentBlocked = currentBlocked)
+                .onSuccess { _events.tryEmit("Blocked $targetName. Their messages are now hidden.") }
+                .onFailure { err -> _events.tryEmit(err.message ?: "Could not block user") }
+        }
+    }
+
+    fun closeRoomAsHostOrAdmin(actorName: String, onClosed: () -> Unit) {
+        isLeavingVoluntarily = true
+        viewModelScope.launch {
+            withContext(NonCancellable) {
+                stopHardwareCapture()
+                liveKitManager.disconnect()
+                releaseAdminMicPriorityIfHeld()
+                val count = (roomState.value as? UiState.Success)?.data?.participantCount ?: 0L
+                repository.leaveRoom(roomId, count, _isCurrentlyInvisible.value)
+            }
+            repository.closeRoom(roomId, actorName)
+                .onSuccess { onClosed() }
+                .onFailure { err -> _events.tryEmit(err.message ?: "Could not close room") }
+        }
+    }
+
+    fun leaveRoomAndExit(onLeft: () -> Unit) {
+        isLeavingVoluntarily = true
+        viewModelScope.launch {
+            withContext(NonCancellable) {
+                stopHardwareCapture()
+                liveKitManager.disconnect()
+                releaseAdminMicPriorityIfHeld()
+                val count = (roomState.value as? UiState.Success)?.data?.participantCount ?: 0L
+                repository.leaveRoom(roomId, count, _isCurrentlyInvisible.value)
+            }
+            onLeft()
+        }
+    }
+
+    private suspend fun releaseAdminMicPriorityIfHeld() {
+        val roomHasPriority = (roomState.value as? UiState.Success)?.data?.adminMicPriorityActive == true
+        if (adminPriorityClaimedByMe || (_staffCapabilities.value.isAdmin && roomHasPriority)) {
+            adminPriorityClaimedByMe = false
+            repository.setAdminMicPriority(roomId, false)
+        }
+    }
+
+    private fun stopHardwareCapture() {
+        levelSyncJob?.cancel()
+        levelSyncJob = null
+        voiceMeterEngine.stop()
+        viewModelScope.launch {
+            liveKitManager.setMicEnabled(false)
+            liveKitManager.setCameraEnabled(false)
+        }
+        _isMicActive.value = false
+        _isCamActive.value = false
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopHardwareCapture()
+        liveKitManager.disconnect()
+        slowModeJob?.cancel()
+    }
+
+    private companion object {
+        const val TAG = "RoomViewModel"
+        const val STOP_TIMEOUT_MS = 5000L
+    }
+}
+
