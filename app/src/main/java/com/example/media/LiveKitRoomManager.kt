@@ -35,8 +35,17 @@ class LiveKitRoomManager(private val appContext: Context) {
     private val _localVideoTrack = MutableStateFlow<LocalVideoTrack?>(null)
     val localVideoTrack: StateFlow<LocalVideoTrack?> = _localVideoTrack.asStateFlow()
 
+        private var eventJob: Job? = null
+
+    private val _isConnected = MutableStateFlow(false)
+    val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+
+    private val _localVideoTrack = MutableStateFlow<LocalVideoTrack?>(null)
+    val localVideoTrack: StateFlow<LocalVideoTrack?> = _localVideoTrack.asStateFlow()
+
     private val _remoteVideoTracks = MutableStateFlow>(emptyMap())
     val remoteVideoTracks: StateFlow> = _remoteVideoTracks.asStateFlow()
+
 
     suspend fun connectToRoom(
         roomName: String,
