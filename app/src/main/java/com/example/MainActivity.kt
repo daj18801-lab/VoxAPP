@@ -51,7 +51,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
-import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -196,11 +195,7 @@ private fun AuthenticatedVoxStageApp(
         key = currentUserId,
         factory = viewModelFactory {
             initializer {
-                val app = checkNotNull(this[APPLICATION_KEY]) {
-                    "APPLICATION_KEY missing from CreationExtras"
-                }
-                val databaseId = app.getString(R.string.firestore_database_id)
-                val db = FirebaseFirestore.getInstance(databaseId)
+                val db = FirebaseFirestore.getInstance()
                 MainViewModel(
                     repository = VoxStageRepository(db),
                     currentUserId = currentUserId,
@@ -432,7 +427,6 @@ private fun AuthenticatedVoxStageApp(
                             }
                         }
                     }
-
                     Box(modifier = Modifier.weight(1f)) {
                         NavHost(
                             navController = navController,
@@ -619,11 +613,7 @@ private fun AuthenticatedVoxStageApp(
                                     key = "user_profile_${currentUserId}_$targetUserId",
                                     factory = viewModelFactory {
                                         initializer {
-                                            val app = checkNotNull(this[APPLICATION_KEY]) {
-                                                "APPLICATION_KEY missing from CreationExtras"
-                                            }
-                                            val databaseId = app.getString(R.string.firestore_database_id)
-                                            val db = FirebaseFirestore.getInstance(databaseId)
+                                            val db = FirebaseFirestore.getInstance()
                                             UserProfileViewModel(
                                                 repository = VoxStageRepository(db),
                                                 currentUserId = currentUserId,
@@ -666,11 +656,7 @@ private fun AuthenticatedVoxStageApp(
                                     key = "dm_${currentUserId}_$threadId",
                                     factory = viewModelFactory {
                                         initializer {
-                                            val app = checkNotNull(this[APPLICATION_KEY]) {
-                                                "APPLICATION_KEY missing from CreationExtras"
-                                            }
-                                            val databaseId = app.getString(R.string.firestore_database_id)
-                                            val db = FirebaseFirestore.getInstance(databaseId)
+                                            val db = FirebaseFirestore.getInstance()
                                             DirectChatViewModel(
                                                 repository = VoxStageRepository(db),
                                                 currentUserId = currentUserId,
@@ -706,11 +692,7 @@ private fun AuthenticatedVoxStageApp(
                                     key = "${currentUserId}_$roomId",
                                     factory = viewModelFactory {
                                         initializer {
-                                            val app = checkNotNull(this[APPLICATION_KEY]) {
-                                                "APPLICATION_KEY missing from CreationExtras"
-                                            }
-                                            val databaseId = app.getString(R.string.firestore_database_id)
-                                            val db = FirebaseFirestore.getInstance(databaseId)
+                                            val db = FirebaseFirestore.getInstance()
                                             RoomViewModel(
                                                 repository = VoxStageRepository(db),
                                                 currentUserId = currentUserId,
