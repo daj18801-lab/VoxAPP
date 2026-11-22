@@ -707,6 +707,7 @@ class RoomViewModel(
     }
 
     fun sendAlertToUser(
+        fun sendAlertToUser(
         targetUserId: String,
         targetName: String,
         senderName: String,
@@ -720,6 +721,58 @@ class RoomViewModel(
                 targetName = targetName,
                 senderName = senderName,
                 senderTier = _staffCapabilities.value.tier,
+                roomId = roomId,
+                title = title,
+                message = message,
+                severity = severity
+            ).onSuccess {
+                _events.tryEmit("Alert sent to $targetName")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not send alert")
+            }
+        }
+    }
+
+    fun setStaffTierInRoom(
+        targetUserId: String,
+        targetName: String,
+        tier: StaffTier,
+        canEnterInvisible: Boolean,
+        adminName: String
+    ) {
+        viewModelScope.launch {
+            repository.setUserStaffRole(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                targetEmail = "",
+                tier = tier,
+                canEnterInvisible = tier == StaffTier.ADMIN || canEnterInvisible,
+                adminName = adminName,
+                roomId = roomId
+            ).onSuccess {
+                val msg = when (tier) {
+                    StaffTier.ADMIN -> "$targetName promoted to App Administrator"
+                    StaffTier.SUPPORT -> "$targetName promoted to Support Staff"
+                    StaffTier.USER -> "Removed staff privileges from $targetName"
+                }
+                _events.tryEmit(msg)
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not update staff role")
+            }
+        }
+    }
+
+    fun fetchTargetUserProfile(targetUserId: String, onLoaded: (UserProfile?) -> Unit) {
+        viewModelScope.launch {
+            repository.fetchUserProfileForStaff(targetUserId)
+                .onSuccess { onLoaded(it) }
+                .onFailure { err ->
+                    _events.tryEmit(err.message ?: "Could not load user profile")
+                    onLoaded(null)
+                }
+        }
+    }
+
     fun adminEditUserInRoom(
         targetUserId: String,
         displayName: String,
