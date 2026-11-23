@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,9 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -91,6 +91,7 @@ import com.example.ui.theme.ModAmber
 import com.example.ui.theme.PresenceOnlineGreen
 import kotlinx.coroutines.flow.Flow
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DiscoverUsersScreen(
     currentUserId: String,
@@ -360,11 +361,12 @@ fun DiscoverUsersScreen(
                         },
                         if (openTicketCount > 0) "Support ($openTicketCount)" else "Support"
                     )
-                    LazyRow(
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        itemsIndexed(tabs) { idx, label ->
+                        tabs.forEachIndexed { idx, label ->
                             FilterChip(
                                 selected = selectedTab == idx,
                                 onClick = { selectedTab = idx },

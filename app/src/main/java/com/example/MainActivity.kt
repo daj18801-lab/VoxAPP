@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -103,6 +104,7 @@ import com.example.ui.screens.RoomScreen
 import com.example.ui.screens.SafetyScreen
 import com.example.ui.screens.TrialVoxStageApp
 import com.example.ui.components.AgeVerificationDialog
+import com.example.ui.components.FloatingPttOverlayBubble
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.showTopMessage
 import com.example.ui.screens.UserProfileScreen
@@ -343,6 +345,32 @@ private fun AuthenticatedVoxStageApp(
     var incomingQuickReplyThread by remember { mutableStateOf<DirectThread?>(null) }
     var quickReplyDraft by remember { mutableStateOf("") }
     var incomingFriendAlertThread by remember { mutableStateOf<DirectThread?>(null) }
+    val pttActiveThreadId by LivePttSessionManager.activeThreadId.collectAsStateWithLifecycle()
+    val pttActivePeerName by LivePttSessionManager.activePeerName.collectAsStateWithLifecycle()
+    val pttIsConnected by LivePttSessionManager.isConnected.collectAsStateWithLifecycle()
+    val pttIsConnecting by LivePttSessionManager.isConnecting.collectAsStateWithLifecycle()
+    val pttIsTransmitting by LivePttSessionManager.isTransmitting.collectAsStateWithLifecycle()
+    val pttRemoteSpeaker by LivePttSessionManager.remoteSpeakingName.collectAsStateWithLifecycle()
+    var canDrawSystemOverlay by remember {
+        mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context))
+    }
+    var dismissedInAppFloatingPttThreadId by remember { mutableStateOf<String?>(null) }
+    val appLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(appLifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                canDrawSystemOverlay =
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+            }
+        }
+        appLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { appLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(pttActiveThreadId) {
+        if (pttActiveThreadId == null || pttActiveThreadId != dismissedInAppFloatingPttThreadId) {
+            dismissedInAppFloatingPttThreadId = null
+        }
+    }
     val viewerIsAdultVerified = userProfile?.isAdult18Plus() == true
     val liveRoomsList = remember(publicRoomsState) {
         (publicRoomsState as? UiState.Success)?.data.orEmpty()
@@ -1064,6 +1092,39 @@ private fun AuthenticatedVoxStageApp(
                 modifier = Modifier.align(Alignment.TopCenter)
             )
 
+            // In-app draggable Floating PTT button fallback when system overlay permission
+            // isn't granted yet (when granted, PrivateCallForegroundService floats over all apps & in-app).
+            val activePttTid = pttActiveThreadId
+            if (!canDrawSystemOverlay &&
+                !activePttTid.isNullOrBlank() &&
+                (pttIsConnected || pttIsConnecting) &&
+                dismissedInAppFloatingPttThreadId != activePttTid
+            ) {
+                FloatingPttOverlayBubble(
+                    peerName = pttActivePeerName,
+                    isTransmitting = pttIsTransmitting,
+                    remoteSpeakerName = pttRemoteSpeaker,
+                    onSetTransmitting = { transmitting ->
+                        LivePttSessionManager.setTransmitting(
+                            context = context,
+                            transmitting = transmitting,
+                            threadId = activePttTid,
+                            peerName = pttActivePeerName
+                        )
+                    },
+                    onOpenChat = {
+                        navController.navigate("dm/$activePttTid") {
+                            launchSingleTop = true
+                        }
+                    },
+                    onDismiss = {
+                        LivePttSessionManager.setTransmitting(context, false)
+                        dismissedInAppFloatingPttThreadId = activePttTid
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd)
+                )
+            }
+
             // Global real-time Admin / Support Alert Modal
             unreadAlerts.firstOrNull()?.let { latestAlert ->
                 IncomingAlertModalDialog(
@@ -1167,13 +1228,11 @@ private fun AuthenticatedVoxStageApp(
                         TextButton(
                             onClick = {
                                 incomingQuickReplyThread = null
-                                navController.navigate("dm/${popupThread.id}") {
-                                    launchSingleTop = true
-                                }
+                                quickReplyDraft = ""
                             },
-                            modifier = Modifier.testTag("dm_popup_open_chat_button")
+                            modifier = Modifier.testTag("dm_popup_dismiss_button")
                         ) {
-                            Text("Open Chat")
+                            Text("Dismiss")
                         }
                     }
                 )

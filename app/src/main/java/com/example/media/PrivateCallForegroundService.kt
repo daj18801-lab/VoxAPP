@@ -100,7 +100,10 @@ class PrivateCallForegroundService : Service() {
         val pttTransmitting = intent?.getBooleanExtra(EXTRA_PTT_TRANSMITTING, false) == true
         val showFloatingOverlay = intent?.getBooleanExtra(EXTRA_SHOW_FLOATING_OVERLAY, false) == true
 
-        if (threadId.isNotBlank()) currentThreadId = threadId
+        if (threadId.isNotBlank() && threadId != currentThreadId) {
+            overlayDismissedByUserForBackgroundCycle = false
+            currentThreadId = threadId
+        }
         if (peerName.isNotBlank()) currentPeerName = peerName
 
         ensureCallChannel(this)

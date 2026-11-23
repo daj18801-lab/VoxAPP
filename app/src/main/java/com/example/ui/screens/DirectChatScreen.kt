@@ -1164,7 +1164,7 @@ fun DirectChatScreen(
                                                     modifier = Modifier.size(16.dp)
                                                 )
                                                 Text(
-                                                    text = "Tap to allow the floating PTT button when minimized",
+                                                    text = "Floating PTT is active in-app · Tap to also float over other apps",
                                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                                                     modifier = Modifier.weight(1f)
@@ -1187,7 +1187,7 @@ fun DirectChatScreen(
                                             )
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text(
-                                                text = "Live audio stream · Floating PTT button pops up in background",
+                                                text = "Live audio stream · Floating PTT stays active in-app & in background",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -1231,7 +1231,7 @@ fun DirectChatScreen(
                                                     color = MaterialTheme.colorScheme.onSurface
                                                 )
                                                 Text(
-                                                    text = "Live audio streaming & floating background button activate once both users select PTT.",
+                                                    text = "Live audio streaming & floating PTT button activate once both users select PTT.",
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )

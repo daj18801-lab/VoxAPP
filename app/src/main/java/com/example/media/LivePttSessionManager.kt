@@ -62,7 +62,17 @@ object LivePttSessionManager {
 
     fun onAppForegrounded(context: Context) {
         _isAppInBackground.value = false
-        PrivateCallForegroundService.hideFloatingPttOverlay(context)
+        val tid = _activeThreadId.value
+        val peer = _activePeerName.value
+        if (!tid.isNullOrBlank() && (_isConnected.value || _isConnecting.value)) {
+            PrivateCallForegroundService.startPtt(
+                context = context,
+                threadId = tid,
+                peerName = peer,
+                isTransmitting = _isTransmitting.value,
+                showFloatingOverlay = true
+            )
+        }
     }
 
     fun onAppBackgrounded(context: Context) {
@@ -105,7 +115,7 @@ object LivePttSessionManager {
                 threadId = threadId,
                 peerName = cleanPeer,
                 isTransmitting = _isTransmitting.value,
-                showFloatingOverlay = _isAppInBackground.value
+                showFloatingOverlay = true
             )
             return
         }
@@ -183,7 +193,7 @@ object LivePttSessionManager {
                     threadId = threadId,
                     peerName = peerName,
                     isTransmitting = false,
-                    showFloatingOverlay = _isAppInBackground.value
+                    showFloatingOverlay = true
                 )
                 true
             },
@@ -240,7 +250,7 @@ object LivePttSessionManager {
                     threadId = targetThreadId,
                     peerName = targetPeer,
                     isTransmitting = true,
-                    showFloatingOverlay = _isAppInBackground.value
+                    showFloatingOverlay = true
                 )
             } else {
                 _isTransmitting.value = false
@@ -251,7 +261,7 @@ object LivePttSessionManager {
                         threadId = targetThreadId,
                         peerName = targetPeer,
                         isTransmitting = false,
-                        showFloatingOverlay = _isAppInBackground.value
+                        showFloatingOverlay = true
                     )
                 }
             }
