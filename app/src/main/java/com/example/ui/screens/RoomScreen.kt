@@ -774,7 +774,7 @@ private fun RoomTopBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontaLIVE=6.dp, vertical = 8.dp),
+                .padding(horizontal =6.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
