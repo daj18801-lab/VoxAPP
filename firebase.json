@@ -1,7 +1,7 @@
 {
   "firestore": [
     {
-      "database": "ai-studio-android-voxstage-cfbe5b0e-1509-48fb-9d96-93431c0b6206",
+      "database": "(default)",
       "rules": "firestore.rules"
     }
   ],
