@@ -38,6 +38,9 @@ class LiveKitRoomManager(private val appContext: Context) {
     private val _remoteVideoTracks = MutableStateFlow(emptyMap<String, RemoteVideoTrack>())
     val remoteVideoTracks = _remoteVideoTracks.asStateFlow()
 
+    private val _remoteActiveSpeakerName = MutableStateFlow<String?>(null)
+    val remoteActiveSpeakerName: StateFlow<String?> = _remoteActiveSpeakerName.asStateFlow()
+
     suspend fun connectToRoom(
         roomName: String,
         participantIdentity: String,
@@ -74,10 +77,20 @@ class LiveKitRoomManager(private val appContext: Context) {
                             _remoteVideoTracks.update { it - identity }
                         }
                     }
+                    is RoomEvent.ActiveSpeakersChanged -> {
+                        val localId = room.localParticipant.identity?.value
+                        val remoteSpeaker = event.speakers.firstOrNull { speaker ->
+                            speaker.identity?.value != localId
+                        }
+                        _remoteActiveSpeakerName.value = remoteSpeaker?.let { sp ->
+                            sp.name?.takeIf { it.isNotBlank() } ?: sp.identity?.value ?: "Partner"
+                        }
+                    }
                     is RoomEvent.Disconnected -> {
                         _isConnected.value = false
                         _localVideoTrack.value = null
                         _remoteVideoTracks.value = emptyMap()
+                        _remoteActiveSpeakerName.value = null
                     }
                     else -> Unit
                 }
@@ -110,6 +123,7 @@ class LiveKitRoomManager(private val appContext: Context) {
         _isConnected.value = false
         _localVideoTrack.value = null
         _remoteVideoTracks.value = emptyMap()
+        _remoteActiveSpeakerName.value = null
     }
 
     private suspend fun fetchConnectionDetails(

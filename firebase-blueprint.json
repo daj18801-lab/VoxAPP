@@ -303,6 +303,7 @@
         "lastMessageText": { "type": "string" },
         "lastMessageSenderId": { "type": "string" },
         "unreadByUserIds": { "type": "array" },
+        "pttEnabledUserIds": { "type": "array", "description": "Participant UIDs who enabled Live Push-to-Talk on this thread." },
         "lastAlertSenderId": { "type": "string", "description": "UID of friend who last sent a ring & vibrate attention alert." },
         "lastAlertSenderName": { "type": "string", "description": "Display name of friend who last sent an attention alert." },
         "lastAlertAtMillis": { "type": "integer", "description": "Epoch ms of the last attention alert (enforces 1 alert per 5 minutes)." },

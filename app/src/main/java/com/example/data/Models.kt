@@ -561,6 +561,7 @@ data class DirectThread(
     val lastMessageText: String = "",
     val lastMessageSenderId: String = "",
     val unreadByUserIds: List<String> = emptyList(),
+    val pttEnabledUserIds: List<String> = emptyList(),
     val lastAlertSenderId: String = "",
     val lastAlertSenderName: String = "",
     val lastAlertAtMillis: Long = 0L,
@@ -577,6 +578,10 @@ data class DirectThread(
     fun isUserKicked(uid: String): Boolean = kickedUserIds.contains(uid)
     fun isBlockedBy(uid: String): Boolean = blockedByUserIds.contains(uid)
     fun hasAnyBlock(): Boolean = blockedByUserIds.isNotEmpty()
+    fun isPttEnabledFor(uid: String): Boolean = pttEnabledUserIds.contains(uid)
+    fun isOtherPttEnabled(myUid: String): Boolean = pttEnabledUserIds.any { it != myUid }
+    fun isMutualPttActive(myUid: String): Boolean =
+        isPttEnabledFor(myUid) && pttEnabledUserIds.any { it != myUid }
     fun displayTitle(myUid: String): String {
         if (!isGroup) return otherName(myUid)
         if (groupName.isNotBlank()) return groupName

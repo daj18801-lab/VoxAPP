@@ -1,5 +1,6 @@
 package com.example.media
 
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -7,47 +8,107 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.Settings
 import android.util.Log
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.notifications.DirectMessageNotificationHelper
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
- * Play-Policy-compliant microphone Foreground Service that keeps an active Private Message
- * voice call running uninterrupted when the user minimizes the app or locks the screen.
+ * Microphone Foreground Service that:
+ * 1. Keeps active Private Message voice calls running uninterrupted when the app is minimized.
+ * 2. Keeps Mutual Live Push-to-Talk walkie-talkie audio streaming alive in the background AND
+ *    displays a draggable floating Push-to-Talk button overlay when the app is minimized
+ *    (if `Settings.canDrawOverlays` is granted, with a notification Talk/Mute fallback otherwise).
  */
 class PrivateCallForegroundService : Service() {
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var windowManager: WindowManager? = null
+    private var floatingRootView: View? = null
+    private var floatingLayoutParams: WindowManager.LayoutParams? = null
+    private var floatingButtonCircle: TextView? = null
+    private var floatingPeerPill: TextView? = null
+    private var overlayStateJob: Job? = null
+    private var currentThreadId: String = ""
+    private var currentPeerName: String = "Private Chat"
+    private var overlayDismissedByUserForBackgroundCycle: Boolean = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
-        val threadId = intent?.getStringExtra(EXTRA_THREAD_ID).orEmpty()
-        val peerName = intent?.getStringExtra(EXTRA_PEER_NAME).orEmpty().ifBlank { "Private Chat" }
+        val threadId = intent?.getStringExtra(EXTRA_THREAD_ID).orEmpty().ifBlank { currentThreadId }
+        val peerName = intent?.getStringExtra(EXTRA_PEER_NAME).orEmpty().ifBlank { currentPeerName }
 
-        if (action == ACTION_END_CALL) {
-            if (threadId.isNotBlank()) {
-                _endCallEvents.tryEmit(threadId)
+        when (action) {
+            ACTION_END_CALL -> {
+                if (isPttMode) {
+                    LivePttSessionManager.disconnect(this)
+                } else if (threadId.isNotBlank()) {
+                    _endCallEvents.tryEmit(threadId)
+                }
+                removeFloatingOverlay()
+                stopForegroundCompat()
+                stopSelf()
+                return START_NOT_STICKY
             }
-            stopForegroundCompat()
-            stopSelf()
-            return START_NOT_STICKY
+
+            ACTION_TOGGLE_PTT -> {
+                LivePttSessionManager.toggleTransmitting(this)
+                return START_NOT_STICKY
+            }
+
+            ACTION_HIDE_FLOATING_PTT -> {
+                overlayDismissedByUserForBackgroundCycle = false
+                removeFloatingOverlay()
+                return START_NOT_STICKY
+            }
         }
+
+        val pttMode = intent?.getBooleanExtra(EXTRA_IS_PTT_MODE, false) == true
+        val pttTransmitting = intent?.getBooleanExtra(EXTRA_PTT_TRANSMITTING, false) == true
+        val showFloatingOverlay = intent?.getBooleanExtra(EXTRA_SHOW_FLOATING_OVERLAY, false) == true
+
+        if (threadId.isNotBlank()) currentThreadId = threadId
+        if (peerName.isNotBlank()) currentPeerName = peerName
 
         ensureCallChannel(this)
 
         val openIntent = Intent(this, MainActivity::class.java).apply {
-            this.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            if (threadId.isNotBlank()) {
-                putExtra(DirectMessageNotificationHelper.EXTRA_DM_THREAD_ID, threadId)
+            this.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
+            if (currentThreadId.isNotBlank()) {
+                putExtra(DirectMessageNotificationHelper.EXTRA_DM_THREAD_ID, currentThreadId)
             }
         }
         val openPendingIntent = PendingIntent.getActivity(
@@ -57,33 +118,67 @@ class PrivateCallForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val endCallIntent = Intent(this, PrivateCallForegroundService::class.java).apply {
+        val endIntent = Intent(this, PrivateCallForegroundService::class.java).apply {
             this.action = ACTION_END_CALL
-            putExtra(EXTRA_THREAD_ID, threadId)
+            putExtra(EXTRA_THREAD_ID, currentThreadId)
         }
-        val endCallPendingIntent = PendingIntent.getService(
+        val endPendingIntent = PendingIntent.getService(
             this,
             NOTIFICATION_ID + 1,
-            endCallIntent,
+            endIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_message)
-            .setColor(0xFF0088FF.toInt())
-            .setContentTitle("Private Voice Call · $peerName")
-            .setContentText("Microphone active in background — tap to return")
+            .setColor(if (pttTransmitting) 0xFFFF4D6D.toInt() else 0xFF0088FF.toInt())
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSilent(true)
             .setContentIntent(openPendingIntent)
-            .addAction(
-                0,
-                getString(R.string.action_end_call),
-                endCallPendingIntent
+
+        if (pttMode) {
+            val toggleIntent = Intent(this, PrivateCallForegroundService::class.java).apply {
+                this.action = ACTION_TOGGLE_PTT
+                putExtra(EXTRA_THREAD_ID, currentThreadId)
+                putExtra(EXTRA_PEER_NAME, currentPeerName)
+            }
+            val togglePendingIntent = PendingIntent.getService(
+                this,
+                NOTIFICATION_ID + 2,
+                toggleIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            .build()
+            notificationBuilder
+                .setContentTitle(
+                    if (pttTransmitting) "LIVE PTT Transmitting · $currentPeerName"
+                    else "Live Push-to-Talk Ready · $currentPeerName"
+                )
+                .setContentText(
+                    if (pttTransmitting) "Streaming live audio — tap Mute or release floating button"
+                    else "Hold floating PTT button or tap Talk to stream live audio"
+                )
+                .addAction(
+                    0,
+                    if (pttTransmitting) "Mute PTT" else "Talk Live",
+                    togglePendingIntent
+                )
+                .addAction(
+                    0,
+                    "Stop PTT",
+                    endPendingIntent
+                )
+        } else {
+            notificationBuilder
+                .setContentTitle("Private Voice Call · $currentPeerName")
+                .setContentText("Microphone active in background — tap to return")
+                .addAction(
+                    0,
+                    getString(R.string.action_end_call),
+                    endPendingIntent
+                )
+        }
 
         try {
             val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -91,19 +186,281 @@ class PrivateCallForegroundService : Service() {
             } else {
                 0
             }
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, serviceType)
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notificationBuilder.build(), serviceType)
             isRunning = true
-            activeThreadId = threadId
+            isPttMode = pttMode
+            activeThreadId = currentThreadId
         } catch (err: Exception) {
             Log.w(TAG, "Unable to enter microphone foreground service", err)
             stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (pttMode && showFloatingOverlay) {
+            if (!overlayDismissedByUserForBackgroundCycle) {
+                showOrUpdateFloatingOverlay()
+            }
+        } else if (!showFloatingOverlay) {
+            overlayDismissedByUserForBackgroundCycle = false
+            removeFloatingOverlay()
         }
 
         return START_NOT_STICKY
     }
 
+    @SuppressLint("ClickableViewAccessibility")
+    private fun showOrUpdateFloatingOverlay() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            return
+        }
+        val wm = windowManager ?: (getSystemService(WINDOW_SERVICE) as? WindowManager).also {
+            windowManager = it
+        } ?: return
+
+        if (floatingRootView != null) {
+            floatingPeerPill?.text = currentPeerName.take(14)
+            return
+        }
+
+        val density = resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+
+        val circleSize = dp(68)
+        val circleView = TextView(this).apply {
+            text = "PTT"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            elevation = dp(8).toFloat()
+            contentDescription = "Hold to stream live push to talk audio to $currentPeerName"
+            background = createCircleBackground(COLOR_STANDBY_EMERALD, COLOR_WHITE_BORDER)
+        }
+        val circleParams = LinearLayout.LayoutParams(circleSize, circleSize)
+        root.addView(circleView, circleParams)
+
+        // Compact companion bar: peer name (tap to open chat) + tiny close X
+        val pillRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(3), dp(6), dp(3))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(999).toFloat()
+                setColor(0xDD111827.toInt())
+                setStroke(dp(1), 0x44FFFFFF)
+            }
+        }
+
+        val peerLabel = TextView(this).apply {
+            text = currentPeerName.take(14)
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, dp(6), 0)
+            setOnClickListener {
+                val openIntent = Intent(this@PrivateCallForegroundService, MainActivity::class.java).apply {
+                    this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    if (currentThreadId.isNotBlank()) {
+                        putExtra(DirectMessageNotificationHelper.EXTRA_DM_THREAD_ID, currentThreadId)
+                    }
+                }
+                startActivity(openIntent)
+            }
+        }
+        val closeLabel = TextView(this).apply {
+            text = "✕"
+            setTextColor(0xFFD1D5DB.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(4), 0, dp(2), 0)
+            contentDescription = "Hide floating push to talk button"
+            setOnClickListener {
+                overlayDismissedByUserForBackgroundCycle = true
+                LivePttSessionManager.setTransmitting(this@PrivateCallForegroundService, false)
+                removeFloatingOverlay()
+            }
+        }
+        pillRow.addView(peerLabel)
+        pillRow.addView(closeLabel)
+
+        val pillParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = dp(4)
+        }
+        root.addView(pillRow, pillParams)
+
+        val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = dp(12)
+            y = dp(180)
+        }
+
+        val dragThresholdPx = dp(16)
+        var initialX = 0
+        var initialY = 0
+        var initialTouchX = 0f
+        var initialTouchY = 0f
+        var isDragging = false
+        var startedTxOnDown = false
+
+        circleView.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    isDragging = false
+                    startedTxOnDown = true
+                    triggerShortHaptic()
+                    LivePttSessionManager.setTransmitting(this@PrivateCallForegroundService, true)
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (initialTouchX - event.rawX).toInt()
+                    val dy = (event.rawY - initialTouchY).toInt()
+                    if (!isDragging && (abs(dx) > dragThresholdPx || abs(dy) > dragThresholdPx)) {
+                        isDragging = true
+                        if (startedTxOnDown) {
+                            startedTxOnDown = false
+                            LivePttSessionManager.setTransmitting(this@PrivateCallForegroundService, false)
+                        }
+                    }
+                    if (isDragging) {
+                        params.x = (initialX + dx).coerceAtLeast(0)
+                        params.y = (initialY + dy).coerceAtLeast(dp(32))
+                        runCatching { wm.updateViewLayout(root, params) }
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (startedTxOnDown) {
+                        startedTxOnDown = false
+                        LivePttSessionManager.setTransmitting(this@PrivateCallForegroundService, false)
+                    }
+                    isDragging = false
+                    true
+                }
+
+                else -> false
+            }
+        }
+
+        try {
+            wm.addView(root, params)
+            floatingRootView = root
+            floatingLayoutParams = params
+            floatingButtonCircle = circleView
+            floatingPeerPill = peerLabel
+            startObservingOverlayVisualState()
+        } catch (err: Exception) {
+            Log.w(TAG, "Unable to attach floating PTT button overlay", err)
+        }
+    }
+
+    private fun startObservingOverlayVisualState() {
+        overlayStateJob?.cancel()
+        overlayStateJob = serviceScope.launch {
+            combine(
+                LivePttSessionManager.isTransmitting,
+                LivePttSessionManager.remoteSpeakingName,
+                LivePttSessionManager.isConnected
+            ) { transmitting, remoteSpeaker, connected ->
+                Triple(transmitting, remoteSpeaker, connected)
+            }.collect { (transmitting, remoteSpeaker, connected) ->
+                val circle = floatingButtonCircle ?: return@collect
+                when {
+                    transmitting -> {
+                        circle.text = "LIVE"
+                        circle.background = createCircleBackground(COLOR_LIVE_CORAL, 0xFFFFFFFF.toInt())
+                    }
+                    !remoteSpeaker.isNullOrBlank() -> {
+                        circle.text = "HEAR"
+                        circle.background = createCircleBackground(COLOR_INCOMING_BLUE, 0xFFFFFFFF.toInt())
+                    }
+                    connected -> {
+                        circle.text = "PTT"
+                        circle.background = createCircleBackground(COLOR_STANDBY_EMERALD, COLOR_WHITE_BORDER)
+                    }
+                    else -> {
+                        circle.text = "..."
+                        circle.background = createCircleBackground(COLOR_CONNECTING_SLATE, COLOR_WHITE_BORDER)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun createCircleBackground(fillColor: Int, strokeColor: Int): GradientDrawable {
+        val strokePx = (2.5f * resources.displayMetrics.density).toInt().coerceAtLeast(2)
+        return GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(fillColor)
+            setStroke(strokePx, strokeColor)
+        }
+    }
+
+    private fun triggerShortHaptic() {
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            } ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(32L, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(32L)
+            }
+        } catch (_: Exception) {
+            // Ignored
+        }
+    }
+
+    private fun removeFloatingOverlay() {
+        overlayStateJob?.cancel()
+        overlayStateJob = null
+        val root = floatingRootView
+        floatingRootView = null
+        floatingButtonCircle = null
+        floatingPeerPill = null
+        floatingLayoutParams = null
+        if (root != null) {
+            runCatching { windowManager?.removeView(root) }
+        }
+    }
+
     override fun onDestroy() {
+        removeFloatingOverlay()
+        serviceScope.cancel()
         isRunning = false
+        isPttMode = false
         activeThreadId = null
         super.onDestroy()
     }
@@ -115,6 +472,7 @@ class PrivateCallForegroundService : Service() {
             // Ignored
         }
         isRunning = false
+        isPttMode = false
         activeThreadId = null
     }
 
@@ -123,12 +481,28 @@ class PrivateCallForegroundService : Service() {
         private const val CHANNEL_ID = "voxstage_private_call"
         private const val NOTIFICATION_ID = 49_201
         private const val ACTION_START_CALL = "com.example.media.ACTION_START_PRIVATE_CALL"
+        private const val ACTION_START_PTT = "com.example.media.ACTION_START_LIVE_PTT"
+        private const val ACTION_TOGGLE_PTT = "com.example.media.ACTION_TOGGLE_LIVE_PTT"
+        private const val ACTION_HIDE_FLOATING_PTT = "com.example.media.ACTION_HIDE_FLOATING_PTT"
         private const val ACTION_END_CALL = "com.example.media.ACTION_END_PRIVATE_CALL"
         private const val EXTRA_THREAD_ID = "extra_call_thread_id"
         private const val EXTRA_PEER_NAME = "extra_call_peer_name"
+        private const val EXTRA_IS_PTT_MODE = "extra_is_ptt_mode"
+        private const val EXTRA_PTT_TRANSMITTING = "extra_ptt_transmitting"
+        private const val EXTRA_SHOW_FLOATING_OVERLAY = "extra_show_floating_overlay"
+
+        private const val COLOR_STANDBY_EMERALD = 0xFF10B981.toInt()
+        private const val COLOR_LIVE_CORAL = 0xFFFF4D6D.toInt()
+        private const val COLOR_INCOMING_BLUE = 0xFF0088FF.toInt()
+        private const val COLOR_CONNECTING_SLATE = 0xFF475569.toInt()
+        private const val COLOR_WHITE_BORDER = 0xCCFFFFFF.toInt()
 
         @Volatile
         var isRunning: Boolean = false
+            private set
+
+        @Volatile
+        var isPttMode: Boolean = false
             private set
 
         @Volatile
@@ -163,10 +537,49 @@ class PrivateCallForegroundService : Service() {
                     action = ACTION_START_CALL
                     putExtra(EXTRA_THREAD_ID, threadId)
                     putExtra(EXTRA_PEER_NAME, peerName)
+                    putExtra(EXTRA_IS_PTT_MODE, false)
+                    putExtra(EXTRA_SHOW_FLOATING_OVERLAY, false)
                 }
                 ContextCompat.startForegroundService(appContext, intent)
             } catch (err: Exception) {
                 Log.w(TAG, "Failed to start PrivateCallForegroundService", err)
+            }
+        }
+
+        fun startPtt(
+            context: Context,
+            threadId: String,
+            peerName: String,
+            isTransmitting: Boolean,
+            showFloatingOverlay: Boolean
+        ) {
+            try {
+                val appContext = context.applicationContext
+                ensureCallChannel(appContext)
+                val intent = Intent(appContext, PrivateCallForegroundService::class.java).apply {
+                    action = ACTION_START_PTT
+                    putExtra(EXTRA_THREAD_ID, threadId)
+                    putExtra(EXTRA_PEER_NAME, peerName)
+                    putExtra(EXTRA_IS_PTT_MODE, true)
+                    putExtra(EXTRA_PTT_TRANSMITTING, isTransmitting)
+                    putExtra(EXTRA_SHOW_FLOATING_OVERLAY, showFloatingOverlay)
+                }
+                ContextCompat.startForegroundService(appContext, intent)
+            } catch (err: Exception) {
+                Log.w(TAG, "Failed to start Live PTT foreground service", err)
+            }
+        }
+
+        fun hideFloatingPttOverlay(context: Context) {
+            if (!isRunning) return
+            try {
+                val appContext = context.applicationContext
+                val intent = Intent(appContext, PrivateCallForegroundService::class.java).apply {
+                    action = ACTION_HIDE_FLOATING_PTT
+                }
+                appContext.startService(intent)
+            } catch (err: Exception) {
+                Log.w(TAG, "Failed to hide floating PTT overlay", err)
             }
         }
 
@@ -178,6 +591,7 @@ class PrivateCallForegroundService : Service() {
                 Log.w(TAG, "Failed to stop PrivateCallForegroundService", err)
             }
             isRunning = false
+            isPttMode = false
             activeThreadId = null
         }
     }

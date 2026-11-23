@@ -11,6 +11,7 @@ import com.example.data.UiState
 import com.example.data.VoxStageRepository
 import com.example.data.unwrapFirestoreError
 import com.example.media.LiveKitRoomManager
+import com.example.media.LivePttSessionManager
 import com.example.media.PrivateCallForegroundService
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
@@ -167,6 +168,9 @@ class DirectChatViewModel(
         if (_isConnectingCall.value) return
         val wantActive = !_isMicActive.value
         viewModelScope.launch {
+            if (wantActive && LivePttSessionManager.activeThreadId.value == threadId) {
+                LivePttSessionManager.disconnect(appContext)
+            }
             if (wantActive && !ensureCallConnected(myName)) return@launch
             _isMicActive.value = wantActive
             liveKitManager.setMicEnabled(wantActive)
@@ -174,6 +178,32 @@ class DirectChatViewModel(
                 PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
                 _snackbarEvents.tryEmit("Private voice mic is LIVE (continues in background)")
             }
+        }
+    }
+
+    fun setPttEnabled(enabled: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        val peerName = thread.displayTitle(currentUserId).ifBlank { "this chat" }
+        viewModelScope.launch {
+            repository.setDirectThreadPttEnabled(thread, enabled)
+                .onSuccess {
+                    if (!enabled && LivePttSessionManager.activeThreadId.value == threadId) {
+                        LivePttSessionManager.disconnect(appContext)
+                    }
+                    val otherAlreadyEnabled = thread.isOtherPttEnabled(currentUserId)
+                    val msg = when {
+                        enabled && otherAlreadyEnabled ->
+                            "Live Push-to-Talk CONNECTED with $peerName! Hold the button to stream live audio."
+                        enabled ->
+                            "Live Push-to-Talk enabled — waiting for $peerName to also turn on PTT."
+                        else ->
+                            "Live Push-to-Talk turned off for $peerName."
+                    }
+                    _snackbarEvents.tryEmit(msg)
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Push-to-Talk")
+                }
         }
     }
 
@@ -225,7 +255,7 @@ class DirectChatViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        if (PrivateCallForegroundService.activeThreadId == threadId) {
+        if (!PrivateCallForegroundService.isPttMode && PrivateCallForegroundService.activeThreadId == threadId) {
             PrivateCallForegroundService.stop(appContext)
         }
         liveKitManager.disconnect()

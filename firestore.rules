@@ -587,7 +587,7 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'participantIds', 'isGroup', 'groupName', 'participantNamesById', 'kickedUserIds',
-               'blockedByUserIds',
+               'blockedByUserIds', 'pttEnabledUserIds',
                'lastAlertSenderId', 'lastAlertSenderName', 'lastAlertAtMillis',
                'userAId', 'userAName', 'userAColorHex', 'userATier',
                'userBId', 'userBName', 'userBColorHex', 'userBTier',
@@ -600,6 +600,7 @@ service cloud.firestore {
              (!('participantNamesById' in data) || (data.participantNamesById is map && data.participantNamesById.size() <= 15)) &&
              (!('kickedUserIds' in data) || isBoundedStringList(data.kickedUserIds, 20)) &&
              (!('blockedByUserIds' in data) || isBoundedStringList(data.blockedByUserIds, 15)) &&
+             (!('pttEnabledUserIds' in data) || isBoundedStringList(data.pttEnabledUserIds, 15)) &&
              (!('lastAlertSenderId' in data) || (data.lastAlertSenderId is string && data.lastAlertSenderId.size() <= 128)) &&
              (!('lastAlertSenderName' in data) || (data.lastAlertSenderName is string && data.lastAlertSenderName.size() <= 40)) &&
              (!('lastAlertAtMillis' in data) || (data.lastAlertAtMillis is int && data.lastAlertAtMillis >= 0)) &&
@@ -997,7 +998,25 @@ service cloud.firestore {
          (!('lastAlertAtMillis' in oldData) ||
           oldData.lastAlertAtMillis == 0 ||
           oldData.lastAlertSenderId != request.auth.uid ||
-          (request.time.toMillis() - oldData.lastAlertAtMillis) >= 300000))
+          (request.time.toMillis() - oldData.lastAlertAtMillis) >= 300000)) ||
+        // Action 6: Participant toggles their own UID in pttEnabledUserIds for live walkie-talkie PTT
+        (newData.participantIds == oldData.participantIds &&
+         !hasAnyThreadBlock(oldData) &&
+         !isKickedFromThread(oldData, request.auth.uid) &&
+         diffKeys.hasOnly(['pttEnabledUserIds', 'updatedAt']) &&
+         (
+           (request.auth.uid in newData.pttEnabledUserIds &&
+            (!('pttEnabledUserIds' in oldData)
+              ? newData.pttEnabledUserIds.size() == 1
+              : (!(request.auth.uid in oldData.pttEnabledUserIds) &&
+                 newData.pttEnabledUserIds.size() == oldData.pttEnabledUserIds.size() + 1 &&
+                 newData.pttEnabledUserIds.hasAll(oldData.pttEnabledUserIds)))) ||
+           (!(request.auth.uid in newData.pttEnabledUserIds) &&
+            ('pttEnabledUserIds' in oldData) &&
+            (request.auth.uid in oldData.pttEnabledUserIds) &&
+            newData.pttEnabledUserIds.size() == oldData.pttEnabledUserIds.size() - 1 &&
+            oldData.pttEnabledUserIds.hasAll(newData.pttEnabledUserIds))
+         ))
       );
     }
 

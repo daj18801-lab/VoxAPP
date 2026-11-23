@@ -4366,5 +4366,43 @@ class VoxStageRepository(
             Result.failure(e)
         }
     }
+
+    /**
+     * Toggles the signed-in user's own UID in `directThreads/{threadId}.pttEnabledUserIds`.
+     * When both users enable Push-to-Talk on the thread, live walkie-talkie audio streaming activates.
+     */
+    suspend fun setDirectThreadPttEnabled(
+        thread: DirectThread,
+        enabled: Boolean
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/${thread.id}"
+        return try {
+            require(!thread.hasAnyBlock()) { "Push-to-Talk is unavailable in a blocked chat." }
+            require(!thread.isUserKicked(uid)) { "You can no longer use Push-to-Talk in this chat." }
+            val currentList = thread.pttEnabledUserIds
+            val updatedList = if (enabled) {
+                if (currentList.contains(uid)) return Result.success(Unit)
+                currentList + uid
+            } else {
+                if (!currentList.contains(uid)) return Result.success(Unit)
+                currentList.filter { it != uid }
+            }
+            db.collection("directThreads").document(thread.id).update(
+                mapOf(
+                    "pttEnabledUserIds" to updatedList,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
 }
+
 

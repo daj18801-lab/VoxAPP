@@ -1,7 +1,11 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -99,6 +103,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.DirectMessage
@@ -110,6 +117,7 @@ import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.media.LiveKitVideoView
+import com.example.media.LivePttSessionManager
 import com.example.media.VoiceNotePlayer
 import com.example.media.VoiceNoteRecorder
 import com.example.media.formatVoiceDuration
@@ -135,23 +143,6 @@ import com.example.ui.theme.SnapBlue
 import com.example.viewmodel.DirectChatViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-/**
- * Stores per-user / per-thread Push-to-Talk selection for private messages.
- */
-object DirectChatPttPrefs {
-    private const val PREFS_NAME = "voxstage_dm_ptt_prefs"
-
-    private fun prefs(context: android.content.Context) =
-        context.applicationContext.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-
-    fun isPttEnabled(context: android.content.Context, threadId: String): Boolean =
-        prefs(context).getBoolean("ptt_$threadId", false)
-
-    fun setPttEnabled(context: android.content.Context, threadId: String, enabled: Boolean) {
-        prefs(context).edit().putBoolean("ptt_$threadId", enabled).apply()
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -199,11 +190,31 @@ fun DirectChatScreen(
     var showKickPaidMemberDialog by remember { mutableStateOf(false) }
     var showBlockContactDialog by remember { mutableStateOf(false) }
 
-    // Per-user Push-to-Talk state
-    var isPttEnabledForChat by remember(viewModel.threadId) {
-        mutableStateOf(DirectChatPttPrefs.isPttEnabled(context, viewModel.threadId))
+    // Live Walkie-Talkie PTT state (synced across both users via Firestore + LivePttSessionManager)
+    val pttActiveThreadId by LivePttSessionManager.activeThreadId.collectAsStateWithLifecycle()
+    val pttIsConnected by LivePttSessionManager.isConnected.collectAsStateWithLifecycle()
+    val pttIsConnecting by LivePttSessionManager.isConnecting.collectAsStateWithLifecycle()
+    val pttIsTransmitting by LivePttSessionManager.isTransmitting.collectAsStateWithLifecycle()
+    val pttRemoteSpeaker by LivePttSessionManager.remoteSpeakingName.collectAsStateWithLifecycle()
+    val isThisThreadLivePttConnected = pttActiveThreadId == viewModel.threadId && pttIsConnected
+    val isThisThreadLivePttConnecting = pttActiveThreadId == viewModel.threadId && pttIsConnecting
+    val isThisThreadTransmitting = pttActiveThreadId == viewModel.threadId && pttIsTransmitting
+    val thisThreadRemoteSpeaker = if (pttActiveThreadId == viewModel.threadId) pttRemoteSpeaker else null
+
+    var canDrawFloatingOverlay by remember {
+        mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context))
     }
-    var isPttActive by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                canDrawFloatingOverlay =
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Voice Note Recording & Playback State
     val voiceRecorder = remember { VoiceNoteRecorder(context) }
@@ -314,8 +325,18 @@ fun DirectChatScreen(
             when (action) {
                 "VOICE_NOTE" -> startVoiceNoteRecording()
                 "PTT" -> {
+                    val activeThread = (threadState as? UiState.Success)?.data
+                    if (activeThread != null && activeThread.isMutualPttActive(viewModel.currentUserId)) {
+                        LivePttSessionManager.ensureConnected(
+                            context = context,
+                            threadId = activeThread.id,
+                            peerName = activeThread.displayTitle(viewModel.currentUserId),
+                            myUserId = viewModel.currentUserId,
+                            myDisplayName = userProfile.displayName
+                        )
+                    }
                     scope.launch {
-                        snackbarHostState.showTopMessage("Microphone ready! Hold or tap Push to Talk to send audio.")
+                        snackbarHostState.showTopMessage("Microphone ready! Hold Push to Talk to stream live audio.")
                     }
                 }
                 else -> viewModel.toggleCallMic(userProfile.displayName)
@@ -462,10 +483,32 @@ fun DirectChatScreen(
     }
     val canKickOtherPaidMember = !isGroup && otherUid.isNotBlank() && !isBlockedThread &&
         (otherPaidPass != null || (userProfile.dmPolicyEnum() == DmPolicy.PAID && thread?.isUserKicked(otherUid) != true))
+    val isMyPttEnabled = thread?.isPttEnabledFor(viewModel.currentUserId) == true
+    val isOtherPttEnabled = thread?.isOtherPttEnabled(viewModel.currentUserId) == true
+    val isMutualPttActive = !amIKicked && !isBlockedThread && (thread?.isMutualPttActive(viewModel.currentUserId) == true)
     val remoteVideoTrack = remoteVideoTracks.values.firstOrNull()
     val canSend = !amIKicked && !isBlockedThread && (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
     val remainingPictureQuota = remember(userProfile.pictureUploadTimestamps) {
         userProfile.remainingPictureUploads()
+    }
+
+    LaunchedEffect(isMutualPttActive, thread?.id, otherName, userProfile.displayName) {
+        val currentThread = thread
+        if (isMutualPttActive && currentThread != null && !(!myStaffTier.isAdmin() && userProfile.disableMic)) {
+            val micGranted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (micGranted) {
+                LivePttSessionManager.ensureConnected(
+                    context = context,
+                    threadId = currentThread.id,
+                    peerName = otherName,
+                    myUserId = viewModel.currentUserId,
+                    myDisplayName = userProfile.displayName
+                )
+            }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -600,19 +643,22 @@ fun DirectChatScreen(
                                 }
                             }
 
-                            // Per-user Push-to-Talk Toggle
+                            // Firestore-synced Live Push-to-Talk Toggle (mutual live audio stream when both select it)
                             if (!amIKicked && !isBlockedThread && thread != null) {
                                 IconButton(
                                     onClick = {
-                                        val next = !isPttEnabledForChat
-                                        isPttEnabledForChat = next
-                                        DirectChatPttPrefs.setPttEnabled(context, viewModel.threadId, next)
-                                        scope.launch {
-                                            snackbarHostState.showTopMessage(
-                                                if (next) "Push to Talk enabled for $otherName"
-                                                else "Push to Talk turned off for $otherName"
-                                            )
+                                        val next = !isMyPttEnabled
+                                        if (next) {
+                                            val micGranted = ContextCompat.checkSelfPermission(
+                                                context,
+                                                Manifest.permission.RECORD_AUDIO
+                                            ) == PackageManager.PERMISSION_GRANTED
+                                            if (!micGranted) {
+                                                pendingMicAction = "PTT"
+                                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            }
                                         }
+                                        viewModel.setPttEnabled(next)
                                     },
                                     modifier = Modifier
                                         .size(40.dp)
@@ -620,14 +666,23 @@ fun DirectChatScreen(
                                 ) {
                                     Surface(
                                         shape = CircleShape,
-                                        color = if (isPttEnabledForChat) SafetyEmerald else MaterialTheme.colorScheme.primaryContainer,
+                                        color = when {
+                                            isMutualPttActive -> SafetyEmerald
+                                            isMyPttEnabled -> SnapBlue
+                                            isOtherPttEnabled -> ModAmber.copy(alpha = 0.25f)
+                                            else -> MaterialTheme.colorScheme.primaryContainer
+                                        },
                                         modifier = Modifier.size(32.dp)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
                                                 imageVector = Icons.Rounded.RecordVoiceOver,
-                                                contentDescription = if (isPttEnabledForChat) "Disable Push to Talk" else "Enable Push to Talk",
-                                                tint = if (isPttEnabledForChat) Color.White else MaterialTheme.colorScheme.primary,
+                                                contentDescription = if (isMyPttEnabled) "Disable Live Push to Talk" else "Enable Live Push to Talk",
+                                                tint = when {
+                                                    isMutualPttActive || isMyPttEnabled -> Color.White
+                                                    isOtherPttEnabled -> ModAmber
+                                                    else -> MaterialTheme.colorScheme.primary
+                                                },
                                                 modifier = Modifier.size(17.dp)
                                             )
                                         }
@@ -838,94 +893,259 @@ fun DirectChatScreen(
                                 }
                             }
                         } else {
-                        // Push-to-Talk Button Strip (shown when PTT is selected for this user)
-                        if (isPttEnabledForChat) {
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = if (isPttActive || isRecordingVoiceNote) LiveCoral else SafetyEmerald,
+                        // Mutual Live Push-to-Talk Walkie-Talkie Strip (Live stream audio — never chat-log voice notes)
+                        if (isOtherPttEnabled && !isMyPttEnabled && thread != null) {
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .background(SnapBlue.copy(alpha = 0.12f))
                                     .padding(horizontal = 12.dp, vertical = 8.dp)
-                                    .height(50.dp)
-                                    .pointerInput(isInCall, isRecordingVoiceNote, userProfile.displayName) {
-                                        awaitEachGesture {
-                                            awaitFirstDown(requireUnconsumed = false)
-                                            if (!myStaffTier.isAdmin() && userProfile.disableMic) {
-                                                scope.launch {
-                                                    snackbarHostState.showTopMessage("Microphone access is disabled on your account.")
-                                                }
-                                                waitForUpOrCancellation()
-                                                return@awaitEachGesture
-                                            }
-                                            val granted = ContextCompat.checkSelfPermission(
-                                                context,
-                                                Manifest.permission.RECORD_AUDIO
-                                            ) == PackageManager.PERMISSION_GRANTED
-                                            if (!granted) {
-                                                pendingMicAction = "PTT"
-                                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                                waitForUpOrCancellation()
-                                                return@awaitEachGesture
-                                            }
-
-                                            val pressStartedMs = System.currentTimeMillis()
-                                            if (isInCall) {
-                                                isPttActive = true
-                                                viewModel.setPttLiveMic(userProfile.displayName, true)
-                                                waitForUpOrCancellation()
-                                                isPttActive = false
-                                                viewModel.setPttLiveMic(userProfile.displayName, false)
-                                            } else {
-                                                if (isRecordingVoiceNote) {
-                                                    // Second tap sends the PTT audio immediately
-                                                    waitForUpOrCancellation()
-                                                    isPttActive = false
-                                                    stopAndSendVoiceNote()
-                                                } else {
-                                                    isPttActive = true
-                                                    startVoiceNoteRecording()
-                                                    waitForUpOrCancellation()
-                                                    val heldMs = System.currentTimeMillis() - pressStartedMs
-                                                    if (heldMs >= 450L) {
-                                                        // Held & released -> send audio immediately
-                                                        isPttActive = false
-                                                        stopAndSendVoiceNote()
+                                    .testTag("dm_ptt_invite_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.RecordVoiceOver,
+                                    contentDescription = "Live Push to Talk invite",
+                                    tint = SnapBlue,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "$otherName turned on Live Push-to-Talk. Enable to stream live audio.",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Button(
+                                    onClick = {
+                                        val micGranted = ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.RECORD_AUDIO
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                        if (!micGranted) {
+                                            pendingMicAction = "PTT"
+                                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                        }
+                                        viewModel.setPttEnabled(true)
+                                    },
+                                    shape = RoundedCornerShape(999.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = SafetyEmerald),
+                                    modifier = Modifier.testTag("dm_ptt_accept_button")
+                                ) {
+                                    Text(
+                                        text = "Enable",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                        } else if (isMyPttEnabled && thread != null) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (isMutualPttActive) {
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = when {
+                                            isThisThreadTransmitting -> LiveCoral
+                                            !thisThreadRemoteSpeaker.isNullOrBlank() -> SnapBlue
+                                            else -> SafetyEmerald
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(52.dp)
+                                            .pointerInput(thread.id, otherName, userProfile.displayName, isInCall) {
+                                                awaitEachGesture {
+                                                    awaitFirstDown(requireUnconsumed = false)
+                                                    if (!myStaffTier.isAdmin() && userProfile.disableMic) {
+                                                        scope.launch {
+                                                            snackbarHostState.showTopMessage("Microphone access is disabled on your account.")
+                                                        }
+                                                        waitForUpOrCancellation()
+                                                        return@awaitEachGesture
+                                                    }
+                                                    val granted = ContextCompat.checkSelfPermission(
+                                                        context,
+                                                        Manifest.permission.RECORD_AUDIO
+                                                    ) == PackageManager.PERMISSION_GRANTED
+                                                    if (!granted) {
+                                                        pendingMicAction = "PTT"
+                                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                        waitForUpOrCancellation()
+                                                        return@awaitEachGesture
+                                                    }
+                                                    if (isInCall) {
+                                                        viewModel.setPttLiveMic(userProfile.displayName, true)
+                                                        waitForUpOrCancellation()
+                                                        viewModel.setPttLiveMic(userProfile.displayName, false)
                                                     } else {
-                                                        // Quick tap -> keep recording until tapped again to send
-                                                        isPttActive = false
+                                                        LivePttSessionManager.setTransmitting(
+                                                            context = context,
+                                                            transmitting = true,
+                                                            threadId = thread.id,
+                                                            peerName = otherName,
+                                                            myUserId = viewModel.currentUserId,
+                                                            myDisplayName = userProfile.displayName
+                                                        )
+                                                        waitForUpOrCancellation()
+                                                        LivePttSessionManager.setTransmitting(
+                                                            context = context,
+                                                            transmitting = false,
+                                                            threadId = thread.id,
+                                                            peerName = otherName,
+                                                            myUserId = viewModel.currentUserId,
+                                                            myDisplayName = userProfile.displayName
+                                                        )
                                                     }
                                                 }
                                             }
+                                            .testTag("dm_ptt_button")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .padding(horizontal = 16.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.RecordVoiceOver,
+                                                contentDescription = "Live Push to Talk",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = when {
+                                                    isThisThreadTransmitting || (isInCall && isMicActive) ->
+                                                        "LIVE AUDIO STREAMING to $otherName…"
+                                                    !thisThreadRemoteSpeaker.isNullOrBlank() ->
+                                                        "$thisThreadRemoteSpeaker is streaming live audio…"
+                                                    isThisThreadLivePttConnecting ->
+                                                        "Connecting live Push-to-Talk channel…"
+                                                    isThisThreadLivePttConnected ->
+                                                        "HOLD TO TALK LIVE · $otherName"
+                                                    else ->
+                                                        "HOLD TO STREAM LIVE AUDIO · $otherName"
+                                                },
+                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                                color = Color.White,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
                                         }
                                     }
-                                    .testTag("dm_ptt_button")
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(horizontal = 16.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.RecordVoiceOver,
-                                        contentDescription = "Push to Talk",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = when {
-                                            isInCall && isPttActive -> "Transmitting live audio to $otherName…"
-                                            isInCall -> "HOLD TO TALK LIVE · $otherName"
-                                            isRecordingVoiceNote -> "Recording (${formatVoiceDuration(recordingSeconds.toLong())}) · Release or Tap to Send"
-                                            else -> "PUSH TO TALK · Hold or Tap to Send Audio"
-                                        },
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+
+                                    // Floating Background PTT Button Permission / Status Row
+                                    if (!canDrawFloatingOverlay && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.secondaryContainer,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .clickable {
+                                                    val intent = Intent(
+                                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                                        Uri.parse("package:${context.packageName}")
+                                                    )
+                                                    context.startActivity(intent)
+                                                }
+                                                .testTag("dm_ptt_enable_floating_overlay_button")
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.GraphicEq,
+                                                    contentDescription = "Enable floating background button",
+                                                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Text(
+                                                    text = "Tap to allow the floating PTT button when minimized",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.Center
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(7.dp)
+                                                    .clip(CircleShape)
+                                                    .background(SafetyEmerald)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "Live audio stream · Floating PTT button pops up in background",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    // Only current user has PTT enabled so far — waiting on the other user
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        border = BorderStroke(1.dp, SnapBlue.copy(alpha = 0.45f)),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable {
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage(
+                                                        "Waiting for $otherName to also select Push-to-Talk for live audio streaming."
+                                                    )
+                                                }
+                                            }
+                                            .testTag("dm_ptt_waiting_banner")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.RecordVoiceOver,
+                                                contentDescription = "Waiting for Push to Talk",
+                                                tint = SnapBlue,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "Live Push-to-Talk ON · Waiting for $otherName",
+                                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = "Live audio streaming & floating background button activate once both users select PTT.",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))

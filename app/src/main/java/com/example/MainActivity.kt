@@ -108,6 +108,7 @@ import com.example.ui.components.showTopMessage
 import com.example.ui.screens.UserProfileScreen
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.VoxStageTheme
+import com.example.media.LivePttSessionManager
 import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageSyncWorker
 import com.example.viewmodel.DirectChatViewModel
@@ -163,6 +164,16 @@ class MainActivity : ComponentActivity() {
                 onConsumePendingDmThread = { _pendingDmThreadId.value = null }
             )
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        LivePttSessionManager.onAppForegrounded(this)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        LivePttSessionManager.onAppBackgrounded(this)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -445,6 +456,38 @@ private fun AuthenticatedVoxStageApp(
             if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                 mainViewModel.setOnlinePresence(true)
             }
+        }
+    }
+
+    // Automatically manage the persistent Live Walkie-Talkie PTT channel whenever
+    // BOTH users in a private chat have Push-to-Talk selected.
+    LaunchedEffect(directThreadsState, userProfile, staffCapabilities.isAdmin, currentUserId) {
+        val threads = (directThreadsState as? UiState.Success)?.data ?: return@LaunchedEffect
+        val micBlocked = !staffCapabilities.isAdmin && userProfile?.disableMic == true
+        val activeTid = LivePttSessionManager.activeThreadId.value
+        val mutualThreads = threads.filter { thread ->
+            !thread.hasAnyBlock() &&
+                !thread.isUserKicked(currentUserId) &&
+                thread.isMutualPttActive(currentUserId)
+        }
+        val targetThread = mutualThreads.firstOrNull { it.id == activeTid } ?: mutualThreads.firstOrNull()
+        if (targetThread != null && !micBlocked) {
+            val myName = userProfile?.displayName?.ifBlank { initialDisplayName } ?: initialDisplayName
+            LivePttSessionManager.ensureConnected(
+                context = context,
+                threadId = targetThread.id,
+                peerName = targetThread.displayTitle(currentUserId),
+                myUserId = currentUserId,
+                myDisplayName = myName.ifBlank { "Member" }
+            )
+        } else if (LivePttSessionManager.activeThreadId.value != null) {
+            LivePttSessionManager.disconnect(context)
+        }
+    }
+
+    DisposableEffect(currentUserId) {
+        onDispose {
+            LivePttSessionManager.disconnect(context)
         }
     }
 

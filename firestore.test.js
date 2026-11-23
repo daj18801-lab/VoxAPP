@@ -2545,4 +2545,73 @@ test("Friend attention alerts require accepted friendship and enforce a 5-minute
   );
 });
 
+// 25. MUTUAL LIVE PUSH-TO-TALK OPT-IN ON DIRECT THREADS (self-only toggle)
+test("Participants can toggle only their own UID in directThreads.pttEnabledUserIds", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(3000);
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Walkie-talkie test",
+      lastMessageSenderId: ALICE_UID,
+      unreadByUserIds: [],
+      pttEnabledUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Alice enables live PTT for herself -> succeeds
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [ALICE_UID],
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Alice CANNOT forcibly enable PTT for Bob -> denied
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [ALICE_UID, BOB_UID],
+      updatedAt: pastDate(1800),
+    })
+  );
+
+  // Bob enables live PTT for himself -> succeeds (now mutual!)
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [ALICE_UID, BOB_UID],
+      updatedAt: pastDate(1500),
+    })
+  );
+
+  // Bob CANNOT turn off Alice's PTT -> denied
+  await assertFails(
+    bobDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [BOB_UID],
+      updatedAt: pastDate(1200),
+    })
+  );
+
+  // Alice turns off her own PTT -> succeeds
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [BOB_UID],
+      updatedAt: pastDate(1000),
+    })
+  );
+});
+
+
 
