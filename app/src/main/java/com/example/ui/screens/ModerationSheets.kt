@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.SupportAgent
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -72,6 +74,7 @@ import com.example.data.ModerationLog
 import com.example.data.ParticipantRole
 import com.example.data.ReportCategory
 import com.example.data.RoomParticipant
+import com.example.data.RoomStatus
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.ui.components.RolePillBadge
@@ -758,6 +761,7 @@ fun UserModerationActionSheet(
     onSendAlert: () -> Unit,
     onSetStaffTier: (StaffTier) -> Unit,
     onEditUserAdmin: () -> Unit,
+    onSendToRoom: (() -> Unit)? = null,
     onRedactMessage: () -> Unit,
     onReport: () -> Unit,
     onBlockUser: () -> Unit,
@@ -927,6 +931,14 @@ fun UserModerationActionSheet(
                     tint = usernameColor(StaffTier.ADMIN),
                     onClick = { onDismiss(); onEditUserAdmin() }
                 )
+                if (onSendToRoom != null) {
+                    SheetActionRow(
+                        icon = Icons.Rounded.SwapHoriz,
+                        label = "Send User to Different Room",
+                        tint = VoiceCyan,
+                        onClick = { onDismiss(); onSendToRoom() }
+                    )
+                }
             }
         }
 
@@ -1050,3 +1062,108 @@ fun ReportSafetyDialog(
         }
     )
 }
+
+@Composable
+fun SendUserToRoomDialog(
+    targetName: String,
+    availableRooms: List<ChatRoom>,
+    currentRoomId: String = "",
+    onSendToRoom: (targetRoom: ChatRoom, reason: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val destinationRooms = remember(availableRooms, currentRoomId) {
+        availableRooms.filter { it.id != currentRoomId && it.statusEnum() == RoomStatus.LIVE }
+    }
+    var selectedRoom by remember(destinationRooms) { mutableStateOf(destinationRooms.firstOrNull()) }
+    var reason by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Send $targetName to Another Room") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (destinationRooms.isEmpty()) {
+                    Text(
+                        text = "No other live rooms are currently available to move $targetName into.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        text = "Pick a live destination room. $targetName will be navigated there automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 220.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        destinationRooms.forEach { candidate ->
+                            val isSelected = selectedRoom?.id == candidate.id
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                },
+                                border = if (isSelected) {
+                                    BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+                                } else null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedRoom = candidate }
+                                    .testTag("select_transfer_room_${candidate.id}")
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                                    Text(
+                                        text = candidate.displayTitle(),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "Host: ${candidate.hostName} · ${candidate.participantCount} online",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = reason,
+                        onValueChange = { reason = it.take(160) },
+                        label = { Text("Reason (optional)") },
+                        placeholder = { Text("e.g., Moving to music lounge") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("transfer_room_reason_input")
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val dest = selectedRoom ?: return@Button
+                    onSendToRoom(dest, reason.trim())
+                    onDismiss()
+                },
+                enabled = selectedRoom != null,
+                modifier = Modifier.testTag("confirm_send_user_to_room_button")
+            ) {
+                Text("Send to Room")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+

@@ -32,6 +32,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -47,10 +50,12 @@ import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
@@ -85,6 +90,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -130,6 +136,23 @@ import com.example.viewmodel.DirectChatViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/**
+ * Stores per-user / per-thread Push-to-Talk selection for private messages.
+ */
+object DirectChatPttPrefs {
+    private const val PREFS_NAME = "voxstage_dm_ptt_prefs"
+
+    private fun prefs(context: android.content.Context) =
+        context.applicationContext.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+
+    fun isPttEnabled(context: android.content.Context, threadId: String): Boolean =
+        prefs(context).getBoolean("ptt_$threadId", false)
+
+    fun setPttEnabled(context: android.content.Context, threadId: String, enabled: Boolean) {
+        prefs(context).edit().putBoolean("ptt_$threadId", enabled).apply()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DirectChatScreen(
@@ -139,8 +162,12 @@ fun DirectChatScreen(
     otherPhotoBase64: String = "",
     directoryEntries: List<DirectoryEntry> = emptyList(),
     paidDmMembersForMe: List<DmAccessPass> = emptyList(),
+    isAcceptedFriend: Boolean = false,
     onAddUserToChat: (DirectThread, DirectoryEntry) -> Unit = { _, _ -> },
     onKickPaidMember: (senderId: String, senderName: String) -> Unit = { _, _ -> },
+    onBlockContact: (targetUserId: String, targetName: String) -> Unit = { _, _ -> },
+    onUnblockContact: (targetUserId: String) -> Unit = {},
+    onSendFriendAttentionAlert: (DirectThread) -> Unit = {},
     onOpenUserProfile: (String) -> Unit = {},
     onBack: () -> Unit
 ) {
@@ -167,9 +194,16 @@ fun DirectChatScreen(
     var isEncodingSnap by remember { mutableStateOf(false) }
     var fullScreenPhotoBase64 by remember { mutableStateOf<String?>(null) }
     var pendingCameraAction by remember { mutableStateOf<String?>(null) } // "VIDEO_CALL" or "SNAP_PHOTO"
-    var pendingMicAction by remember { mutableStateOf<String?>(null) } // "VOICE_CALL" or "VOICE_NOTE"
+    var pendingMicAction by remember { mutableStateOf<String?>(null) } // "VOICE_CALL", "VOICE_NOTE", or "PTT"
     var showAddPersonSheet by remember { mutableStateOf(false) }
     var showKickPaidMemberDialog by remember { mutableStateOf(false) }
+    var showBlockContactDialog by remember { mutableStateOf(false) }
+
+    // Per-user Push-to-Talk state
+    var isPttEnabledForChat by remember(viewModel.threadId) {
+        mutableStateOf(DirectChatPttPrefs.isPttEnabled(context, viewModel.threadId))
+    }
+    var isPttActive by remember { mutableStateOf(false) }
 
     // Voice Note Recording & Playback State
     val voiceRecorder = remember { VoiceNoteRecorder(context) }
@@ -279,13 +313,21 @@ fun DirectChatScreen(
         if (granted) {
             when (action) {
                 "VOICE_NOTE" -> startVoiceNoteRecording()
+                "PTT" -> {
+                    scope.launch {
+                        snackbarHostState.showTopMessage("Microphone ready! Hold or tap Push to Talk to send audio.")
+                    }
+                }
                 else -> viewModel.toggleCallMic(userProfile.displayName)
             }
         } else {
             scope.launch {
                 snackbarHostState.showTopMessage(
-                    if (action == "VOICE_NOTE") "Microphone permission is needed to send voice notes."
-                    else "Microphone permission is needed for private voice calls."
+                    when (action) {
+                        "VOICE_NOTE" -> "Microphone permission is needed to send voice notes."
+                        "PTT" -> "Microphone permission is needed for Push to Talk."
+                        else -> "Microphone permission is needed for private voice calls."
+                    }
                 )
             }
         }
@@ -408,15 +450,23 @@ fun DirectChatScreen(
     }
     val isOtherOnline = !isGroup && (otherDirectoryEntry?.isCurrentlyOnline(nowMillis) == true)
     val amIKicked = thread?.isUserKicked(viewModel.currentUserId) == true
+    val iBlockedOther = !isGroup && (
+        thread?.isBlockedBy(viewModel.currentUserId) == true ||
+            (otherUid.isNotBlank() && userProfile.blockedUserIds.contains(otherUid))
+        )
+    val isBlockedThread = !isGroup && (thread?.hasAnyBlock() == true || iBlockedOther)
     val otherPaidPass = remember(paidDmMembersForMe, otherUid, isGroup) {
         if (!isGroup && otherUid.isNotBlank()) {
             paidDmMembersForMe.firstOrNull { it.senderId == otherUid && it.isCurrentlyAllowed() }
         } else null
     }
-    val canKickOtherPaidMember = !isGroup && otherUid.isNotBlank() &&
+    val canKickOtherPaidMember = !isGroup && otherUid.isNotBlank() && !isBlockedThread &&
         (otherPaidPass != null || (userProfile.dmPolicyEnum() == DmPolicy.PAID && thread?.isUserKicked(otherUid) != true))
     val remoteVideoTrack = remoteVideoTracks.values.firstOrNull()
-    val canSend = !amIKicked && (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
+    val canSend = !amIKicked && !isBlockedThread && (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
+    val remainingPictureQuota = remember(userProfile.pictureUploadTimestamps) {
+        userProfile.remainingPictureUploads()
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -526,24 +576,84 @@ fun DirectChatScreen(
                             }
 
                             // Add Person -> Creates Group Chat (or adds to Group Chat)
-                            if (!amIKicked && thread != null) {
+                            if (!amIKicked && !isBlockedThread && thread != null) {
                                 IconButton(
                                     onClick = { showAddPersonSheet = true },
                                     modifier = Modifier
-                                        .size(44.dp)
+                                        .size(40.dp)
                                         .testTag("dm_add_user_button")
                                 ) {
                                     Surface(
                                         shape = CircleShape,
                                         color = MaterialTheme.colorScheme.primaryContainer,
-                                        modifier = Modifier.size(34.dp)
+                                        modifier = Modifier.size(32.dp)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
                                                 imageVector = Icons.Rounded.GroupAdd,
                                                 contentDescription = if (isGroup) "Add member to group chat" else "Add user to create group chat",
                                                 tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(18.dp)
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Per-user Push-to-Talk Toggle
+                            if (!amIKicked && !isBlockedThread && thread != null) {
+                                IconButton(
+                                    onClick = {
+                                        val next = !isPttEnabledForChat
+                                        isPttEnabledForChat = next
+                                        DirectChatPttPrefs.setPttEnabled(context, viewModel.threadId, next)
+                                        scope.launch {
+                                            snackbarHostState.showTopMessage(
+                                                if (next) "Push to Talk enabled for $otherName"
+                                                else "Push to Talk turned off for $otherName"
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .testTag("dm_toggle_ptt_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isPttEnabledForChat) SafetyEmerald else MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.RecordVoiceOver,
+                                                contentDescription = if (isPttEnabledForChat) "Disable Push to Talk" else "Enable Push to Talk",
+                                                tint = if (isPttEnabledForChat) Color.White else MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Friend Attention Alert (Ring + Vibrate, friends list only, 1 per 5 min)
+                            if (!isGroup && isAcceptedFriend && !amIKicked && !isBlockedThread && thread != null) {
+                                IconButton(
+                                    onClick = { onSendFriendAttentionAlert(thread) },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .testTag("dm_send_attention_alert_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = ModAmber.copy(alpha = 0.20f),
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.NotificationsActive,
+                                                contentDescription = "Send ring and vibrate attention alert to friend",
+                                                tint = ModAmber,
+                                                modifier = Modifier.size(17.dp)
                                             )
                                         }
                                     }
@@ -555,20 +665,45 @@ fun DirectChatScreen(
                                 IconButton(
                                     onClick = { showKickPaidMemberDialog = true },
                                     modifier = Modifier
-                                        .size(44.dp)
+                                        .size(40.dp)
                                         .testTag("dm_kick_paid_member_button")
                                 ) {
                                     Surface(
                                         shape = CircleShape,
                                         color = LiveCoral.copy(alpha = 0.16f),
-                                        modifier = Modifier.size(34.dp)
+                                        modifier = Modifier.size(32.dp)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
                                                 imageVector = Icons.Rounded.PersonRemove,
                                                 contentDescription = "Kick paid member from messaging you",
                                                 tint = LiveCoral,
-                                                modifier = Modifier.size(18.dp)
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Moderation: Block Contact (removes from friends list & stops incoming messages)
+                            if (!isGroup && otherUid.isNotBlank() && !iBlockedOther) {
+                                IconButton(
+                                    onClick = { showBlockContactDialog = true },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .testTag("dm_block_contact_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = LiveCoral.copy(alpha = 0.14f),
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Block,
+                                                contentDescription = "Block $otherName",
+                                                tint = LiveCoral,
+                                                modifier = Modifier.size(17.dp)
                                             )
                                         }
                                     }
@@ -576,25 +711,25 @@ fun DirectChatScreen(
                             }
 
                             // Private Chat Voice Mic Call Button
-                            if (!amIKicked) {
+                            if (!amIKicked && !isBlockedThread) {
                                 IconButton(
                                     onClick = ::requestMicCallToggle,
                                     enabled = !isConnectingCall,
                                     modifier = Modifier
-                                        .size(44.dp)
+                                        .size(40.dp)
                                         .testTag("dm_mic_call_button")
                                 ) {
                                     Surface(
                                         shape = CircleShape,
                                         color = if (isMicActive) SafetyEmerald else MaterialTheme.colorScheme.primaryContainer,
-                                        modifier = Modifier.size(34.dp)
+                                        modifier = Modifier.size(32.dp)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
                                                 imageVector = if (isMicActive) Icons.Rounded.Mic else Icons.Rounded.MicOff,
                                                 contentDescription = if (isMicActive) "Mute private call mic" else "Start private voice mic",
                                                 tint = if (isMicActive) Color.White else MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(18.dp)
+                                                modifier = Modifier.size(17.dp)
                                             )
                                         }
                                     }
@@ -605,20 +740,20 @@ fun DirectChatScreen(
                                     onClick = ::requestVideoCallToggle,
                                     enabled = !isConnectingCall,
                                     modifier = Modifier
-                                        .size(44.dp)
+                                        .size(40.dp)
                                         .testTag("dm_video_call_button")
                                 ) {
                                     Surface(
                                         shape = CircleShape,
                                         color = if (isCamActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
-                                        modifier = Modifier.size(34.dp)
+                                        modifier = Modifier.size(32.dp)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
                                                 imageVector = if (isCamActive) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
                                                 contentDescription = if (isCamActive) "Turn off private video" else "Start private video call",
                                                 tint = if (isCamActive) Color.White else MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(18.dp)
+                                                modifier = Modifier.size(17.dp)
                                             )
                                         }
                                     }
@@ -663,7 +798,139 @@ fun DirectChatScreen(
                                     color = LiveCoral
                                 )
                             }
+                        } else if (isBlockedThread) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(LiveCoral.copy(alpha = 0.12f))
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                                    .testTag("dm_blocked_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Block,
+                                    contentDescription = "Contact blocked",
+                                    tint = LiveCoral,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = if (iBlockedOther) {
+                                        "You blocked $otherName. Incoming messages are stopped."
+                                    } else {
+                                        "Messaging is unavailable in this chat."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = LiveCoral,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (iBlockedOther && otherUid.isNotBlank()) {
+                                    TextButton(
+                                        onClick = { onUnblockContact(otherUid) },
+                                        modifier = Modifier.testTag("dm_unblock_contact_button")
+                                    ) {
+                                        Text(
+                                            text = "Unblock",
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
                         } else {
+                        // Push-to-Talk Button Strip (shown when PTT is selected for this user)
+                        if (isPttEnabledForChat) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isPttActive || isRecordingVoiceNote) LiveCoral else SafetyEmerald,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .height(50.dp)
+                                    .pointerInput(isInCall, isRecordingVoiceNote, userProfile.displayName) {
+                                        awaitEachGesture {
+                                            awaitFirstDown(requireUnconsumed = false)
+                                            if (!myStaffTier.isAdmin() && userProfile.disableMic) {
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage("Microphone access is disabled on your account.")
+                                                }
+                                                waitForUpOrCancellation()
+                                                return@awaitEachGesture
+                                            }
+                                            val granted = ContextCompat.checkSelfPermission(
+                                                context,
+                                                Manifest.permission.RECORD_AUDIO
+                                            ) == PackageManager.PERMISSION_GRANTED
+                                            if (!granted) {
+                                                pendingMicAction = "PTT"
+                                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                waitForUpOrCancellation()
+                                                return@awaitEachGesture
+                                            }
+
+                                            val pressStartedMs = System.currentTimeMillis()
+                                            if (isInCall) {
+                                                isPttActive = true
+                                                viewModel.setPttLiveMic(userProfile.displayName, true)
+                                                waitForUpOrCancellation()
+                                                isPttActive = false
+                                                viewModel.setPttLiveMic(userProfile.displayName, false)
+                                            } else {
+                                                if (isRecordingVoiceNote) {
+                                                    // Second tap sends the PTT audio immediately
+                                                    waitForUpOrCancellation()
+                                                    isPttActive = false
+                                                    stopAndSendVoiceNote()
+                                                } else {
+                                                    isPttActive = true
+                                                    startVoiceNoteRecording()
+                                                    waitForUpOrCancellation()
+                                                    val heldMs = System.currentTimeMillis() - pressStartedMs
+                                                    if (heldMs >= 450L) {
+                                                        // Held & released -> send audio immediately
+                                                        isPttActive = false
+                                                        stopAndSendVoiceNote()
+                                                    } else {
+                                                        // Quick tap -> keep recording until tapped again to send
+                                                        isPttActive = false
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .testTag("dm_ptt_button")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.RecordVoiceOver,
+                                        contentDescription = "Push to Talk",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = when {
+                                            isInCall && isPttActive -> "Transmitting live audio to $otherName…"
+                                            isInCall -> "HOLD TO TALK LIVE · $otherName"
+                                            isRecordingVoiceNote -> "Recording (${formatVoiceDuration(recordingSeconds.toLong())}) · Release or Tap to Send"
+                                            else -> "PUSH TO TALK · Hold or Tap to Send Audio"
+                                        },
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                        }
+
                         // Draft Snap Picture Preview Strip
                         if (isEncodingSnap || draftSnapBase64.isNotBlank()) {
                             val draftBmp = rememberBase64ImageBitmap(draftSnapBase64)
@@ -706,7 +973,7 @@ fun DirectChatScreen(
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                         Text(
-                                            text = "Add a caption or tap Send",
+                                            text = "Add a caption or tap Send · $remainingPictureQuota/10 pics left (10m)",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -1279,6 +1546,38 @@ fun DirectChatScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showKickPaidMemberDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showBlockContactDialog && otherUid.isNotBlank()) {
+        AlertDialog(
+            onDismissRequest = { showBlockContactDialog = false },
+            title = { Text("Block $otherName?") },
+            text = {
+                Text(
+                    "Blocking $otherName will remove them from your friends list and stop all incoming private messages from them. You can unblock them later from this chat or Safety Center."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onBlockContact(otherUid, otherName)
+                        showBlockContactDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = LiveCoral,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("dm_confirm_block_button")
+                ) {
+                    Text("Block Contact")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBlockContactDialog = false }) {
                     Text("Cancel")
                 }
             }

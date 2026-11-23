@@ -147,13 +147,91 @@ beforeEach(async () => {
   }
 });
 
-// 1. UNAUTHENTICATED DENIAL
-test("Unauthenticated users cannot read or write any collection", async () => {
+// 1. UNAUTHENTICATED DENIAL & STRICT READ-ONLY PUBLIC TRIAL PREVIEW
+test("Unauthenticated users cannot read private collections or locked photos, and cannot write anywhere", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const ts = pastDate(3000);
+  const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      adultVerified: true,
+      birthYear: 1995,
+    })
+  );
+  await assertSucceeds(aliceDb.collection("rooms").doc("pub_room").set(validRoomPayload(ALICE_UID)));
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("priv_room").set({
+      ...validRoomPayload(ALICE_UID),
+      visibility: "PRIVATE",
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_unlocked").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorTier: "USER",
+      text: "Unlocked public update",
+      imageBase64: sampleBase64,
+      locked: false,
+      likedByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_locked").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorTier: "USER",
+      text: "Locked photo",
+      imageBase64: sampleBase64,
+      locked: true,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      likedByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("appConfig").doc("global").set({
+      bannerTitle: "Welcome",
+      bannerMessage: "New update live!",
+      bannerEnabled: true,
+      trialLoginsEnabled: true,
+      updatedByName: "Admin",
+      updatedAt: ts,
+    })
+  );
+
+  // Unauthenticated / trial users CANNOT read private collections or locked photos
   await assertFails(unauthDb.collection("users").doc(ALICE_UID).get());
-  await assertFails(unauthDb.collection("rooms").where("visibility", "==", "PUBLIC").get());
+  await assertFails(unauthDb.collection("rooms").doc("priv_room").get());
+  await assertFails(unauthDb.collection("profilePosts").doc("post_locked").get());
+  await assertFails(unauthDb.collection("profilePosts").get());
   await assertFails(unauthDb.collection("staffRoles").get());
   await assertFails(unauthDb.collection("userAlerts").get());
+  await assertFails(unauthDb.collection("directThreads").get());
+  await assertFails(unauthDb.collection("roomTransfers").doc(ALICE_UID).get());
+
+  // Unauthenticated / trial users CANNOT write anywhere (e.g., buy points or create rooms)
+  await assertFails(unauthDb.collection("rooms").doc("trial_room").set(validRoomPayload("trial_1")));
+  await assertFails(unauthDb.collection("pointTransactions").doc("tx_trial").set({ type: "BUY_POINTS" }));
+
+  // Unauthenticated / trial users CAN read login banner config, public rooms, and unlocked posts
+  await assertSucceeds(unauthDb.collection("appConfig").doc("global").get());
+  await assertSucceeds(unauthDb.collection("rooms").where("visibility", "==", "PUBLIC").get());
+  await assertSucceeds(unauthDb.collection("profilePosts").where("locked", "==", false).get());
 });
 
 // 2. USER PROFILES, ADMIN EDIT USER, AND USER CAPABILITY RESTRICTIONS
@@ -2119,3 +2197,352 @@ test("Users can update their own online/offline presence in userDirectory; cross
     })
   );
 });
+
+// 19. CHAT MODERATION: BLOCK CONTACT REMOVES FRIEND AND STOPS INCOMING MESSAGES
+test("Blocking a contact in private chat stops incoming messages and allows unblocking", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(3000);
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      isGroup: false,
+      groupName: "",
+      participantNamesById: { [ALICE_UID]: "Alice", [BOB_UID]: "Bob" },
+      kickedUserIds: [],
+      blockedByUserIds: [],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Hey",
+      lastMessageSenderId: BOB_UID,
+      unreadByUserIds: [ALICE_UID],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Alice blocks Bob in her profile and on the DM thread
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      blockedUserIds: [BOB_UID],
+      updatedAt: pastDate(2000),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      blockedByUserIds: [ALICE_UID],
+      unreadByUserIds: [],
+      updatedAt: pastDate(1900),
+    })
+  );
+
+  // Bob CANNOT send incoming messages once blocked
+  await assertFails(
+    bobDb.collection("directThreads").doc(threadId).collection("messages").doc("msg_blocked").set({
+      threadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Trying to message while blocked",
+      createdAt: pastDate(1500),
+    })
+  );
+  // Bob CANNOT remove Alice's block on the thread
+  await assertFails(
+    bobDb.collection("directThreads").doc(threadId).update({
+      blockedByUserIds: [],
+      updatedAt: pastDate(1400),
+    })
+  );
+
+  // Alice unblocks Bob -> Bob can message again
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      blockedUserIds: [],
+      updatedAt: pastDate(1200),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      blockedByUserIds: [],
+      updatedAt: pastDate(1100),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).collection("messages").doc("msg_after_unblock").set({
+      threadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Thanks for unblocking!",
+      createdAt: pastDate(900),
+    })
+  );
+});
+
+// 20. ADMIN APP CONFIG (LOGIN NEWS BANNER & TRIAL LOGIN TOGGLE)
+test("Admin manages login screen news banner and trial login toggle; non-admins are read-only", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+
+  await assertSucceeds(
+    adminDb.collection("appConfig").doc("global").set({
+      bannerTitle: "VoxStage v2.5 Live!",
+      bannerMessage: "Push-to-talk private chats and Google Play point packs are now live.",
+      bannerEnabled: true,
+      trialLoginsEnabled: false,
+      updatedByName: "Admin",
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Login screen (unauth) and regular users can read global banner/config
+  await assertSucceeds(unauthDb.collection("appConfig").doc("global").get());
+  await assertSucceeds(aliceDb.collection("appConfig").doc("global").get());
+
+  // Regular users CANNOT edit appConfig
+  await assertFails(
+    aliceDb.collection("appConfig").doc("global").update({
+      trialLoginsEnabled: true,
+      updatedAt: pastDate(1000),
+    })
+  );
+});
+
+// 21. ADMIN SEND USER TO A DIFFERENT ROOM (/roomTransfers/{userId})
+test("Admin can send a user to another room and target user can acknowledge transfer; non-admins denied", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  // Regular user cannot transfer Bob
+  await assertFails(
+    aliceDb.collection("roomTransfers").doc(BOB_UID).set({
+      userId: BOB_UID,
+      targetRoomId: "room_dest",
+      targetRoomTitle: "Main Stage",
+      fromRoomId: "room_src",
+      movedByAdminId: ALICE_UID,
+      movedByAdminName: "Alice",
+      reason: "Unauthorized move",
+      consumed: false,
+      createdAt: pastDate(2000),
+    })
+  );
+
+  // Admin sends Bob to room_dest
+  await assertSucceeds(
+    adminDb.collection("roomTransfers").doc(BOB_UID).set({
+      userId: BOB_UID,
+      targetRoomId: "room_dest",
+      targetRoomTitle: "Main Stage",
+      fromRoomId: "room_src",
+      movedByAdminId: ADMIN_UID,
+      movedByAdminName: "Admin",
+      reason: "Moved to main stage",
+      consumed: false,
+      createdAt: pastDate(1500),
+    })
+  );
+
+  // Bob can read and mark his own transfer consumed, while Alice cannot read Bob's transfer
+  await assertFails(aliceDb.collection("roomTransfers").doc(BOB_UID).get());
+  await assertSucceeds(bobDb.collection("roomTransfers").doc(BOB_UID).get());
+  await assertSucceeds(
+    bobDb.collection("roomTransfers").doc(BOB_UID).update({
+      consumed: true,
+    })
+  );
+});
+
+// 22. GOOGLE PLAY BILLING METADATA ON BUY_POINTS TRANSACTIONS
+test("BUY_POINTS ledger records verified Google Play Order ID and Product SKU", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  await assertSucceeds(
+    aliceDb.collection("pointTransactions").doc("tx_play_1").set({
+      type: "BUY_POINTS",
+      buyerId: ALICE_UID,
+      buyerName: "Alice",
+      creatorId: "",
+      creatorName: "",
+      postId: "",
+      pointsDelta: 10,
+      grossCents: 1000,
+      creatorShareCents: 0,
+      platformShareCents: 0,
+      playOrderId: "GPA.3312-4456-7789-01234",
+      playProductId: "voxstage_points_10",
+      createdAt: pastDate(1000),
+    })
+  );
+});
+
+// 23. PICTURE UPLOAD RATE LIMIT: MAX 10 PICTURES IN 10 MINUTES
+test("Users are strictly limited to a maximum of 10 picture uploads in 10 minutes", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const now = Date.now();
+  const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const tenRecentTimestamps = Array.from({ length: 10 }, (_, idx) => now - (10 - idx) * 10_000);
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+
+  // Record 10 recent picture uploads within the last 10 minutes
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      pictureUploadTimestamps: tenRecentTimestamps,
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // 11th picture upload in a profile post MUST be denied by rules
+  await assertFails(
+    aliceDb.collection("profilePosts").doc("post_pic_11").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorTier: "USER",
+      text: "11th picture",
+      imageBase64: sampleBase64,
+      locked: false,
+      likedByUserIds: [],
+      createdAt: pastDate(1500),
+      updatedAt: pastDate(1500),
+    })
+  );
+
+  // Text-only post (no picture) STILL succeeds even at picture limit
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_text_only").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorTier: "USER",
+      text: "Text update works!",
+      imageBase64: "",
+      locked: false,
+      likedByUserIds: [],
+      createdAt: pastDate(1400),
+      updatedAt: pastDate(1400),
+    })
+  );
+
+  // User CANNOT tamper with active timestamps to bypass the 10-minute cooldown
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      pictureUploadTimestamps: [],
+      updatedAt: pastDate(1000),
+    })
+  );
+});
+
+// 24. FRIEND ATTENTION ALERTS IN PRIVATE MESSAGES (ACCEPTED FRIENDS ONLY, MAX 1 EVERY 5 MINUTES)
+test("Friend attention alerts require accepted friendship and enforce a 5-minute cooldown", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const ts = pastDate(5000);
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Hey",
+      lastMessageSenderId: ALICE_UID,
+      unreadByUserIds: [BOB_UID],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Without an ACCEPTED friendship, sending an attention alert MUST fail
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      lastAlertSenderId: ALICE_UID,
+      lastAlertSenderName: "Alice",
+      lastAlertAtMillis: Date.now(),
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Seed ACCEPTED friendship between Alice and Bob
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("friendships").doc(threadId).set({
+      userIds: [ALICE_UID, BOB_UID],
+      requesterId: ALICE_UID,
+      requesterName: "Alice",
+      requesterColorHex: "#0088FF",
+      requesterTier: "USER",
+      recipientId: BOB_UID,
+      recipientName: "Bob",
+      recipientColorHex: "#0088FF",
+      recipientTier: "USER",
+      status: "ACCEPTED",
+      createdAt: ts,
+      updatedAt: ts,
+    });
+  });
+
+  // First attention alert from Alice succeeds!
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      lastAlertSenderId: ALICE_UID,
+      lastAlertSenderName: "Alice",
+      lastAlertAtMillis: Date.now(),
+      updatedAt: pastDate(1500),
+    })
+  );
+
+  // Second attention alert within 5 minutes MUST be denied
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      lastAlertSenderId: ALICE_UID,
+      lastAlertSenderName: "Alice",
+      lastAlertAtMillis: Date.now(),
+      updatedAt: pastDate(1000),
+    })
+  );
+
+  // Simulate 5+ minutes elapsed -> Alice CAN send another attention alert
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("directThreads").doc(threadId).update({
+      lastAlertAtMillis: Date.now() - 310_000,
+    });
+  });
+
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      lastAlertSenderId: ALICE_UID,
+      lastAlertSenderName: "Alice",
+      lastAlertAtMillis: Date.now(),
+      updatedAt: pastDate(500),
+    })
+  );
+});
+
+

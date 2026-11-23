@@ -29,6 +29,7 @@
         "adultVerified": { "type": "boolean", "description": "Whether the user has verified they are 18+ years old (required to lock photos or view/unlock locked photos)." },
         "birthYear": { "type": "integer", "description": "User's self-verified birth year (0 if unverified; must satisfy age >= 18 when adultVerified is true)." },
         "blockedUserIds": { "type": "array", "description": "Bounded list of up to 100 blocked UIDs." },
+        "pictureUploadTimestamps": { "type": "array", "description": "Sliding-window epoch ms timestamps (max 10) enforcing max 10 picture uploads per 10 minutes." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
       },
@@ -290,6 +291,7 @@
         "groupName": { "type": "string", "description": "Optional display name for a group private chat." },
         "participantNamesById": { "type": "object", "description": "Map of UID to display name for group chat participants." },
         "kickedUserIds": { "type": "array", "description": "UIDs kicked from sending messages in this thread." },
+        "blockedByUserIds": { "type": "array", "description": "UIDs of participants who have blocked the other participant in this 1-on-1 thread." },
         "userAId": { "type": "string" },
         "userAName": { "type": "string" },
         "userAColorHex": { "type": "string" },
@@ -301,6 +303,9 @@
         "lastMessageText": { "type": "string" },
         "lastMessageSenderId": { "type": "string" },
         "unreadByUserIds": { "type": "array" },
+        "lastAlertSenderId": { "type": "string", "description": "UID of friend who last sent a ring & vibrate attention alert." },
+        "lastAlertSenderName": { "type": "string", "description": "Display name of friend who last sent an attention alert." },
+        "lastAlertAtMillis": { "type": "integer", "description": "Epoch ms of the last attention alert (enforces 1 alert per 5 minutes)." },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -442,12 +447,45 @@
         "grossCents": { "type": "integer" },
         "creatorShareCents": { "type": "integer" },
         "platformShareCents": { "type": "integer" },
+        "playOrderId": { "type": "string", "description": "Optional verified Google Play Billing order ID for BUY_POINTS purchases." },
+        "playProductId": { "type": "string", "description": "Optional Google Play Billing product SKU ID for BUY_POINTS purchases." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "type", "buyerId", "buyerName", "creatorId", "creatorName", "postId",
         "pointsDelta", "grossCents", "creatorShareCents", "platformShareCents", "createdAt"
       ]
+    },
+    "AppConfig": {
+      "title": "AppConfig",
+      "description": "Global Admin-managed configuration including the Login Screen news/updates banner and 1-day trial login toggle.",
+      "type": "object",
+      "properties": {
+        "bannerTitle": { "type": "string", "description": "Banner headline shown on the main login screen (0-80 chars)." },
+        "bannerMessage": { "type": "string", "description": "Updates or news body shown on the main login screen (0-400 chars)." },
+        "bannerEnabled": { "type": "boolean", "description": "Whether the news/updates banner is visible on the login screen." },
+        "trialLoginsEnabled": { "type": "boolean", "description": "Whether 1-day trial logins are permitted by the administrator." },
+        "updatedByName": { "type": "string", "description": "Display name of the administrator who last updated config." },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["bannerTitle", "bannerMessage", "bannerEnabled", "trialLoginsEnabled", "updatedByName", "updatedAt"]
+    },
+    "RoomTransfer": {
+      "title": "RoomTransfer",
+      "description": "Admin-initiated real-time directive sending a specific user to another live room.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Target user UID matching document ID." },
+        "targetRoomId": { "type": "string", "description": "Destination live room ID." },
+        "targetRoomTitle": { "type": "string", "description": "Destination live room title." },
+        "fromRoomId": { "type": "string", "description": "Optional origin room ID." },
+        "movedByAdminId": { "type": "string", "description": "UID of the administrator who sent the user." },
+        "movedByAdminName": { "type": "string", "description": "Display name of the administrator." },
+        "reason": { "type": "string", "description": "Optional reason shown to the user." },
+        "consumed": { "type": "boolean", "description": "Set to true by the recipient client once navigated." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "targetRoomId", "targetRoomTitle", "fromRoomId", "movedByAdminId", "movedByAdminName", "reason", "consumed", "createdAt"]
     }
   },
   "firestore": {
@@ -521,7 +559,15 @@
     },
     "/pointTransactions/{txId}": {
       "schema": { "$ref": "#/entities/PointTransaction" },
-      "description": "Append-only ledger tracking point purchases, 2-pt photo unlocks ($1/$1), 5-pt Discovery boosts ($5), $10 paid DMs ($5/$5), and $15/mo subscriptions ($7.50/$7.50)."
+      "description": "Append-only ledger tracking Google Play point purchases, 2-pt photo unlocks ($1/$1), 5-pt Discovery boosts ($5), $10 paid DMs ($5/$5), and $15/mo subscriptions ($7.50/$7.50)."
+    },
+    "/appConfig/{configId}": {
+      "schema": { "$ref": "#/entities/AppConfig" },
+      "description": "Singleton global app config ('global') controlling login screen news/updates banner and trial login toggle."
+    },
+    "/roomTransfers/{userId}": {
+      "schema": { "$ref": "#/entities/RoomTransfer" },
+      "description": "Admin-issued live room transfer directives automatically moving a target user into a different room."
     }
   }
 }

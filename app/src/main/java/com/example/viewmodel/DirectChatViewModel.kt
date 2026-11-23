@@ -11,6 +11,7 @@ import com.example.data.UiState
 import com.example.data.VoxStageRepository
 import com.example.data.unwrapFirestoreError
 import com.example.media.LiveKitRoomManager
+import com.example.media.PrivateCallForegroundService
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
@@ -33,7 +34,8 @@ class DirectChatViewModel(
     val threadId: String
 ) : ViewModel() {
 
-    val liveKitManager = LiveKitRoomManager(context.applicationContext)
+    private val appContext = context.applicationContext
+    val liveKitManager = LiveKitRoomManager(appContext)
 
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
@@ -82,6 +84,16 @@ class DirectChatViewModel(
             initialValue = UiState.Loading
         )
 
+    init {
+        viewModelScope.launch {
+            PrivateCallForegroundService.endCallEvents.collect { endedThreadId ->
+                if (endedThreadId == threadId && _isInCall.value) {
+                    endCall()
+                }
+            }
+        }
+    }
+
     fun markReadIfNeeded(thread: DirectThread?) {
         if (thread == null || !thread.isUnreadFor(currentUserId)) return
         viewModelScope.launch {
@@ -119,9 +131,15 @@ class DirectChatViewModel(
         }
     }
 
+    private fun currentPeerTitle(): String {
+        val thread = (threadState.value as? UiState.Success)?.data
+        return thread?.displayTitle(currentUserId)?.ifBlank { "Private Chat" } ?: "Private Chat"
+    }
+
     private suspend fun ensureCallConnected(myName: String): Boolean {
         if (liveKitManager.isConnected.value) {
             _isInCall.value = true
+            PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
             return true
         }
         _isConnectingCall.value = true
@@ -134,6 +152,7 @@ class DirectChatViewModel(
         return res.fold(
             onSuccess = {
                 _isInCall.value = true
+                PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
                 true
             },
             onFailure = { err ->
@@ -152,7 +171,20 @@ class DirectChatViewModel(
             _isMicActive.value = wantActive
             liveKitManager.setMicEnabled(wantActive)
             if (wantActive) {
-                _snackbarEvents.tryEmit("Private voice mic is LIVE")
+                PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
+                _snackbarEvents.tryEmit("Private voice mic is LIVE (continues in background)")
+            }
+        }
+    }
+
+    fun setPttLiveMic(myName: String, speaking: Boolean) {
+        if (_isConnectingCall.value) return
+        viewModelScope.launch {
+            if (speaking && !ensureCallConnected(myName)) return@launch
+            _isMicActive.value = speaking
+            liveKitManager.setMicEnabled(speaking)
+            if (speaking) {
+                PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
             }
         }
     }
@@ -186,12 +218,16 @@ class DirectChatViewModel(
             _isMicActive.value = false
             _isCamActive.value = false
             _isInCall.value = false
+            PrivateCallForegroundService.stop(appContext)
             _snackbarEvents.tryEmit("Private call ended")
         }
     }
 
     override fun onCleared() {
         super.onCleared()
+        if (PrivateCallForegroundService.activeThreadId == threadId) {
+            PrivateCallForegroundService.stop(appContext)
+        }
         liveKitManager.disconnect()
     }
 

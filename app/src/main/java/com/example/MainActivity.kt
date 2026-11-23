@@ -72,9 +72,23 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import android.app.Activity
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material3.OutlinedTextField
 import com.example.auth.AuthScreen
+import com.example.auth.TrialSession
+import com.example.auth.TrialSessionManager
 import com.example.auth.authStateFlow
 import com.example.auth.signOutFromVoxStage
+import com.example.billing.PlayBillingEvent
+import com.example.billing.PlayBillingManager
+import com.example.data.AppConfig
+import com.example.data.DirectThread
 import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.data.VoxStageRepository
@@ -87,6 +101,7 @@ import com.example.ui.screens.LobbyScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.RoomScreen
 import com.example.ui.screens.SafetyScreen
+import com.example.ui.screens.TrialVoxStageApp
 import com.example.ui.components.AgeVerificationDialog
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.showTopMessage
@@ -170,13 +185,55 @@ fun VoxStageRoot(
     pendingDmThreadId: String? = null,
     onConsumePendingDmThread: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val auth = Firebase.auth
     val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
     val user = currentUser
 
+    val firestoreDatabaseId = remember(context) {
+        context.getString(R.string.firestore_database_id)
+    }
+    val publicConfigRepo = remember(firestoreDatabaseId) {
+        VoxStageRepository(FirebaseFirestore.getInstance(firestoreDatabaseId))
+    }
+    val appConfig by publicConfigRepo.observeAppConfig().collectAsStateWithLifecycle(initialValue = AppConfig())
+
+    var activeTrialSession by remember {
+        mutableStateOf<TrialSession?>(TrialSessionManager.getActiveValidSession(context))
+    }
+    var trialNoticeMessage by remember { mutableStateOf<String?>(null) }
+
     if (user == null) {
+        val currentTrial = activeTrialSession
         VoxStageTheme(darkTheme = false) {
-            AuthScreen(onAuthSuccess = {})
+            if (currentTrial != null && appConfig.trialLoginsEnabled && !currentTrial.isExpired()) {
+                TrialVoxStageApp(
+                    trialSession = currentTrial,
+                    appConfig = appConfig,
+                    onExitToGoogleSignIn = { reason ->
+                        TrialSessionManager.deactivateTrial(context)
+                        activeTrialSession = null
+                        trialNoticeMessage = reason
+                    }
+                )
+            } else {
+                if (currentTrial != null) {
+                    TrialSessionManager.deactivateTrial(context)
+                    activeTrialSession = null
+                }
+                AuthScreen(
+                    appConfig = appConfig,
+                    trialNoticeMessage = trialNoticeMessage,
+                    onAuthSuccess = {
+                        trialNoticeMessage = null
+                        activeTrialSession = null
+                    },
+                    onTrialLoginStarted = { startedSession ->
+                        trialNoticeMessage = null
+                        activeTrialSession = startedSession
+                    }
+                )
+            }
         }
     } else {
         val uid = user.uid
@@ -249,10 +306,19 @@ private fun AuthenticatedVoxStageApp(
     val staffInvites by mainViewModel.staffInvitesState.collectAsStateWithLifecycle()
     val allUsers by mainViewModel.allUsersState.collectAsStateWithLifecycle()
     val allAlerts by mainViewModel.allAlertsState.collectAsStateWithLifecycle()
+    val appConfig by mainViewModel.appConfigState.collectAsStateWithLifecycle()
+    val pendingRoomTransfer by mainViewModel.pendingRoomTransferState.collectAsStateWithLifecycle()
     val searchQuery by mainViewModel.searchQuery.collectAsStateWithLifecycle()
     val selectedCategory by mainViewModel.selectedCategory.collectAsStateWithLifecycle()
     val showOnlyMyRooms by mainViewModel.showOnlyMyRooms.collectAsStateWithLifecycle()
     val isCreatingRoom by mainViewModel.isCreatingRoom.collectAsStateWithLifecycle()
+
+    // Google Play Store Billing client for buying points
+    val playBillingManager = remember(context) { PlayBillingManager(context) }
+    DisposableEffect(playBillingManager) {
+        playBillingManager.startConnection()
+        onDispose { playBillingManager.endConnection() }
+    }
 
     val userProfile = (userProfileState as? UiState.Success)?.data
     val nightModeEnabled = userProfile?.nightModeEnabled ?: false
@@ -262,7 +328,13 @@ private fun AuthenticatedVoxStageApp(
     }
     var profileInitialTab by remember { mutableIntStateOf(0) }
     var showAgeVerificationDialog by remember { mutableStateOf(false) }
+    var incomingQuickReplyThread by remember { mutableStateOf<DirectThread?>(null) }
+    var quickReplyDraft by remember { mutableStateOf("") }
+    var incomingFriendAlertThread by remember { mutableStateOf<DirectThread?>(null) }
     val viewerIsAdultVerified = userProfile?.isAdult18Plus() == true
+    val liveRoomsList = remember(publicRoomsState) {
+        (publicRoomsState as? UiState.Success)?.data.orEmpty()
+    }
 
     val unreadChatsCount = remember(directThreadsState, currentUserId) {
         (directThreadsState as? UiState.Success)?.data?.count { it.isUnreadFor(currentUserId) } ?: 0
@@ -379,6 +451,54 @@ private fun AuthenticatedVoxStageApp(
     LaunchedEffect(Unit) {
         mainViewModel.snackbarEvents.collect { msg ->
             snackbarHostState.showTopMessage(msg)
+        }
+    }
+
+    // Credit points in Firestore ONLY after Google Play Store verifies & consumes the purchase
+    LaunchedEffect(playBillingManager) {
+        playBillingManager.events.collect { event ->
+            when (event) {
+                is PlayBillingEvent.PurchaseVerifiedAndConsumed -> {
+                    mainViewModel.buyPoints(
+                        pointsToBuy = event.points,
+                        playOrderId = event.orderId,
+                        playProductId = event.productId
+                    )
+                }
+                is PlayBillingEvent.Message -> {
+                    snackbarHostState.showTopMessage(event.text)
+                }
+            }
+        }
+    }
+
+    // Automatically navigate user when an Admin sends them to a different room
+    LaunchedEffect(pendingRoomTransfer?.targetRoomId, pendingRoomTransfer?.createdAt) {
+        val transfer = pendingRoomTransfer ?: return@LaunchedEffect
+        if (transfer.targetRoomId.isNotBlank()) {
+            mainViewModel.consumeRoomTransfer()
+            val note = if (transfer.reason.isNotBlank()) " (${transfer.reason})" else ""
+            snackbarHostState.showTopMessage(
+                "${transfer.movedByAdminName} moved you to \"${transfer.targetRoomTitle}\"$note"
+            )
+            navController.navigate("room/${transfer.targetRoomId}") {
+                launchSingleTop = true
+            }
+        }
+    }
+
+    // Optional in-app Private Message Quick Reply Popup
+    LaunchedEffect(Unit) {
+        DirectMessageNotificationHelper.inAppPopupEvents.collect { thread ->
+            incomingQuickReplyThread = thread
+            quickReplyDraft = ""
+        }
+    }
+
+    // Incoming Friend Attention Alert popup (paired with ring + vibrate)
+    LaunchedEffect(Unit) {
+        DirectMessageNotificationHelper.friendAlertEvents.collect { thread ->
+            incomingFriendAlertThread = thread
         }
     }
 
@@ -650,6 +770,8 @@ private fun AuthenticatedVoxStageApp(
                                     staffInvites = staffInvites,
                                     allUsers = allUsers,
                                     allAlerts = allAlerts,
+                                    appConfig = appConfig,
+                                    liveRooms = liveRoomsList,
                                     onResolveReport = mainViewModel::resolveReport,
                                     onUnblockUser = mainViewModel::unblockUser,
                                     onAddStaffInvite = mainViewModel::addStaffInvite,
@@ -661,7 +783,9 @@ private fun AuthenticatedVoxStageApp(
                                     onSuspendUser = mainViewModel::suspendUser,
                                     onSendDirectAlert = mainViewModel::sendDirectAlert,
                                     onAdminEditAlert = mainViewModel::adminEditAlert,
-                                    onAdminDeleteAlert = mainViewModel::adminDeleteAlert
+                                    onAdminDeleteAlert = mainViewModel::adminDeleteAlert,
+                                    onUpdateAppConfig = mainViewModel::updateAppConfig,
+                                    onSendUserToRoom = mainViewModel::sendUserToRoom
                                 )
                             }
 
@@ -692,7 +816,17 @@ private fun AuthenticatedVoxStageApp(
                                     onOpenUserProfile = ::openUserProfile,
                                     onToggleLikePost = mainViewModel::toggleLikePost,
                                     onDeletePost = mainViewModel::deleteProfilePost,
-                                    onBuyPoints = mainViewModel::buyPoints,
+                                    onBuyPoints = { pointsToBuy ->
+                                        val hostActivity = context as? Activity
+                                        if (hostActivity != null) {
+                                            playBillingManager.launchPointsPurchase(hostActivity, pointsToBuy)
+                                        } else {
+                                            scope.launch {
+                                                snackbarHostState.showTopMessage("Unable to open Google Play checkout.")
+                                            }
+                                        }
+                                    },
+                                    playBillingManager = playBillingManager,
                                     onSetDmPolicy = mainViewModel::setDmPolicy,
                                     onKickPaidDmMember = mainViewModel::kickPaidDmMember,
                                     onRequestAgeVerification = { showAgeVerificationDialog = true },
@@ -799,6 +933,11 @@ private fun AuthenticatedVoxStageApp(
                                 val dmThreadState by dmViewModel.threadState.collectAsStateWithLifecycle()
                                 val dmOtherUid = (dmThreadState as? UiState.Success)?.data
                                     ?.otherUserId(currentUserId).orEmpty()
+                                val isAcceptedFriend = remember(friendships, dmOtherUid, currentUserId) {
+                                    dmOtherUid.isNotBlank() && friendships.any {
+                                        it.isAccepted() && it.otherUserId(currentUserId) == dmOtherUid
+                                    }
+                                }
                                 DirectChatScreen(
                                     viewModel = dmViewModel,
                                     userProfile = effectiveProfile,
@@ -806,6 +945,7 @@ private fun AuthenticatedVoxStageApp(
                                     otherPhotoBase64 = directoryPhotoByUid[dmOtherUid].orEmpty(),
                                     directoryEntries = directoryEntries,
                                     paidDmMembersForMe = paidDmMembersForMe,
+                                    isAcceptedFriend = isAcceptedFriend,
                                     onAddUserToChat = { currentThread, addedUser ->
                                         mainViewModel.addUserToPrivateChat(
                                             currentThread = currentThread,
@@ -818,13 +958,19 @@ private fun AuthenticatedVoxStageApp(
                                         )
                                     },
                                     onKickPaidMember = mainViewModel::kickPaidDmMember,
+                                    onBlockContact = { targetUid, targetName ->
+                                        mainViewModel.blockContact(targetUid, targetName)
+                                    },
+                                    onUnblockContact = mainViewModel::unblockUser,
+                                    onSendFriendAttentionAlert = { targetThread ->
+                                        mainViewModel.sendFriendAttentionAlert(context, targetThread)
+                                    },
                                     onOpenUserProfile = ::openUserProfile,
                                     onBack = { navController.popBackStack() }
                                 )
                             }
 
-            
-                                                        composable(
+                            composable(
                                 route = ROUTE_ROOM,
                                 arguments = listOf(navArgument("roomId") { type = NavType.StringType })
                             ) { entry ->
@@ -854,6 +1000,8 @@ private fun AuthenticatedVoxStageApp(
                                     viewModel = roomViewModel,
                                     userProfile = effectiveProfile,
                                     staffCapabilities = staffCapabilities,
+                                    availableRooms = liveRoomsList,
+                                    onSendUserToRoom = mainViewModel::sendUserToRoom,
                                     onExitRoom = { navController.popBackStack() }
                                 )
                             }
@@ -908,14 +1056,125 @@ private fun AuthenticatedVoxStageApp(
 
             if (showAgeVerificationDialog) {
                 AgeVerificationDialog(
-                    onConfirmBirthYear = { year ->
-                        mainViewModel.verifyAge18Plus(year) {
+                    userEmail = initialEmail.ifBlank { Firebase.auth.currentUser?.email },
+                    onConfirmBirthYear = { year, source ->
+                        mainViewModel.verifyAge18Plus(year, source) {
                             showAgeVerificationDialog = false
                         }
                     },
                     onDismiss = { showAgeVerificationDialog = false }
                 )
             }
+
+            // Optional In-App Private Message Quick Reply Popup
+            incomingQuickReplyThread?.let { popupThread ->
+                val senderTitle = popupThread.displayTitle(currentUserId)
+                val previewMsg = popupThread.lastMessageText.ifBlank { "Sent you a private message" }
+                AlertDialog(
+                    onDismissRequest = { incomingQuickReplyThread = null },
+                    title = { Text("New Message · $senderTitle") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(
+                                text = previewMsg,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            OutlinedTextField(
+                                value = quickReplyDraft,
+                                onValueChange = { quickReplyDraft = it.take(300) },
+                                label = { Text("Quick Reply") },
+                                placeholder = { Text("Type a quick reply…") },
+                                singleLine = false,
+                                maxLines = 3,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("dm_popup_quick_reply_input")
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val textToSend = quickReplyDraft.trim()
+                                if (textToSend.isNotEmpty()) {
+                                    mainViewModel.sendQuickReplyToThread(popupThread, textToSend) {
+                                        incomingQuickReplyThread = null
+                                        quickReplyDraft = ""
+                                    }
+                                } else {
+                                    incomingQuickReplyThread = null
+                                    navController.navigate("dm/${popupThread.id}") {
+                                        launchSingleTop = true
+                                    }
+                                }
+                            },
+                            modifier = Modifier.testTag("dm_popup_send_reply_button")
+                        ) {
+                            Text(if (quickReplyDraft.isNotBlank()) "Send Reply" else "Open Chat")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                incomingQuickReplyThread = null
+                                navController.navigate("dm/${popupThread.id}") {
+                                    launchSingleTop = true
+                                }
+                            },
+                            modifier = Modifier.testTag("dm_popup_open_chat_button")
+                        ) {
+                            Text("Open Chat")
+                        }
+                    }
+                )
+            }
+
+            // Incoming Friend Attention Alert Dialog (accompanied by ring & vibration)
+            incomingFriendAlertThread?.let { alertThread ->
+                val friendName = alertThread.lastAlertSenderName.ifBlank {
+                    alertThread.otherName(currentUserId).ifBlank { "Your friend" }
+                }
+                AlertDialog(
+                    onDismissRequest = { incomingFriendAlertThread = null },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Rounded.NotificationsActive,
+                            contentDescription = "Friend attention alert",
+                            tint = ModAmber
+                        )
+                    },
+                    title = { Text("$friendName wants your attention!") },
+                    text = {
+                        Text(
+                            "$friendName sent you a private chat ring & vibrate attention alert. Jump into the chat now?"
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                incomingFriendAlertThread = null
+                                navController.navigate("dm/${alertThread.id}") {
+                                    launchSingleTop = true
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ModAmber,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("friend_alert_open_chat_button")
+                        ) {
+                            Text("Open Chat")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { incomingFriendAlertThread = null }) {
+                            Text("Dismiss")
+                        }
+                    }
+                )
+            }
         }
     }
 }
+

@@ -89,6 +89,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.CreatorSubscription
 import com.example.data.DmAccessPass
@@ -157,6 +158,7 @@ fun ProfileScreen(
     onToggleLikePost: (ProfilePost) -> Unit,
     onDeletePost: (ProfilePost) -> Unit,
     onBuyPoints: (Long) -> Unit,
+    playBillingManager: com.example.billing.PlayBillingManager? = null,
     onSetDmPolicy: (DmPolicy) -> Unit,
     onKickPaidDmMember: (senderId: String, senderName: String) -> Unit,
     onRequestAgeVerification: () -> Unit,
@@ -182,6 +184,12 @@ fun ProfileScreen(
 
     var dmNotificationsEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isDmNotificationsEnabled(context))
+    }
+    var quickReplyPopupEnabled by remember {
+        mutableStateOf(DirectMessageNotificationPrefs.isQuickReplyPopupEnabled(context))
+    }
+    var friendAttentionAlertsEnabled by remember {
+        mutableStateOf(DirectMessageNotificationPrefs.isFriendAttentionAlertsEnabled(context))
     }
     var hasNotificationPermission by remember {
         mutableStateOf(DirectMessageNotificationHelper.hasNotificationPermission(context))
@@ -904,6 +912,7 @@ fun ProfileScreen(
                         recentTransactions = myTransactions.take(6),
                         appOwnerRevenueCents = allTransactionsForAdmin.sumOf { it.platformShareCents },
                         isProcessingWallet = isProcessingWallet,
+                        playBillingManager = playBillingManager,
                         onBuyPoints = onBuyPoints
                     )
                 }
@@ -963,7 +972,7 @@ fun ProfileScreen(
                                     text = if (isAdultVerified) {
                                         "Born ${userProfile?.birthYear} · Eligible to lock & unlock 18+ photos"
                                     } else {
-                                        "Verify that you are 18+ to lock photos or view locked photos"
+                                        "Verify 18+ via your Google Account or Play Age Signals to lock or view locked photos"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1206,6 +1215,46 @@ fun ProfileScreen(
                                 }
                             )
 
+                            Box(modifier = Modifier.testTag("toggle_dm_popup_quick_reply")) {
+                                ToggleSettingRow(
+                                    title = "Background Message Pop-ups & Quick Reply",
+                                    subtitle = "Pop open message details with inline Quick Reply when a private message arrives",
+                                    checked = quickReplyPopupEnabled,
+                                    onCheckedChange = { enable ->
+                                        if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                            !DirectMessageNotificationHelper.hasNotificationPermission(context)
+                                        ) {
+                                            dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        }
+                                        quickReplyPopupEnabled = enable
+                                        DirectMessageNotificationPrefs.setQuickReplyPopupEnabled(context, enable)
+                                        if (enable) {
+                                            DirectMessageNotificationHelper.ensureChannel(context)
+                                        }
+                                    }
+                                )
+                            }
+
+                            Box(modifier = Modifier.testTag("toggle_friend_attention_alerts")) {
+                                ToggleSettingRow(
+                                    title = "Friend Attention Alerts (Ring & Vibrate)",
+                                    subtitle = "Allow accepted friends to ring and vibrate your phone from private chat (max 1 every 5 min)",
+                                    checked = friendAttentionAlertsEnabled,
+                                    onCheckedChange = { enable ->
+                                        if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                            !DirectMessageNotificationHelper.hasNotificationPermission(context)
+                                        ) {
+                                            dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        }
+                                        friendAttentionAlertsEnabled = enable
+                                        DirectMessageNotificationPrefs.setFriendAttentionAlertsEnabled(context, enable)
+                                        if (enable) {
+                                            DirectMessageNotificationHelper.ensureChannel(context)
+                                        }
+                                    }
+                                )
+                            }
+
                             Button(
                                 onClick = {
                                     onSaveProfile(
@@ -1388,10 +1437,22 @@ private fun PointsWalletSettingsCard(
     recentTransactions: List<PointTransaction>,
     appOwnerRevenueCents: Long,
     isProcessingWallet: Boolean,
+    playBillingManager: com.example.billing.PlayBillingManager? = null,
     onBuyPoints: (Long) -> Unit
 ) {
     val pointsBalance = userProfile?.pointsBalance ?: 0L
     val creatorEarningsCents = userProfile?.creatorEarningsCents ?: 0L
+    val billingState = playBillingManager?.connectionState?.collectAsStateWithLifecycle()?.value
+        ?: com.example.billing.PlayBillingConnectionState.DISCONNECTED
+    val billingBanner = playBillingManager?.statusBanner?.collectAsStateWithLifecycle()?.value
+    val isPlayInFlight = playBillingManager?.isPurchaseInFlight?.collectAsStateWithLifecycle()?.value ?: false
+    val playProducts = playBillingManager?.productDetailsByPoints?.collectAsStateWithLifecycle()?.value.orEmpty()
+    val buyEnabled = !isProcessingWallet && !isPlayInFlight
+    fun priceLabelFor(points: Long): String {
+        return playProducts[points]?.oneTimePurchaseOfferDetails?.formattedPrice
+            ?: playBillingManager?.formattedPriceFor(points)
+            ?: formatUsdCents(points * 100L)
+    }
 
     Surface(
         shape = RoundedCornerShape(20.dp),
@@ -1407,7 +1468,8 @@ private fun PointsWalletSettingsCard(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
                     imageVector = Icons.Rounded.AccountBalanceWallet,
@@ -1418,8 +1480,49 @@ private fun PointsWalletSettingsCard(
                 Text(
                     text = "Points & Creator Wallet",
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
                 )
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = when (billingState) {
+                        com.example.billing.PlayBillingConnectionState.CONNECTED -> SafetyEmerald.copy(alpha = 0.16f)
+                        com.example.billing.PlayBillingConnectionState.CONNECTING -> ModAmber.copy(alpha = 0.16f)
+                        else -> LiveCoral.copy(alpha = 0.14f)
+                    }
+                ) {
+                    Text(
+                        text = when (billingState) {
+                            com.example.billing.PlayBillingConnectionState.CONNECTED -> "Google Play Ready"
+                            com.example.billing.PlayBillingConnectionState.CONNECTING -> "Connecting Play…"
+                            com.example.billing.PlayBillingConnectionState.UNAVAILABLE -> "Play Unavailable"
+                            com.example.billing.PlayBillingConnectionState.DISCONNECTED -> "Play Offline"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = when (billingState) {
+                            com.example.billing.PlayBillingConnectionState.CONNECTED -> SafetyEmerald
+                            com.example.billing.PlayBillingConnectionState.CONNECTING -> ModAmber
+                            else -> LiveCoral
+                        },
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            if (!billingBanner.isNullOrBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = ModAmber.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = billingBanner,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
             }
 
             // Balance + Creator Earnings + (Admin) App Owner Revenue Summary
@@ -1507,19 +1610,20 @@ private fun PointsWalletSettingsCard(
             }
 
             Text(
-                text = "Buy Points (2 pts = \$2 · 5 pts = \$5). Locked photos cost 2 pts (\$1 owner / \$1 app), Discovery Boost costs 5 pts (\$5), and locked Paid DMs cost \$10 (\$5 user / \$5 app).",
+                text = "Buy Points via Google Play Store (2 pts = \$2 · 5 pts = \$5). Locked photos cost 2 pts (\$1 owner / \$1 app), Discovery Boost costs 5 pts (\$5), and locked Paid DMs cost \$10 (\$5 user / \$5 app).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            // Buy Points Packages (2 pts = $2, 5 pts = $5, 10 pts = $10, 20 pts = $20, 50 pts = $50)
+            // Buy Points Packages via Google Play Store Billing
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 BuyPointsPackageButton(
                     points = 2L,
-                    enabled = !isProcessingWallet,
+                    priceLabel = priceLabelFor(2L),
+                    enabled = buyEnabled,
                     onClick = { onBuyPoints(2L) },
                     modifier = Modifier
                         .weight(1f)
@@ -1527,7 +1631,8 @@ private fun PointsWalletSettingsCard(
                 )
                 BuyPointsPackageButton(
                     points = 5L,
-                    enabled = !isProcessingWallet,
+                    priceLabel = priceLabelFor(5L),
+                    enabled = buyEnabled,
                     onClick = { onBuyPoints(5L) },
                     modifier = Modifier
                         .weight(1f)
@@ -1535,7 +1640,8 @@ private fun PointsWalletSettingsCard(
                 )
                 BuyPointsPackageButton(
                     points = 10L,
-                    enabled = !isProcessingWallet,
+                    priceLabel = priceLabelFor(10L),
+                    enabled = buyEnabled,
                     onClick = { onBuyPoints(10L) },
                     modifier = Modifier
                         .weight(1f)
@@ -1548,7 +1654,8 @@ private fun PointsWalletSettingsCard(
             ) {
                 BuyPointsPackageButton(
                     points = 20L,
-                    enabled = !isProcessingWallet,
+                    priceLabel = priceLabelFor(20L),
+                    enabled = buyEnabled,
                     onClick = { onBuyPoints(20L) },
                     modifier = Modifier
                         .weight(1f)
@@ -1556,7 +1663,8 @@ private fun PointsWalletSettingsCard(
                 )
                 BuyPointsPackageButton(
                     points = 50L,
-                    enabled = !isProcessingWallet,
+                    priceLabel = priceLabelFor(50L),
+                    enabled = buyEnabled,
                     onClick = { onBuyPoints(50L) },
                     modifier = Modifier
                         .weight(1f)
@@ -1664,6 +1772,7 @@ private fun PointsWalletSettingsCard(
 @Composable
 private fun BuyPointsPackageButton(
     points: Long,
+    priceLabel: String = formatUsdCents(points * 100L),
     enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -1685,7 +1794,7 @@ private fun BuyPointsPackageButton(
                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
             )
             Text(
-                text = formatUsdCents(points * 100L),
+                text = priceLabel,
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.9f)
             )

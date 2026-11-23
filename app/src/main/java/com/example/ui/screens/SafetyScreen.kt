@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
@@ -32,6 +33,7 @@ import androidx.compose.material.icons.rounded.ManageAccounts
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.SupportAgent
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.Button
@@ -65,6 +67,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.AlertSeverity
+import com.example.data.AppConfig
+import com.example.data.ChatRoom
 import com.example.data.ReportStatus
 import com.example.data.SafetyReport
 import com.example.data.StaffCapabilities
@@ -92,6 +96,8 @@ fun SafetyScreen(
     staffInvites: List<StaffInvite>,
     allUsers: List<UserProfile>,
     allAlerts: List<UserAlert>,
+    appConfig: AppConfig = AppConfig(),
+    liveRooms: List<ChatRoom> = emptyList(),
     onResolveReport: (reportId: String, status: ReportStatus, note: String) -> Unit,
     onUnblockUser: (String) -> Unit,
     onAddStaffInvite: (email: String, displayName: String, staffTier: StaffTier, canEnterInvisible: Boolean) -> Unit,
@@ -115,7 +121,9 @@ fun SafetyScreen(
     onSuspendUser: (targetUserId: String, targetName: String, minutes: Long, reason: String) -> Unit,
     onSendDirectAlert: (targetUserId: String, targetName: String, title: String, message: String, severity: AlertSeverity) -> Unit,
     onAdminEditAlert: (alertId: String, title: String, message: String, severity: AlertSeverity, reopenForUser: Boolean) -> Unit,
-    onAdminDeleteAlert: (alertId: String) -> Unit
+    onAdminDeleteAlert: (alertId: String) -> Unit,
+    onUpdateAppConfig: (bannerTitle: String, bannerMessage: String, bannerEnabled: Boolean, trialLoginsEnabled: Boolean) -> Unit = { _, _, _, _ -> },
+    onSendUserToRoom: (targetUserId: String, targetName: String, targetRoom: ChatRoom, fromRoomId: String, reason: String) -> Unit = { _, _, _, _, _ -> }
 ) {
     val reports = (reportsState as? UiState.Success)?.data.orEmpty()
     val openCount = reports.count { it.statusEnum() == ReportStatus.OPEN }
@@ -133,9 +141,16 @@ fun SafetyScreen(
     var inviteAllowInvisible by remember { mutableStateOf(false) }
     var userSearch by remember { mutableStateOf("") }
 
+    // App Banner & Trial Login Editor State (synced with Firestore AppConfig)
+    var bannerTitleDraft by remember(appConfig.bannerTitle) { mutableStateOf(appConfig.bannerTitle) }
+    var bannerMessageDraft by remember(appConfig.bannerMessage) { mutableStateOf(appConfig.bannerMessage) }
+    var bannerEnabledDraft by remember(appConfig.bannerEnabled) { mutableStateOf(appConfig.bannerEnabled) }
+    var trialLoginsEnabledDraft by remember(appConfig.trialLoginsEnabled) { mutableStateOf(appConfig.trialLoginsEnabled) }
+
     var userBeingEdited by remember { mutableStateOf<UserProfile?>(null) }
     var userBeingSuspended by remember { mutableStateOf<UserProfile?>(null) }
     var userReceivingAlert by remember { mutableStateOf<UserProfile?>(null) }
+    var userBeingTransferred by remember { mutableStateOf<UserProfile?>(null) }
     var alertBeingEdited by remember { mutableStateOf<UserAlert?>(null) }
 
     val filteredUsers = remember(allUsers, userSearch) {
@@ -218,26 +233,34 @@ fun SafetyScreen(
                                 SegmentedButton(
                                     selected = adminConsoleTab == 0,
                                     onClick = { adminConsoleTab = 0 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
+                                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 4),
                                     modifier = Modifier.testTag("admin_tab_support")
                                 ) {
-                                    Text("Staff (${staffRoles.size})")
+                                    Text("Staff")
                                 }
                                 SegmentedButton(
                                     selected = adminConsoleTab == 1,
                                     onClick = { adminConsoleTab = 1 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
+                                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 4),
                                     modifier = Modifier.testTag("admin_tab_users")
                                 ) {
-                                    Text("Users (${allUsers.size})")
+                                    Text("Users")
                                 }
                                 SegmentedButton(
                                     selected = adminConsoleTab == 2,
                                     onClick = { adminConsoleTab = 2 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+                                    shape = SegmentedButtonDefaults.itemShape(index = 2, count = 4),
                                     modifier = Modifier.testTag("admin_tab_alerts")
                                 ) {
-                                    Text("Alerts (${allAlerts.size})")
+                                    Text("Alerts")
+                                }
+                                SegmentedButton(
+                                    selected = adminConsoleTab == 3,
+                                    onClick = { adminConsoleTab = 3 },
+                                    shape = SegmentedButtonDefaults.itemShape(index = 3, count = 4),
+                                    modifier = Modifier.testTag("admin_tab_app_config")
+                                ) {
+                                    Text("App")
                                 }
                             }
                         }
@@ -617,6 +640,7 @@ fun SafetyScreen(
                                 onEdit = { userBeingEdited = user },
                                 onSuspend = { userBeingSuspended = user },
                                 onAlert = { userReceivingAlert = user },
+                                onSendToRoom = { userBeingTransferred = user },
                                 onSetStaffTier = { nextTier ->
                                     onSetUserStaffTier(
                                         user.userId,
@@ -653,6 +677,124 @@ fun SafetyScreen(
                                     onEdit = { alertBeingEdited = alert },
                                     onDelete = { onAdminDeleteAlert(alert.id) }
                                 )
+                            }
+                        }
+                    }
+
+                    3 -> {
+                        item(key = "admin_app_banner_and_trial_card") {
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Campaign,
+                                            contentDescription = "Login news banner",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "Login Screen News Banner & Trial Access",
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Show News & Updates Banner on Login",
+                                                style = MaterialTheme.typography.titleSmall
+                                            )
+                                            Text(
+                                                text = "Broadcast app news, maintenance notices, or updates on the main login screen",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = bannerEnabledDraft,
+                                            onCheckedChange = { bannerEnabledDraft = it },
+                                            modifier = Modifier.testTag("admin_toggle_login_banner")
+                                        )
+                                    }
+
+                                    OutlinedTextField(
+                                        value = bannerTitleDraft,
+                                        onValueChange = { bannerTitleDraft = it.take(80) },
+                                        label = { Text("Banner Headline") },
+                                        placeholder = { Text("e.g., Welcome to VoxStage v2!") },
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("admin_banner_title_input")
+                                    )
+
+                                    OutlinedTextField(
+                                        value = bannerMessageDraft,
+                                        onValueChange = { bannerMessageDraft = it.take(400) },
+                                        label = { Text("Updates / News Message") },
+                                        placeholder = { Text("Write app news or feature updates shown on the login screen…") },
+                                        minLines = 3,
+                                        maxLines = 5,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("admin_banner_message_input")
+                                    )
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Allow 1-Day Trial Logins",
+                                                style = MaterialTheme.typography.titleSmall
+                                            )
+                                            Text(
+                                                text = "When disabled, guest trial logins are hidden and active trial sessions require Google Sign-In.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = trialLoginsEnabledDraft,
+                                            onCheckedChange = { trialLoginsEnabledDraft = it },
+                                            modifier = Modifier.testTag("admin_toggle_trial_logins")
+                                        )
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            onUpdateAppConfig(
+                                                bannerTitleDraft,
+                                                bannerMessageDraft,
+                                                bannerEnabledDraft,
+                                                trialLoginsEnabledDraft
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("admin_save_banner_button")
+                                    ) {
+                                        Text("Save Login Banner & Trial Settings")
+                                    }
+                                }
                             }
                         }
                     }
@@ -947,6 +1089,18 @@ fun SafetyScreen(
         )
     }
 
+    userBeingTransferred?.let { target ->
+        SendUserToRoomDialog(
+            targetName = target.displayName,
+            availableRooms = liveRooms,
+            onSendToRoom = { destRoom, reason ->
+                onSendUserToRoom(target.userId, target.displayName, destRoom, "", reason)
+                userBeingTransferred = null
+            },
+            onDismiss = { userBeingTransferred = null }
+        )
+    }
+
     alertBeingEdited?.let { existing ->
         SendOrEditAlertDialog(
             existingAlert = existing,
@@ -968,6 +1122,7 @@ private fun AdminUserDirectoryCard(
     onEdit: () -> Unit,
     onSuspend: () -> Unit,
     onAlert: () -> Unit,
+    onSendToRoom: () -> Unit,
     onSetStaffTier: (StaffTier) -> Unit
 ) {
     val badges = buildList {
@@ -1086,6 +1241,15 @@ private fun AdminUserDirectoryCard(
                         Icon(Icons.Rounded.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Alert", style = MaterialTheme.typography.labelSmall)
+                    }
+                    OutlinedButton(
+                        onClick = onSendToRoom,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("admin_send_room_${profile.userId}")
+                    ) {
+                        Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = VoiceCyan, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Send to Room", style = MaterialTheme.typography.labelSmall, color = VoiceCyan)
                     }
                 }
             }

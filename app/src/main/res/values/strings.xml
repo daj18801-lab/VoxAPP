@@ -39,6 +39,16 @@
     <string name="empty_reports_subtitle">No safety reports filed or pending review for your rooms.</string>
     <string name="error_camera_permission">Camera permission is needed to broadcast live video on stage.</string>
     <string name="error_mic_permission">Microphone permission is needed to speak on the voice stage.</string>
-    <string name="notif_channel_dm_name">Private Messages</string>
-    <string name="notif_channel_dm_desc">Notifications when you receive a new private message</string>
+    <string name="notif_channel_dm_name">Private Message Popups</string>
+    <string name="notif_channel_dm_desc">High-priority pop-up notifications with quick reply for incoming private messages</string>
+    <string name="notif_channel_dm_standard_name">Private Messages (Standard)</string>
+    <string name="notif_channel_dm_standard_desc">Standard tray notifications without pop-up interruption</string>
+    <string name="notif_channel_call_name">Active Private Voice Calls</string>
+    <string name="notif_channel_call_desc">Keeps your private voice call microphone active while the app is minimized</string>
+    <string name="notif_channel_friend_alert_name">Friend Attention Alerts</string>
+    <string name="notif_channel_friend_alert_desc">Ring and vibrate notifications when a friend sends you an attention alert</string>
+    <string name="action_quick_reply">Quick Reply</string>
+    <string name="hint_quick_reply">Type a quick reply…</string>
+    <string name="action_open_chat">Open Chat</string>
+    <string name="action_end_call">End Call</string>
 </resources>

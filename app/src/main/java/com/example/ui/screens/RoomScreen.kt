@@ -126,6 +126,8 @@ fun RoomScreen(
     viewModel: RoomViewModel,
     userProfile: UserProfile,
     staffCapabilities: StaffCapabilities,
+    availableRooms: List<ChatRoom> = emptyList(),
+    onSendUserToRoom: (targetUserId: String, targetName: String, targetRoom: ChatRoom, fromRoomId: String, reason: String) -> Unit = { _, _, _, _, _ -> },
     onExitRoom: () -> Unit
 ) {
     val context = LocalContext.current
@@ -151,6 +153,7 @@ fun RoomScreen(
     var reportTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var suspendTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var alertTarget by remember { mutableStateOf<ActionTarget?>(null) }
+    var transferTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var editUserProfileTarget by remember { mutableStateOf<UserProfile?>(null) }
     var stageExpanded by remember { mutableStateOf(true) }
     var messageInput by remember { mutableStateOf("") }
@@ -669,6 +672,9 @@ fun RoomScreen(
                         }
                     }
                 },
+                onSendToRoom = if (staffCapabilities.isAdmin) {
+                    { transferTarget = currentTarget }
+                } else null,
                 onRedactMessage = {
                     currentTarget.message?.let { msg ->
                         viewModel.redactMessage(msg, userProfile.displayName)
@@ -685,6 +691,25 @@ fun RoomScreen(
                 onDismiss = { actionTarget = null }
             )
         }
+    }
+
+    transferTarget?.let { target ->
+        SendUserToRoomDialog(
+            targetName = target.displayName,
+            availableRooms = availableRooms,
+            currentRoomId = viewModel.roomId,
+            onSendToRoom = { destinationRoom, reason ->
+                onSendUserToRoom(
+                    target.userId,
+                    target.displayName,
+                    destinationRoom,
+                    viewModel.roomId,
+                    reason
+                )
+                transferTarget = null
+            },
+            onDismiss = { transferTarget = null }
+        )
     }
 
     reportTarget?.let { target ->

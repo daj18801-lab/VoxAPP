@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AlertSeverity
+import com.example.data.AppConfig
 import com.example.data.ChatRoom
 import com.example.data.CreatorSubscription
 import com.example.data.DirectThread
@@ -16,6 +17,7 @@ import com.example.data.ProfilePost
 import com.example.data.ReportStatus
 import com.example.data.RoomCategory
 import com.example.data.RoomCoverKey
+import com.example.data.RoomTransfer
 import com.example.data.RoomVisibility
 import com.example.data.SafetyReport
 import com.example.data.formatUsdCents
@@ -118,6 +120,22 @@ class MainViewModel(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
             initialValue = UiState.Loading
+        )
+
+    val appConfigState: StateFlow<AppConfig> = repository.observeAppConfig()
+        .catch { emit(AppConfig()) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = AppConfig()
+        )
+
+    val pendingRoomTransferState: StateFlow<RoomTransfer?> = repository.observePendingRoomTransfer(currentUserId)
+        .catch { emit(null) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = null
         )
 
     // --- SNAPCHAT-STYLE PRIVATE MESSAGES & FRIENDS LIST ---
@@ -499,6 +517,11 @@ class MainViewModel(
         onThreadReady: (String) -> Unit
     ) {
         val isAdmin = staffCapabilities.value.isAdmin
+        val myBlocked = (userProfileState.value as? UiState.Success)?.data?.blockedUserIds.orEmpty()
+        if (myBlocked.contains(otherUserId)) {
+            _snackbarEvents.tryEmit("You have blocked $otherName. Unblock them in Safety Center to message again.")
+            return
+        }
         val targetDir = userDirectoryState.value.firstOrNull { it.userId == otherUserId }
         val targetPolicy = targetDir?.dmPolicyEnum() ?: DmPolicy.OPEN
 
@@ -992,16 +1015,22 @@ class MainViewModel(
         }
     }
 
-    fun buyPoints(pointsToBuy: Long) {
+    fun buyPoints(
+        pointsToBuy: Long,
+        playOrderId: String = "",
+        playProductId: String = ""
+    ) {
         if (_isProcessingWallet.value) return
         viewModelScope.launch {
             _isProcessingWallet.value = true
             repository.buyPoints(
                 pointsToBuy = pointsToBuy,
-                buyerName = effectiveMyProfile().displayName
+                buyerName = effectiveMyProfile().displayName,
+                playOrderId = playOrderId,
+                playProductId = playProductId
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit("Added $pointsToBuy points (${formatUsdCents(pointsToBuy * 100L)}) to your wallet!")
+                _snackbarEvents.tryEmit("Google Play purchase complete! Added $pointsToBuy points (${formatUsdCents(pointsToBuy * 100L)}) to your wallet.")
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not complete points purchase")
@@ -1009,11 +1038,15 @@ class MainViewModel(
         }
     }
 
-    fun verifyAge18Plus(birthYear: Int, onVerified: () -> Unit = {}) {
+    fun verifyAge18Plus(
+        birthYear: Int,
+        verificationSource: String = "Google Account",
+        onVerified: () -> Unit = {}
+    ) {
         viewModelScope.launch {
             repository.verifyUserAge18Plus(birthYear)
                 .onSuccess {
-                    _snackbarEvents.tryEmit("18+ age verified! You can now lock and unlock 18+ photos.")
+                    _snackbarEvents.tryEmit("18+ age verified via $verificationSource! You can now lock and unlock 18+ photos.")
                     onVerified()
                 }
                 .onFailure { err ->
@@ -1310,6 +1343,138 @@ class MainViewModel(
         }
     }
 
+    fun blockContact(
+        targetUserId: String,
+        targetName: String,
+        onBlocked: () -> Unit = {}
+    ) {
+        val currentBlocked = (userProfileState.value as? UiState.Success)?.data?.blockedUserIds.orEmpty()
+        viewModelScope.launch {
+            repository.setUserBlocked(
+                targetUserId = targetUserId,
+                block = true,
+                currentBlocked = currentBlocked
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Blocked $targetName — removed from friends & stopped incoming messages")
+                onBlocked()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not block user")
+            }
+        }
+    }
+
+    fun sendQuickReplyToThread(
+        thread: DirectThread,
+        replyText: String,
+        onSent: () -> Unit = {}
+    ) {
+        val clean = replyText.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            repository.sendDirectMessage(
+                thread = thread,
+                senderName = effectiveMyProfile().displayName,
+                senderTier = staffCapabilities.value.tier,
+                text = clean
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Quick reply sent to ${thread.displayTitle(currentUserId)}")
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send quick reply")
+            }
+        }
+    }
+
+    fun sendFriendAttentionAlert(
+        context: android.content.Context,
+        thread: DirectThread,
+        onAlertSent: () -> Unit = {}
+    ) {
+        val remainSec = com.example.notifications.DirectMessageNotificationPrefs
+            .remainingAlertCooldownSeconds(context, currentUserId)
+        if (remainSec > 0) {
+            val mins = remainSec / 60
+            val secs = remainSec % 60
+            val waitLabel = if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
+            _snackbarEvents.tryEmit("You can only send 1 attention alert every 5 minutes. Wait $waitLabel.")
+            return
+        }
+        viewModelScope.launch {
+            repository.sendFriendAttentionAlert(
+                thread = thread,
+                senderName = effectiveMyProfile().displayName
+            ).onSuccess {
+                com.example.notifications.DirectMessageNotificationPrefs.recordAlertSentNow(
+                    context = context,
+                    uid = currentUserId
+                )
+                val targetName = thread.otherName(currentUserId).ifBlank { "your friend" }
+                _snackbarEvents.tryEmit("Sent ring & vibrate attention alert to $targetName!")
+                onAlertSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send attention alert")
+            }
+        }
+    }
+
+    fun updateAppConfig(
+        bannerTitle: String,
+        bannerMessage: String,
+        bannerEnabled: Boolean,
+        trialLoginsEnabled: Boolean
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only Administrators can update app configuration.")
+            return
+        }
+        viewModelScope.launch {
+            repository.updateAppConfig(
+                bannerTitle = bannerTitle,
+                bannerMessage = bannerMessage,
+                bannerEnabled = bannerEnabled,
+                trialLoginsEnabled = trialLoginsEnabled,
+                adminName = currentActorName()
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Saved login banner & trial login settings")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update app settings")
+            }
+        }
+    }
+
+    fun sendUserToRoom(
+        targetUserId: String,
+        targetName: String,
+        targetRoom: ChatRoom,
+        fromRoomId: String = "",
+        reason: String = ""
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only Administrators can move users between rooms.")
+            return
+        }
+        viewModelScope.launch {
+            repository.sendUserToRoom(
+                targetUserId = targetUserId,
+                targetRoomId = targetRoom.id,
+                targetRoomTitle = targetRoom.displayTitle(),
+                fromRoomId = fromRoomId,
+                adminName = currentActorName(),
+                reason = reason
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Sent $targetName to \"${targetRoom.displayTitle()}\"")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not transfer user to room")
+            }
+        }
+    }
+
+    fun consumeRoomTransfer() {
+        viewModelScope.launch {
+            repository.consumeRoomTransfer(currentUserId)
+        }
+    }
+
     fun unblockUser(targetUserId: String) {
         val currentBlocked = (userProfileState.value as? UiState.Success)?.data?.blockedUserIds.orEmpty()
         viewModelScope.launch {
@@ -1318,7 +1483,7 @@ class MainViewModel(
                 block = false,
                 currentBlocked = currentBlocked
             ).onSuccess {
-                _snackbarEvents.tryEmit("User unblocked")
+                _snackbarEvents.tryEmit("User unblocked — messaging enabled again")
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not unblock user")
             }

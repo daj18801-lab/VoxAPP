@@ -209,6 +209,7 @@ data class UserProfile(
     val adultVerified: Boolean = false,
     val birthYear: Long = 0L,
     val blockedUserIds: List<String> = emptyList(),
+    val pictureUploadTimestamps: List<Long> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -218,6 +219,12 @@ data class UserProfile(
         val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
         return (currentYear - birthYear.toInt()) >= 18
     }
+    fun recentPictureUploadsCount(nowMs: Long = System.currentTimeMillis()): Int =
+        pictureUploadTimestamps.count { nowMs - it < PICTURE_UPLOAD_WINDOW_MS }
+
+    fun remainingPictureUploads(nowMs: Long = System.currentTimeMillis()): Int =
+        (MAX_PICTURES_PER_WINDOW - recentPictureUploadsCount(nowMs)).coerceAtLeast(0)
+
     fun currentlySuspended(nowMs: Long = System.currentTimeMillis()): Boolean =
         suspendedUntilMillis > nowMs
 
@@ -232,6 +239,11 @@ data class UserProfile(
             hours > 0L -> "${hours}h"
             else -> "${mins}m"
         }
+    }
+
+    companion object {
+        const val MAX_PICTURES_PER_WINDOW = 10
+        const val PICTURE_UPLOAD_WINDOW_MS = 10L * 60L * 1000L
     }
 }
 
@@ -537,6 +549,7 @@ data class DirectThread(
     val groupName: String = "",
     val participantNamesById: Map<String, String> = emptyMap(),
     val kickedUserIds: List<String> = emptyList(),
+    val blockedByUserIds: List<String> = emptyList(),
     val userAId: String = "",
     val userAName: String = "",
     val userAColorHex: String = "#0088FF",
@@ -548,6 +561,9 @@ data class DirectThread(
     val lastMessageText: String = "",
     val lastMessageSenderId: String = "",
     val unreadByUserIds: List<String> = emptyList(),
+    val lastAlertSenderId: String = "",
+    val lastAlertSenderName: String = "",
+    val lastAlertAtMillis: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -559,6 +575,8 @@ data class DirectThread(
     )
     fun isUnreadFor(myUid: String): Boolean = unreadByUserIds.contains(myUid)
     fun isUserKicked(uid: String): Boolean = kickedUserIds.contains(uid)
+    fun isBlockedBy(uid: String): Boolean = blockedByUserIds.contains(uid)
+    fun hasAnyBlock(): Boolean = blockedByUserIds.isNotEmpty()
     fun displayTitle(myUid: String): String {
         if (!isGroup) return otherName(myUid)
         if (groupName.isNotBlank()) return groupName
@@ -736,10 +754,42 @@ data class PointTransaction(
     val grossCents: Long = 0L,
     val creatorShareCents: Long = 0L,
     val platformShareCents: Long = 0L,
+    val playOrderId: String = "",
+    val playProductId: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     fun typeEnum(): PointTransactionType = PointTransactionType.fromRaw(type)
 }
+
+@Keep
+@IgnoreExtraProperties
+data class AppConfig(
+    @DocumentId val id: String = "global",
+    val bannerTitle: String = "",
+    val bannerMessage: String = "",
+    val bannerEnabled: Boolean = false,
+    val trialLoginsEnabled: Boolean = true,
+    val updatedByName: String = "",
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun hasVisibleBanner(): Boolean =
+        bannerEnabled && (bannerTitle.isNotBlank() || bannerMessage.isNotBlank())
+}
+
+@Keep
+@IgnoreExtraProperties
+data class RoomTransfer(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val targetRoomId: String = "",
+    val targetRoomTitle: String = "",
+    val fromRoomId: String = "",
+    val movedByAdminId: String = "",
+    val movedByAdminName: String = "",
+    val reason: String = "",
+    val consumed: Boolean = false,
+    @ServerTimestamp val createdAt: Timestamp? = null
+)
 
 fun formatUsdCents(cents: Long): String {
     val safe = cents.coerceAtLeast(0L)

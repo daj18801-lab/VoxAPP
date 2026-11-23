@@ -162,6 +162,33 @@ service cloud.firestore {
              (roomData.bouncedUntilByUserId[uid] > request.time.toMillis());
     }
 
+    function isValidPictureTimestampList(arr) {
+      return arr is list &&
+             arr.size() <= 10 &&
+             (arr.size() == 0 || (arr[0] is int && arr[0] > 0 && arr[0] <= request.time.toMillis() + 60000)) &&
+             (arr.size() < 2 || (arr[arr.size() - 1] is int && arr[arr.size() - 1] >= arr[0] && arr[arr.size() - 1] <= request.time.toMillis() + 60000));
+    }
+
+    function canUpdatePictureUploadTimestamps(newData, oldData) {
+      let diffKeys = newData.diff(oldData).affectedKeys();
+      return !('pictureUploadTimestamps' in diffKeys) ||
+             !('pictureUploadTimestamps' in oldData) ||
+             oldData.pictureUploadTimestamps.size() == 0 ||
+             oldData.pictureUploadTimestamps[0] <= request.time.toMillis() - 600000 ||
+             (newData.pictureUploadTimestamps.size() >= oldData.pictureUploadTimestamps.size() &&
+              newData.pictureUploadTimestamps[0] == oldData.pictureUploadTimestamps[0]);
+    }
+
+    function callerUnderPictureUploadLimit() {
+      return !callerProfileExists() || isUnderPicLimit(callerProfile());
+    }
+
+    function isUnderPicLimit(p) {
+      return !('pictureUploadTimestamps' in p) ||
+             p.pictureUploadTimestamps.size() < 10 ||
+             p.pictureUploadTimestamps[0] <= request.time.toMillis() - 600000;
+    }
+
     function isValidUserProfile(data) {
       return data.keys().hasAll([
                'userId', 'displayName', 'handle', 'bio', 'avatarColorHex',
@@ -175,7 +202,7 @@ service cloud.firestore {
                'disableMic', 'disableVideo', 'suspendedUntilMillis', 'suspensionReason',
                'pointsBalance', 'creatorEarningsCents', 'totalSpentCents', 'dmPolicy',
                'adultVerified', 'birthYear',
-               'blockedUserIds', 'createdAt', 'updatedAt'
+               'blockedUserIds', 'pictureUploadTimestamps', 'createdAt', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 40 &&
@@ -202,6 +229,7 @@ service cloud.firestore {
              (!('birthYear' in data) || (data.birthYear is int && (data.birthYear == 0 || (data.birthYear >= 1900 && data.birthYear <= request.time.year())))) &&
              (!('adultVerified' in data) || !data.adultVerified || isAdultVerifiedProfile(data)) &&
              isBoundedStringList(data.blockedUserIds, 100) &&
+             (!('pictureUploadTimestamps' in data) || isValidPictureTimestampList(data.pictureUploadTimestamps)) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
@@ -216,7 +244,8 @@ service cloud.firestore {
              (!('suspensionReason' in data) || data.suspensionReason == '') &&
              (!('pointsBalance' in data) || data.pointsBalance == 0) &&
              (!('creatorEarningsCents' in data) || data.creatorEarningsCents == 0) &&
-             (!('totalSpentCents' in data) || data.totalSpentCents == 0);
+             (!('totalSpentCents' in data) || data.totalSpentCents == 0) &&
+             (!('pictureUploadTimestamps' in data) || data.pictureUploadTimestamps.size() == 0);
     }
 
     function isValidStaffRole(data) {
@@ -558,6 +587,8 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'participantIds', 'isGroup', 'groupName', 'participantNamesById', 'kickedUserIds',
+               'blockedByUserIds',
+               'lastAlertSenderId', 'lastAlertSenderName', 'lastAlertAtMillis',
                'userAId', 'userAName', 'userAColorHex', 'userATier',
                'userBId', 'userBName', 'userBColorHex', 'userBTier',
                'lastMessageText', 'lastMessageSenderId', 'unreadByUserIds',
@@ -568,6 +599,10 @@ service cloud.firestore {
              (!('groupName' in data) || (data.groupName is string && data.groupName.size() <= 60)) &&
              (!('participantNamesById' in data) || (data.participantNamesById is map && data.participantNamesById.size() <= 15)) &&
              (!('kickedUserIds' in data) || isBoundedStringList(data.kickedUserIds, 20)) &&
+             (!('blockedByUserIds' in data) || isBoundedStringList(data.blockedByUserIds, 15)) &&
+             (!('lastAlertSenderId' in data) || (data.lastAlertSenderId is string && data.lastAlertSenderId.size() <= 128)) &&
+             (!('lastAlertSenderName' in data) || (data.lastAlertSenderName is string && data.lastAlertSenderName.size() <= 40)) &&
+             (!('lastAlertAtMillis' in data) || (data.lastAlertAtMillis is int && data.lastAlertAtMillis >= 0)) &&
              data.userAId is string && data.userAId.size() >= 1 && data.userAId.size() <= 128 &&
              data.userBId is string && data.userBId.size() >= 1 && data.userBId.size() <= 128 &&
              data.userAId != data.userBId &&
@@ -637,13 +672,27 @@ service cloud.firestore {
     function hasActiveDmPass(targetUid) {
       let passId = request.auth.uid + '_' + targetUid;
       return exists(/databases/$(database)/documents/dmAccessPasses/$(passId)) &&
-             get(/databases/$(database)/documents/dmAccessPasses/$(passId)).data.active == true &&
-             get(/databases/$(database)/documents/dmAccessPasses/$(passId)).data.kicked == false;
+             isPassActive(get(/databases/$(database)/documents/dmAccessPasses/$(passId)).data);
+    }
+
+    function isPassActive(passData) {
+      return passData.active == true && passData.kicked == false;
     }
 
     function canMessageWithDirectory(dirData, targetUid) {
       let policy = ('dmPolicy' in dirData) ? dirData.dmPolicy : 'OPEN';
       return policy == 'OPEN' || (policy == 'PAID' && hasActiveDmPass(targetUid));
+    }
+
+    function hasBlockedUid(profileData, otherUid) {
+      return ('blockedUserIds' in profileData) && (otherUid in profileData.blockedUserIds);
+    }
+
+    function isBlockedBetween(uidA, uidB) {
+      return (exists(/databases/$(database)/documents/users/$(uidA)) &&
+              hasBlockedUid(get(/databases/$(database)/documents/users/$(uidA)).data, uidB)) ||
+             (exists(/databases/$(database)/documents/users/$(uidB)) &&
+              hasBlockedUid(get(/databases/$(database)/documents/users/$(uidB)).data, uidA));
     }
 
     function canMessageUser(targetUid) {
@@ -663,6 +712,10 @@ service cloud.firestore {
 
     function isKickedFromThread(threadData, uid) {
       return ('kickedUserIds' in threadData) && (uid in threadData.kickedUserIds);
+    }
+
+    function hasAnyThreadBlock(threadData) {
+      return ('blockedByUserIds' in threadData) && threadData.blockedByUserIds.size() > 0;
     }
 
     function isValidCreatorSubscription(data) {
@@ -696,7 +749,8 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'type', 'buyerId', 'buyerName', 'creatorId', 'creatorName', 'postId',
-               'pointsDelta', 'grossCents', 'creatorShareCents', 'platformShareCents', 'createdAt'
+               'pointsDelta', 'grossCents', 'creatorShareCents', 'platformShareCents',
+               'playOrderId', 'playProductId', 'createdAt'
              ]) &&
              data.type in ['BUY_POINTS', 'UNLOCK_PHOTO', 'SUBSCRIBE_CREATOR', 'BOOST_POST', 'UNLOCK_DM'] &&
              data.buyerId is string && data.buyerId.size() >= 1 && data.buyerId.size() <= 128 &&
@@ -708,6 +762,8 @@ service cloud.firestore {
              data.grossCents is int &&
              data.creatorShareCents is int &&
              data.platformShareCents is int &&
+             (!('playOrderId' in data) || (data.playOrderId is string && data.playOrderId.size() <= 128)) &&
+             (!('playProductId' in data) || (data.playProductId is string && data.playProductId.size() <= 64)) &&
              data.createdAt is timestamp && data.createdAt <= request.time && (
                (data.type == 'BUY_POINTS' &&
                 data.pointsDelta >= 2 && data.pointsDelta <= 500 &&
@@ -751,6 +807,43 @@ service cloud.firestore {
              );
     }
 
+    function isValidAppConfig(data) {
+      return data.keys().hasAll([
+               'bannerTitle', 'bannerMessage', 'bannerEnabled', 'trialLoginsEnabled',
+               'updatedByName', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'bannerTitle', 'bannerMessage', 'bannerEnabled', 'trialLoginsEnabled',
+               'updatedByName', 'updatedAt'
+             ]) &&
+             data.bannerTitle is string && data.bannerTitle.size() <= 80 &&
+             data.bannerMessage is string && data.bannerMessage.size() <= 400 &&
+             data.bannerEnabled is bool &&
+             data.trialLoginsEnabled is bool &&
+             data.updatedByName is string && data.updatedByName.size() <= 40 &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidRoomTransfer(data, targetUid) {
+      return data.keys().hasAll([
+               'userId', 'targetRoomId', 'targetRoomTitle', 'fromRoomId',
+               'movedByAdminId', 'movedByAdminName', 'reason', 'consumed', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'userId', 'targetRoomId', 'targetRoomTitle', 'fromRoomId',
+               'movedByAdminId', 'movedByAdminName', 'reason', 'consumed', 'createdAt'
+             ]) &&
+             data.userId is string && data.userId == targetUid &&
+             data.targetRoomId is string && data.targetRoomId.size() >= 1 && data.targetRoomId.size() <= 128 &&
+             data.targetRoomTitle is string && data.targetRoomTitle.size() >= 1 && data.targetRoomTitle.size() <= 60 &&
+             data.fromRoomId is string && data.fromRoomId.size() <= 128 &&
+             data.movedByAdminId is string && data.movedByAdminId.size() >= 1 && data.movedByAdminId.size() <= 128 &&
+             data.movedByAdminName is string && data.movedByAdminName.size() >= 1 && data.movedByAdminName.size() <= 40 &&
+             data.reason is string && data.reason.size() <= 200 &&
+             data.consumed is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
     function isValidOwnerWalletUpdate(newData, oldData) {
       let oldPts = existingInt(oldData, 'pointsBalance');
       let newPts = existingInt(newData, 'pointsBalance');
@@ -758,7 +851,8 @@ service cloud.firestore {
       let newSpent = existingInt(newData, 'totalSpentCents');
       let ptsDelta = newPts - oldPts;
       return newPts >= 0 &&
-             newData.diff(oldData).affectedKeys().hasOnly(['pointsBalance', 'totalSpentCents', 'updatedAt']) && (
+             canUpdatePictureUploadTimestamps(newData, oldData) &&
+             newData.diff(oldData).affectedKeys().hasOnly(['pointsBalance', 'totalSpentCents', 'pictureUploadTimestamps', 'updatedAt']) && (
         (ptsDelta >= 2 && ptsDelta <= 500 && newSpent == oldSpent + (ptsDelta * 100)) ||
         (ptsDelta == -2 && newSpent == oldSpent) ||
         (ptsDelta == -5 && newSpent == oldSpent) ||
@@ -837,20 +931,25 @@ service cloud.firestore {
              newData.diff(oldData).affectedKeys().hasOnly(['reactionsByEmoji', 'updatedAt']);
     }
 
-    function canUpdateDirectThread(newData, oldData) {
+    function canUpdateDirectThread(threadId, newData, oldData) {
       let diffKeys = newData.diff(oldData).affectedKeys();
       let wasGroup = isThreadGroup(oldData);
       let nowGroup = isThreadGroup(newData);
       return wasGroup == nowGroup && (
-        // Action 1: Normal messaging preview / unread / participant display updates
+        // Action 1: Normal messaging preview / unread / participant display updates (disallowed for new messages if blocked)
         (newData.participantIds == oldData.participantIds &&
          !isKickedFromThread(oldData, request.auth.uid) &&
-         diffKeys.hasOnly([
-           'userAName', 'userAColorHex', 'userATier',
-           'userBName', 'userBColorHex', 'userBTier',
-           'lastMessageText', 'lastMessageSenderId',
-           'unreadByUserIds', 'updatedAt'
-         ])) ||
+         (
+           (!hasAnyThreadBlock(oldData) &&
+            diffKeys.hasOnly([
+              'userAName', 'userAColorHex', 'userATier',
+              'userBName', 'userBColorHex', 'userBTier',
+              'lastMessageText', 'lastMessageSenderId',
+              'unreadByUserIds', 'updatedAt'
+            ])) ||
+           (hasAnyThreadBlock(oldData) &&
+            diffKeys.hasOnly(['unreadByUserIds', 'updatedAt']))
+         )) ||
         // Action 2: Add new members or update group name in an existing group chat
         (wasGroup &&
          !isKickedFromThread(oldData, request.auth.uid) &&
@@ -866,14 +965,46 @@ service cloud.firestore {
          !isKickedFromThread(newData, request.auth.uid) &&
          diffKeys.hasOnly([
            'kickedUserIds', 'lastMessageText', 'lastMessageSenderId', 'updatedAt'
-         ]))
+         ])) ||
+        // Action 4: 1-on-1 participant blocks or unblocks contact in this chat (stops incoming messages)
+        (!wasGroup &&
+         newData.participantIds == oldData.participantIds &&
+         diffKeys.hasOnly(['blockedByUserIds', 'unreadByUserIds', 'updatedAt']) &&
+         (
+           (request.auth.uid in newData.blockedByUserIds &&
+            (!('blockedByUserIds' in oldData)
+              ? newData.blockedByUserIds.size() == 1
+              : (!(request.auth.uid in oldData.blockedByUserIds) &&
+                 newData.blockedByUserIds.size() == oldData.blockedByUserIds.size() + 1 &&
+                 newData.blockedByUserIds.hasAll(oldData.blockedByUserIds)))) ||
+           (!(request.auth.uid in newData.blockedByUserIds) &&
+            ('blockedByUserIds' in oldData) &&
+            (request.auth.uid in oldData.blockedByUserIds) &&
+            newData.blockedByUserIds.size() == oldData.blockedByUserIds.size() - 1 &&
+            oldData.blockedByUserIds.hasAll(newData.blockedByUserIds))
+         )) ||
+        // Action 5: Friend Attention Alert (1-on-1 accepted friends only, max 1 alert every 5 minutes)
+        (!wasGroup &&
+         newData.participantIds == oldData.participantIds &&
+         !hasAnyThreadBlock(oldData) &&
+         !isKickedFromThread(oldData, request.auth.uid) &&
+         diffKeys.hasOnly(['lastAlertSenderId', 'lastAlertSenderName', 'lastAlertAtMillis', 'updatedAt']) &&
+         newData.lastAlertSenderId == request.auth.uid &&
+         newData.lastAlertAtMillis > 0 &&
+         newData.lastAlertAtMillis <= request.time.toMillis() + 60000 &&
+         exists(/databases/$(database)/documents/friendships/$(threadId)) &&
+         get(/databases/$(database)/documents/friendships/$(threadId)).data.status == 'ACCEPTED' &&
+         (!('lastAlertAtMillis' in oldData) ||
+          oldData.lastAlertAtMillis == 0 ||
+          oldData.lastAlertSenderId != request.auth.uid ||
+          (request.time.toMillis() - oldData.lastAlertAtMillis) >= 300000))
       );
     }
 
     function canSendMessageInThread(threadData) {
       return request.auth.uid in threadData.participantIds &&
              !isKickedFromThread(threadData, request.auth.uid) &&
-             (isThreadGroup(threadData) || canMessageUser(otherOneOnOneUid(threadData)));
+             (isThreadGroup(threadData) || (!hasAnyThreadBlock(threadData) && canMessageUser(otherOneOnOneUid(threadData))));
     }
 
     // --- 1. USERS COLLECTION ---
@@ -897,14 +1028,18 @@ service cloud.firestore {
                        isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt && (
-                          // Action 1: Owner updates their own preferences/profile (cannot bypass bans/suspensions/restrictions)
+                          // Action 1: Owner updates their own preferences/profile (cannot bypass bans/suspensions/restrictions or picture upload rate limit)
                          (request.auth.uid == userId &&
                           (!('invisibleModePreferred' in incoming()) || !incoming().invisibleModePreferred || canUseInvisibleMode()) &&
+                          canUpdatePictureUploadTimestamps(incoming(), existing()) &&
+                          (!('photoBase64' in incoming().diff(existing()).affectedKeys()) ||
+                           incoming().photoBase64.size() == 0 ||
+                           callerUnderPictureUploadLimit()) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
                             'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled',
                             'invisibleModePreferred', 'dmPolicy', 'adultVerified', 'birthYear',
-                            'blockedUserIds', 'updatedAt'
+                            'blockedUserIds', 'pictureUploadTimestamps', 'updatedAt'
                           ])) ||
                          // Action 1b: Owner buys points (2..500 pts at $1/pt), spends 2 pts to unlock photo, or pays $15/mo subscription
                          (request.auth.uid == userId &&
@@ -1061,18 +1196,19 @@ service cloud.firestore {
 
     // --- 2. ROOMS COLLECTION ---
     match /rooms/{roomId} {
-      allow get: if isSignedIn() &&
-                    isValidId(roomId) &&
-                    (resource == null ||
-                     existing().visibility == 'PUBLIC' ||
-                     existing().hostId == request.auth.uid ||
-                     request.auth.uid in existing().moderatorIds ||
-                     isAdminOrSupport());
+      allow get: if isValidId(roomId) && (
+                    (resource != null && existing().visibility == 'PUBLIC') ||
+                    (isSignedIn() &&
+                     (resource == null ||
+                      existing().hostId == request.auth.uid ||
+                      request.auth.uid in existing().moderatorIds ||
+                      isAdminOrSupport()))
+                  );
 
-      allow list: if isSignedIn() &&
-                     (resource.data.visibility == 'PUBLIC' ||
-                      resource.data.hostId == request.auth.uid ||
-                      isAdmin());
+      allow list: if resource.data.visibility == 'PUBLIC' ||
+                     (isSignedIn() &&
+                      (resource.data.hostId == request.auth.uid ||
+                       isAdmin()));
 
       allow create: if isSignedIn() &&
                        isValidId(roomId) &&
@@ -1319,9 +1455,9 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // --- 4. PUBLIC USER DIRECTORY (Non-sensitive friend discovery) ---
+    // --- 4. PUBLIC USER DIRECTORY (Non-sensitive friend discovery & 1-day trial preview) ---
     match /userDirectory/{userId} {
-      allow get, list: if isSignedIn();
+      allow get, list: if true;
 
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
@@ -1392,7 +1528,9 @@ service cloud.firestore {
                        request.auth.uid in incoming().participantIds &&
                        callerPassesProfileChecks(false, false, false, false) &&
                        isValidDirectThread(incoming()) &&
-                       (isThreadGroup(incoming()) || canMessageUser(otherOneOnOneUid(incoming())));
+                       (isThreadGroup(incoming()) ||
+                        (!isBlockedBetween(request.auth.uid, otherOneOnOneUid(incoming())) &&
+                         canMessageUser(otherOneOnOneUid(incoming()))));
 
       allow update: if isSignedIn() &&
                        request.auth.uid in existing().participantIds &&
@@ -1400,7 +1538,7 @@ service cloud.firestore {
                        incoming().userAId == existing().userAId &&
                        incoming().userBId == existing().userBId &&
                        incoming().createdAt == existing().createdAt &&
-                       canUpdateDirectThread(incoming(), existing());
+                       canUpdateDirectThread(threadId, incoming(), existing());
 
       allow delete: if isSignedIn() &&
                        (request.auth.uid in existing().participantIds || isAdmin());
@@ -1421,6 +1559,7 @@ service cloud.firestore {
                          request.auth.uid in incoming().participantIds &&
                          isAllowedStaffTierClaim(incoming().senderTier) &&
                          callerPassesProfileChecks(false, false, false, false) &&
+                         (!('imageBase64' in incoming()) || incoming().imageBase64.size() == 0 || callerUnderPictureUploadLimit()) &&
                          isValidDirectMessage(incoming()) &&
                          exists(/databases/$(database)/documents/directThreads/$(threadId)) &&
                          canSendMessageInThread(get(/databases/$(database)/documents/directThreads/$(threadId)).data);
@@ -1473,7 +1612,10 @@ service cloud.firestore {
 
     // --- 7. PROFILE POSTS (Public Updates, Pictures, Comments, Shares & Discovery Boosts) ---
     match /profilePosts/{postId} {
-      allow get, list: if isSignedIn();
+      allow get: if isSignedIn() ||
+                    (resource != null && (!('locked' in resource.data) || resource.data.locked == false));
+
+      allow list: if isSignedIn() || resource.data.locked == false;
 
       allow create: if isSignedIn() &&
                        isValidId(postId) &&
@@ -1494,6 +1636,7 @@ service cloud.firestore {
                          (isValidBoostWindow(incoming()) && callerPaidFivePointsInBatch())
                        ) &&
                        (!('locked' in incoming()) || incoming().locked == false || isAdultVerifiedCaller()) &&
+                       (incoming().imageBase64.size() == 0 || callerUnderPictureUploadLimit()) &&
                        isAllowedStaffTierClaim(incoming().authorTier) &&
                        callerPassesProfileChecks(false, false, false, false) &&
                        isValidProfilePost(incoming());
@@ -1590,6 +1733,50 @@ service cloud.firestore {
                        isValidPointTransaction(incoming());
 
       allow update, delete: if false;
+    }
+
+    // --- 10. GLOBAL APP CONFIG (Login Screen News Banner & Trial Login Toggle) ---
+    match /appConfig/{configId} {
+      allow get: if configId == 'global';
+      allow list: if false;
+
+      allow create, update: if isSignedIn() &&
+                               isAdmin() &&
+                               configId == 'global' &&
+                               isValidAppConfig(incoming());
+
+      allow delete: if false;
+    }
+
+    // --- 11. ADMIN ROOM TRANSFERS (Send User to a Different Room) ---
+    match /roomTransfers/{userId} {
+      allow get: if isSignedIn() &&
+                    isValidId(userId) &&
+                    (request.auth.uid == userId || isAdmin());
+
+      allow list: if isSignedIn() && isAdmin();
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isAdmin() &&
+                       incoming().movedByAdminId == request.auth.uid &&
+                       incoming().consumed == false &&
+                       isValidRoomTransfer(incoming(), userId);
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidRoomTransfer(incoming(), userId) && (
+                         (isAdmin() &&
+                          incoming().movedByAdminId == request.auth.uid) ||
+                         (request.auth.uid == userId &&
+                          existing().consumed == false &&
+                          incoming().consumed == true &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['consumed']))
+                       );
+
+      allow delete: if isSignedIn() &&
+                       isValidId(userId) &&
+                       (request.auth.uid == userId || isAdmin());
     }
   }
 }
