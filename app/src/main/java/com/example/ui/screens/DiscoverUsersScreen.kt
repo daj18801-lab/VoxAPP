@@ -90,7 +90,9 @@ fun DiscoverUsersScreen(
     recentPostsState: UiState<List<ProfilePost>>,
     myPointsBalance: Long,
     subscribedCreatorIds: Set<String>,
+    viewerIsAdultVerified: Boolean,
     isProcessingWallet: Boolean,
+    onRequestAgeVerification: () -> Unit,
     onOpenUserProfile: (String) -> Unit,
     onSendFriendRequest: (DirectoryEntry) -> Unit,
     onAcceptFriendRequest: (Friendship) -> Unit,
@@ -387,7 +389,8 @@ fun DiscoverUsersScreen(
                                 items(filteredPosts, key = { "feed_${it.id}" }) { post ->
                                     val unlocked = post.isUnlockedFor(
                                         uid = currentUserId,
-                                        subscribedCreatorIds = subscribedCreatorIds
+                                        subscribedCreatorIds = subscribedCreatorIds,
+                                        viewerIsAdultVerified = viewerIsAdultVerified
                                     )
                                     ProfilePostCard(
                                         post = post,
@@ -395,17 +398,27 @@ fun DiscoverUsersScreen(
                                         canDelete = post.authorId == currentUserId || staffCapabilities.isStaff,
                                         latestAuthorPhotoBase64 = directoryByUid[post.authorId]?.photoBase64,
                                         isUnlocked = unlocked,
+                                        viewerIsAdultVerified = viewerIsAdultVerified,
                                         isProcessingUnlock = isProcessingWallet,
                                         onAuthorClick = { onOpenUserProfile(post.authorId) },
                                         onOriginalAuthorClick = onOpenUserProfile,
+                                        onRequestAgeVerification = onRequestAgeVerification,
                                         onUnlockPost = {
-                                            onUnlockPost(post) {
-                                                buyPointsNeededCount = 2
-                                                showBuyPointsDialog = true
+                                            if (!viewerIsAdultVerified) {
+                                                onRequestAgeVerification()
+                                            } else {
+                                                onUnlockPost(post) {
+                                                    buyPointsNeededCount = 2
+                                                    showBuyPointsDialog = true
+                                                }
                                             }
                                         },
                                         onSubscribeCreator = {
-                                            onSubscribeCreator(post.authorId, post.authorName)
+                                            if (!viewerIsAdultVerified) {
+                                                onRequestAgeVerification()
+                                            } else {
+                                                onSubscribeCreator(post.authorId, post.authorName)
+                                            }
                                         },
                                         onBoostPost = if (post.authorId == currentUserId) {
                                             {

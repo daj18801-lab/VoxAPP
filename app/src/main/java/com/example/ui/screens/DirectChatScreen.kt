@@ -40,13 +40,17 @@ import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
@@ -71,6 +75,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -98,6 +104,9 @@ import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.media.LiveKitVideoView
+import com.example.media.VoiceNotePlayer
+import com.example.media.VoiceNoteRecorder
+import com.example.media.formatVoiceDuration
 import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.VoxStageNotificationState
 import com.example.ui.components.FullScreenPhotoDialog
@@ -115,6 +124,7 @@ import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SnapBlue
 import com.example.viewmodel.DirectChatViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -154,8 +164,71 @@ fun DirectChatScreen(
     var isEncodingSnap by remember { mutableStateOf(false) }
     var fullScreenPhotoBase64 by remember { mutableStateOf<String?>(null) }
     var pendingCameraAction by remember { mutableStateOf<String?>(null) } // "VIDEO_CALL" or "SNAP_PHOTO"
+    var pendingMicAction by remember { mutableStateOf<String?>(null) } // "VOICE_CALL" or "VOICE_NOTE"
     var showAddPersonSheet by remember { mutableStateOf(false) }
     var showKickPaidMemberDialog by remember { mutableStateOf(false) }
+
+    // Voice Note Recording & Playback State
+    val voiceRecorder = remember { VoiceNoteRecorder(context) }
+    val voicePlayer = remember { VoiceNotePlayer(context) }
+    var isRecordingVoiceNote by remember { mutableStateOf(false) }
+    var recordingSeconds by remember { mutableIntStateOf(0) }
+    val playingVoiceMessageId by voicePlayer.playingMessageId.collectAsStateWithLifecycle()
+    val voicePlaybackProgress by voicePlayer.progressFraction.collectAsStateWithLifecycle()
+
+    fun startVoiceNoteRecording() {
+        voicePlayer.stop()
+        if (voiceRecorder.startRecording()) {
+            recordingSeconds = 0
+            isRecordingVoiceNote = true
+        } else {
+            scope.launch {
+                snackbarHostState.showTopMessage("Could not start voice note recording.")
+            }
+        }
+    }
+
+    fun cancelVoiceNoteRecording() {
+        voiceRecorder.cancel()
+        isRecordingVoiceNote = false
+        recordingSeconds = 0
+    }
+
+    fun stopAndSendVoiceNote() {
+        if (!isRecordingVoiceNote) return
+        isRecordingVoiceNote = false
+        recordingSeconds = 0
+        scope.launch {
+            val note = voiceRecorder.stopAndEncode()
+            if (note != null) {
+                val caption = composerText.trim()
+                composerText = ""
+                viewModel.sendMessage(
+                    senderName = userProfile.displayName,
+                    senderTier = myStaffTier,
+                    text = caption,
+                    audioBase64 = note.audioBase64,
+                    audioDurationSec = note.durationSec
+                )
+            } else {
+                snackbarHostState.showTopMessage("Recording was too short or could not be saved.")
+            }
+        }
+    }
+
+    LaunchedEffect(isRecordingVoiceNote) {
+        if (isRecordingVoiceNote) {
+            while (isRecordingVoiceNote && recordingSeconds < VoiceNoteRecorder.MAX_DURATION_SECONDS) {
+                delay(1000L)
+                if (isRecordingVoiceNote) {
+                    recordingSeconds += 1
+                }
+            }
+            if (isRecordingVoiceNote) {
+                stopAndSendVoiceNote()
+            }
+        }
+    }
 
     val cameraSnapLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicturePreview()
@@ -198,10 +271,20 @@ fun DirectChatScreen(
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
+        val action = pendingMicAction ?: "VOICE_CALL"
+        pendingMicAction = null
         if (granted) {
-            viewModel.toggleCallMic(userProfile.displayName)
+            when (action) {
+                "VOICE_NOTE" -> startVoiceNoteRecording()
+                else -> viewModel.toggleCallMic(userProfile.displayName)
+            }
         } else {
-            scope.launch { snackbarHostState.showTopMessage("Microphone permission is needed for private voice calls.") }
+            scope.launch {
+                snackbarHostState.showTopMessage(
+                    if (action == "VOICE_NOTE") "Microphone permission is needed to send voice notes."
+                    else "Microphone permission is needed for private voice calls."
+                )
+            }
         }
     }
 
@@ -230,6 +313,26 @@ fun DirectChatScreen(
         if (granted) {
             viewModel.toggleCallMic(userProfile.displayName)
         } else {
+            pendingMicAction = "VOICE_CALL"
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun requestVoiceNoteStart() {
+        if (!myStaffTier.isAdmin() && userProfile.disableMic) {
+            scope.launch { snackbarHostState.showTopMessage("Microphone access is disabled on your account.") }
+            return
+        }
+        if (isInCall && isMicActive) {
+            scope.launch { snackbarHostState.showTopMessage("Mute your live call mic first to record a voice note.") }
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            startVoiceNoteRecording()
+        } else {
+            pendingMicAction = "VOICE_NOTE"
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
@@ -264,6 +367,8 @@ fun DirectChatScreen(
         VoxStageNotificationState.activeDmThreadId = viewModel.threadId
         DirectMessageNotificationHelper.cancelThreadNotification(context, viewModel.threadId)
         onDispose {
+            voiceRecorder.cancel()
+            voicePlayer.release()
             if (VoxStageNotificationState.activeDmThreadId == viewModel.threadId) {
                 VoxStageNotificationState.activeDmThreadId = null
             }
@@ -604,32 +709,104 @@ fun DirectChatScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
                         }
 
+                        if (isRecordingVoiceNote) {
+                            // Live Voice Note Recording Bar
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(LiveCoral.copy(alpha = 0.12f))
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    .testTag("dm_voice_recording_bar"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                IconButton(
+                                    onClick = ::cancelVoiceNoteRecording,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("dm_voice_cancel_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.DeleteOutline,
+                                                contentDescription = "Cancel voice note",
+                                                tint = LiveCoral,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(LiveCoral)
+                                )
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Recording voice note…",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                        color = LiveCoral
+                                    )
+                                    Text(
+                                        text = "${formatVoiceDuration(recordingSeconds.toLong())} / ${formatVoiceDuration(VoiceNoteRecorder.MAX_DURATION_SECONDS.toLong())}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                Surface(
+                                    shape = CircleShape,
+                                    color = LiveCoral,
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = ::stopAndSendVoiceNote,
+                                        modifier = Modifier.testTag("dm_voice_send_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Rounded.Send,
+                                            contentDescription = "Send voice note",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                                .padding(horizontal = 6.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             // Snap Picture with Camera
                             IconButton(
                                 onClick = ::requestCameraSnap,
                                 enabled = !isSending && !isEncodingSnap,
                                 modifier = Modifier
-                                    .size(48.dp)
+                                    .size(46.dp)
                                     .testTag("dm_snap_camera_button")
                             ) {
                                 Surface(
                                     shape = CircleShape,
                                     color = MaterialTheme.colorScheme.primaryContainer,
-                                    modifier = Modifier.size(38.dp)
+                                    modifier = Modifier.size(36.dp)
                                 ) {
                                     Box(contentAlignment = Alignment.Center) {
                                         Icon(
                                             imageVector = Icons.Rounded.PhotoCamera,
                                             contentDescription = "Snap picture with camera",
                                             tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(20.dp)
+                                            modifier = Modifier.size(19.dp)
                                         )
                                     }
                                 }
@@ -644,14 +821,30 @@ fun DirectChatScreen(
                                 },
                                 enabled = !isSending && !isEncodingSnap,
                                 modifier = Modifier
-                                    .size(48.dp)
+                                    .size(44.dp)
                                     .testTag("dm_snap_gallery_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.AddPhotoAlternate,
                                     contentDescription = "Send photo from gallery",
                                     tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(22.dp)
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
+
+                            // Record Voice Note
+                            IconButton(
+                                onClick = ::requestVoiceNoteStart,
+                                enabled = !isSending && !isEncodingSnap,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .testTag("dm_voice_note_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Mic,
+                                    contentDescription = "Record voice note",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(21.dp)
                                 )
                             }
 
@@ -713,6 +906,7 @@ fun DirectChatScreen(
                                     )
                                 }
                             }
+                        }
                         }
                         }
                     }
@@ -984,7 +1178,7 @@ fun DirectChatScreen(
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "Send a message, snap a picture, or start a live mic/video call.",
+                                        text = "Send a message, voice note, snap a picture, or start a live mic/video call.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -999,9 +1193,22 @@ fun DirectChatScreen(
                                     verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     items(messages, key = { it.id }) { msg ->
+                                        val isPlayingThis = playingVoiceMessageId == msg.id
                                         SnapChatMessageBlock(
                                             message = msg,
                                             isMe = msg.senderId == viewModel.currentUserId,
+                                            isPlayingVoice = isPlayingThis,
+                                            voicePlaybackProgress = if (isPlayingThis) voicePlaybackProgress else 0f,
+                                            onToggleVoicePlay = {
+                                                voicePlayer.togglePlay(
+                                                    messageId = msg.id,
+                                                    audioBase64 = msg.audioBase64,
+                                                    scope = scope,
+                                                    onError = { errMsg ->
+                                                        scope.launch { snackbarHostState.showTopMessage(errMsg) }
+                                                    }
+                                                )
+                                            },
                                             onOpenPhoto = { photo -> fullScreenPhotoBase64 = photo }
                                         )
                                     }
@@ -1179,17 +1386,21 @@ fun DirectChatScreen(
 }
 
 /**
- * Snapchat-signature vertical bar chat block supporting both text messages and snapped pictures.
+ * Snapchat-signature vertical bar chat block supporting text, voice notes, and snapped pictures.
  */
 @Composable
 private fun SnapChatMessageBlock(
     message: DirectMessage,
     isMe: Boolean,
+    isPlayingVoice: Boolean,
+    voicePlaybackProgress: Float,
+    onToggleVoicePlay: () -> Unit,
     onOpenPhoto: (String) -> Unit
 ) {
     val tier = message.senderTierEnum()
     val accentBarColor = if (isMe) SnapBlue else usernameColor(tier)
     val snapBitmap = rememberBase64ImageBitmap(message.imageBase64)
+    val hasVoice = message.hasVoiceNote()
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -1222,7 +1433,7 @@ private fun SnapChatMessageBlock(
                 modifier = Modifier
                     .padding(top = 4.dp)
                     .width(3.5.dp)
-                    .height(if (snapBitmap != null) 56.dp else 26.dp)
+                    .height(if (snapBitmap != null) 56.dp else if (hasVoice) 44.dp else 26.dp)
                     .clip(RoundedCornerShape(999.dp))
                     .background(accentBarColor)
             )
@@ -1259,6 +1470,79 @@ private fun SnapChatMessageBlock(
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxWidth()
                             )
+                        }
+                    }
+                    if (hasVoice) {
+                        val barHeights = remember { listOf(10, 18, 26, 16, 28, 22, 14, 24, 30, 18, 12, 22, 16, 10) }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier
+                                .widthIn(min = 210.dp, max = 270.dp)
+                                .testTag("dm_voice_bubble_${message.id}")
+                        ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = if (isPlayingVoice) LiveCoral else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(44.dp)
+                            ) {
+                                IconButton(
+                                    onClick = onToggleVoicePlay,
+                                    modifier = Modifier.testTag("dm_voice_play_${message.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = if (isPlayingVoice) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                        contentDescription = if (isPlayingVoice) "Pause voice note" else "Play voice note",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    modifier = Modifier.height(30.dp)
+                                ) {
+                                    barHeights.forEachIndexed { index, h ->
+                                        val fraction = (index + 1).toFloat() / barHeights.size.toFloat()
+                                        val active = isPlayingVoice && fraction <= voicePlaybackProgress.coerceAtLeast(0.08f)
+                                        Box(
+                                            modifier = Modifier
+                                                .width(3.5.dp)
+                                                .height(h.dp)
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(
+                                                    if (active) MaterialTheme.colorScheme.primary
+                                                    else accentBarColor.copy(alpha = 0.42f)
+                                                )
+                                        )
+                                    }
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.GraphicEq,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = if (isPlayingVoice) {
+                                            "Playing · ${formatVoiceDuration(message.audioDurationSec)}"
+                                        } else {
+                                            "Voice note · ${formatVoiceDuration(message.audioDurationSec)}"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                     }
                     if (message.text.isNotBlank()) {

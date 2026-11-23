@@ -75,6 +75,7 @@ import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
+import com.example.ui.components.QuickCreatePostSheet
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.formatTimestampShort
@@ -93,8 +94,20 @@ fun ChatsHomeScreen(
     friendships: List<Friendship>,
     directoryEntries: List<DirectoryEntry>,
     liveRoomsCount: Int,
+    isPublishingPost: Boolean,
+    viewerIsAdultVerified: Boolean,
     onOpenThread: (String) -> Unit,
     onStartChatWithUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
+    onCreateQuickPost: (
+        text: String,
+        imageBase64: String,
+        locked: Boolean,
+        boostToTop: Boolean,
+        onInsufficientPoints: () -> Unit,
+        onPosted: () -> Unit
+    ) -> Unit,
+    onRequestAgeVerification: () -> Unit,
+    onOpenBuyPoints: () -> Unit,
     onOpenUserProfile: (String) -> Unit,
     onOpenFriendsTab: () -> Unit,
     onOpenRoomsTab: () -> Unit,
@@ -104,6 +117,7 @@ fun ChatsHomeScreen(
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Unread, 2 = Friends
     var showNewChatSheet by remember { mutableStateOf(false) }
+    var showQuickCreateSheet by remember { mutableStateOf(false) }
     val directoryByUid = remember(directoryEntries) {
         directoryEntries.associateBy { it.userId }
     }
@@ -251,11 +265,29 @@ fun ChatsHomeScreen(
                             StaffTierBadge(tier = staffCapabilities.tier)
                         }
 
-                        // Right: Add Friends + Live Rooms quick jump
+                        // Right: Quick + Post, Add Friends + Live Rooms quick jump
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(44.dp)
+                            ) {
+                                IconButton(
+                                    onClick = { showQuickCreateSheet = true },
+                                    modifier = Modifier.testTag("chats_quick_create_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Add,
+                                        contentDescription = "Quick post, snap, or picture to profile",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+
                             Box {
                                 Surface(
                                     shape = CircleShape,
@@ -607,6 +639,22 @@ fun ChatsHomeScreen(
                     showNewChatSheet = false
                     onStartChatWithUser(uid, name, color, tier)
                 }
+            )
+        }
+    }
+
+    if (showQuickCreateSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showQuickCreateSheet = false },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            QuickCreatePostSheet(
+                isPublishingPost = isPublishingPost,
+                viewerIsAdultVerified = viewerIsAdultVerified,
+                onRequestAgeVerification = onRequestAgeVerification,
+                onCreatePost = onCreateQuickPost,
+                onInsufficientPointsForBoost = onOpenBuyPoints,
+                onDismiss = { showQuickCreateSheet = false }
             )
         }
     }

@@ -206,11 +206,18 @@ data class UserProfile(
     val creatorEarningsCents: Long = 0L,
     val totalSpentCents: Long = 0L,
     val dmPolicy: String = DmPolicy.OPEN.name,
+    val adultVerified: Boolean = false,
+    val birthYear: Long = 0L,
     val blockedUserIds: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun dmPolicyEnum(): DmPolicy = DmPolicy.fromRaw(dmPolicy)
+    fun isAdult18Plus(): Boolean {
+        if (!adultVerified || birthYear < 1900L) return false
+        val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+        return (currentYear - birthYear.toInt()) >= 18
+    }
     fun currentlySuspended(nowMs: Long = System.currentTimeMillis()): Boolean =
         suspendedUntilMillis > nowMs
 
@@ -372,6 +379,8 @@ data class RoomParticipant(
     fun onStage(): Boolean = !invisible && roleEnum() != ParticipantRole.LISTENER
 }
 
+val ROOM_REACTION_EMOJIS = listOf("❤️", "😂", "🔥", "👏", "😮", "👍")
+
 @Keep
 @IgnoreExtraProperties
 data class ChatMessage(
@@ -385,11 +394,19 @@ data class ChatMessage(
     val messageType: String = MessageType.TEXT.name,
     val flaggedByAutoMod: Boolean = false,
     val deletedByMod: Boolean = false,
+    val reactionsByEmoji: Map<String, List<String>> = emptyMap(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun messageTypeEnum(): MessageType = MessageType.fromRaw(messageType)
     fun senderTierEnum(): StaffTier = StaffTier.fromRaw(senderTier)
+    fun hasReacted(emoji: String, uid: String): Boolean =
+        reactionsByEmoji[emoji]?.contains(uid) == true
+    fun nonEmptyReactions(): List<Pair<String, List<String>>> =
+        reactionsByEmoji.entries
+            .filter { it.value.isNotEmpty() }
+            .sortedByDescending { it.value.size }
+            .map { it.key to it.value }
 }
 
 @Keep
@@ -575,9 +592,12 @@ data class DirectMessage(
     val senderTier: String = StaffTier.USER.name,
     val text: String = "",
     val imageBase64: String = "",
+    val audioBase64: String = "",
+    val audioDurationSec: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     fun senderTierEnum(): StaffTier = StaffTier.fromRaw(senderTier)
+    fun hasVoiceNote(): Boolean = audioBase64.isNotBlank()
 }
 
 @Keep
@@ -609,8 +629,15 @@ data class ProfilePost(
 ) {
     fun authorTierEnum(): StaffTier = StaffTier.fromRaw(authorTier)
     fun isLikedBy(uid: String): Boolean = likedByUserIds.contains(uid)
-    fun isUnlockedFor(uid: String, subscribedCreatorIds: Set<String> = emptySet()): Boolean =
-        !locked || authorId == uid || unlockedByUserIds.contains(uid) || subscribedCreatorIds.contains(authorId)
+    fun isUnlockedFor(
+        uid: String,
+        subscribedCreatorIds: Set<String> = emptySet(),
+        viewerIsAdultVerified: Boolean = true
+    ): Boolean {
+        if (!locked) return true
+        if (!viewerIsAdultVerified) return false
+        return authorId == uid || unlockedByUserIds.contains(uid) || subscribedCreatorIds.contains(authorId)
+    }
     fun isShareable(): Boolean = !locked
     fun isCurrentlyBoosted(nowMs: Long = System.currentTimeMillis()): Boolean = boostedUntilMillis > nowMs
     fun boostRemainingLabel(nowMs: Long = System.currentTimeMillis()): String {

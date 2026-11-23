@@ -46,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -82,6 +83,7 @@ import com.example.ui.screens.LobbyScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.RoomScreen
 import com.example.ui.screens.SafetyScreen
+import com.example.ui.components.AgeVerificationDialog
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.showTopMessage
 import com.example.ui.screens.UserProfileScreen
@@ -249,6 +251,8 @@ private fun AuthenticatedVoxStageApp(
         mySubscriptions.filter { it.isCurrentlyActive() }.map { it.creatorId }.toSet()
     }
     var profileInitialTab by remember { mutableIntStateOf(0) }
+    var showAgeVerificationDialog by remember { mutableStateOf(false) }
+    val viewerIsAdultVerified = userProfile?.isAdult18Plus() == true
 
     val unreadChatsCount = remember(directThreadsState, currentUserId) {
         (directThreadsState as? UiState.Success)?.data?.count { it.isUnreadFor(currentUserId) } ?: 0
@@ -465,6 +469,8 @@ private fun AuthenticatedVoxStageApp(
                                     friendships = friendships,
                                     directoryEntries = directoryEntries,
                                     liveRoomsCount = liveRoomsCount,
+                                    isPublishingPost = isPublishingPost,
+                                    viewerIsAdultVerified = viewerIsAdultVerified,
                                     onOpenThread = { threadId ->
                                         navController.navigate("dm/$threadId")
                                     },
@@ -479,6 +485,9 @@ private fun AuthenticatedVoxStageApp(
                                             }
                                         )
                                     },
+                                    onCreateQuickPost = mainViewModel::createProfilePost,
+                                    onRequestAgeVerification = { showAgeVerificationDialog = true },
+                                    onOpenBuyPoints = ::openProfileBuyPoints,
                                     onOpenUserProfile = ::openUserProfile,
                                     onOpenFriendsTab = { navigateToTopTab(ROUTE_FRIENDS) },
                                     onOpenRoomsTab = { navigateToTopTab(ROUTE_DISCOVER) },
@@ -495,7 +504,9 @@ private fun AuthenticatedVoxStageApp(
                                     recentPostsState = recentPostsState,
                                     myPointsBalance = myPointsBalance,
                                     subscribedCreatorIds = subscribedCreatorIds,
+                                    viewerIsAdultVerified = viewerIsAdultVerified,
                                     isProcessingWallet = isProcessingWallet,
+                                    onRequestAgeVerification = { showAgeVerificationDialog = true },
                                     onOpenUserProfile = ::openUserProfile,
                                     onSendFriendRequest = mainViewModel::sendFriendRequest,
                                     onAcceptFriendRequest = mainViewModel::acceptFriendRequest,
@@ -646,6 +657,7 @@ private fun AuthenticatedVoxStageApp(
                                     onBuyPoints = mainViewModel::buyPoints,
                                     onSetDmPolicy = mainViewModel::setDmPolicy,
                                     onKickPaidDmMember = mainViewModel::kickPaidDmMember,
+                                    onRequestAgeVerification = { showAgeVerificationDialog = true },
                                     onSaveProfile = mainViewModel::updateProfile,
                                     onSignOut = {
                                         signOutFromVoxStage(
@@ -688,7 +700,9 @@ private fun AuthenticatedVoxStageApp(
                                     friendship = existingFriendship,
                                     myPointsBalance = myPointsBalance,
                                     activeSubscription = activeSubForCreator,
+                                    viewerIsAdultVerified = viewerIsAdultVerified,
                                     isProcessingWallet = isProcessingWallet,
+                                    onRequestAgeVerification = { showAgeVerificationDialog = true },
                                     onBack = { navController.popBackStack() },
                                     onOpenUserProfile = ::openUserProfile,
                                     onMessageUser = { otherUid, otherName, otherColor, otherTier ->
@@ -848,6 +862,17 @@ private fun AuthenticatedVoxStageApp(
                             Text("Cancel")
                         }
                     }
+                )
+            }
+
+            if (showAgeVerificationDialog) {
+                AgeVerificationDialog(
+                    onConfirmBirthYear = { year ->
+                        mainViewModel.verifyAge18Plus(year) {
+                            showAgeVerificationDialog = false
+                        }
+                    },
+                    onDismiss = { showAgeVerificationDialog = false }
                 )
             }
         }

@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -35,6 +37,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.AddReaction
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -86,6 +89,7 @@ import com.example.data.ChatMessage
 import com.example.data.ChatRoom
 import com.example.data.MessageType
 import com.example.data.ParticipantRole
+import com.example.data.ROOM_REACTION_EMOJIS
 import com.example.data.RoomParticipant
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
@@ -417,6 +421,9 @@ fun RoomScreen(
                                                 message = msg
                                             )
                                         },
+                                        onToggleReaction = { msg, emoji ->
+                                            viewModel.toggleMessageReaction(msg, emoji)
+                                        },
                                         modifier = Modifier
                                             .weight(0.54f)
                                             .fillMaxHeight()
@@ -453,6 +460,9 @@ fun RoomScreen(
                                                 participant = p,
                                                 message = msg
                                             )
+                                        },
+                                        onToggleReaction = { msg, emoji ->
+                                            viewModel.toggleMessageReaction(msg, emoji)
                                         },
                                         modifier = Modifier
                                             .weight(1f)
@@ -1112,6 +1122,7 @@ private fun ChatTimelineSection(
     messages: List<ChatMessage>,
     currentUserId: String,
     onTapMessage: (ChatMessage) -> Unit,
+    onToggleReaction: (ChatMessage, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
@@ -1148,7 +1159,7 @@ private fun ChatTimelineSection(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "Say hello to kick off the live chat! Tap any message to moderate or report.",
+                    text = "Say hello to kick off the live chat! Tap any message to moderate or react with emojis.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1165,8 +1176,10 @@ private fun ChatTimelineSection(
                 items(messages, key = { it.id }) { msg ->
                     ChatMessageBubble(
                         message = msg,
+                        currentUserId = currentUserId,
                         isMine = msg.senderId == currentUserId,
-                        onClick = { onTapMessage(msg) }
+                        onClick = { onTapMessage(msg) },
+                        onToggleReaction = { emoji -> onToggleReaction(msg, emoji) }
                     )
                 }
             }
@@ -1174,11 +1187,14 @@ private fun ChatTimelineSection(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ChatMessageBubble(
     message: ChatMessage,
+    currentUserId: String,
     isMine: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onToggleReaction: (String) -> Unit
 ) {
     val type = message.messageTypeEnum()
 
@@ -1206,6 +1222,8 @@ private fun ChatMessageBubble(
 
     val role = ParticipantRole.fromRaw(message.senderRole)
     val senderTier = message.senderTierEnum()
+    var showReactionPicker by remember(message.id) { mutableStateOf(false) }
+    val activeReactions = remember(message.reactionsByEmoji) { message.nonEmptyReactions() }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -1225,7 +1243,7 @@ private fun ChatMessageBubble(
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1256,11 +1274,32 @@ private fun ChatMessageBubble(
                         )
                     }
                 }
-                Text(
-                    text = formatTimestampShort(message.createdAt),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = formatTimestampShort(message.createdAt),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (!message.deletedByMod) {
+                        IconButton(
+                            onClick = { showReactionPicker = !showReactionPicker },
+                            modifier = Modifier
+                                .size(34.dp)
+                                .testTag("react_msg_${message.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AddReaction,
+                                contentDescription = "React to message with emoji",
+                                tint = if (showReactionPicker) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
             }
 
             Text(
@@ -1271,6 +1310,94 @@ private fun ChatMessageBubble(
                 color = if (message.deletedByMod) MaterialTheme.colorScheme.onSurfaceVariant
                 else MaterialTheme.colorScheme.onSurface
             )
+
+            // Expandable Quick Emoji Picker Strip
+            if (showReactionPicker && !message.deletedByMod) {
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.testTag("reaction_picker_${message.id}")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ROOM_REACTION_EMOJIS.forEach { emoji ->
+                            val reacted = message.hasReacted(emoji, currentUserId)
+                            Surface(
+                                shape = CircleShape,
+                                color = if (reacted) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        showReactionPicker = false
+                                        onToggleReaction(emoji)
+                                    }
+                                    .testTag("react_pick_${message.id}_$emoji")
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = emoji,
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Active Emoji Reaction Pills (stored in Firestore)
+            if (activeReactions.isNotEmpty() && !message.deletedByMod) {
+                FlowRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    activeReactions.forEach { (emoji, uids) ->
+                        val mine = uids.contains(currentUserId)
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = if (mine) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                            },
+                            border = BorderStroke(
+                                width = 1.dp,
+                                color = if (mine) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .clickable { onToggleReaction(emoji) }
+                                .testTag("reaction_chip_${message.id}_$emoji")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = emoji,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                                Text(
+                                    text = "${uids.size}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (mine) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

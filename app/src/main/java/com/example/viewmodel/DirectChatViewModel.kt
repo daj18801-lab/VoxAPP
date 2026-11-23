@@ -93,12 +93,15 @@ class DirectChatViewModel(
         senderName: String,
         senderTier: StaffTier,
         text: String,
-        imageBase64: String = ""
+        imageBase64: String = "",
+        audioBase64: String = "",
+        audioDurationSec: Long = 0L
     ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
         val clean = text.trim()
         val cleanImage = imageBase64.trim()
-        if ((clean.isEmpty() && cleanImage.isEmpty()) || _isSending.value) return
+        val cleanAudio = audioBase64.trim()
+        if ((clean.isEmpty() && cleanImage.isEmpty() && cleanAudio.isEmpty()) || _isSending.value) return
         viewModelScope.launch {
             _isSending.value = true
             repository.sendDirectMessage(
@@ -106,7 +109,9 @@ class DirectChatViewModel(
                 senderName = senderName,
                 senderTier = senderTier,
                 text = clean,
-                imageBase64 = cleanImage
+                imageBase64 = cleanImage,
+                audioBase64 = cleanAudio,
+                audioDurationSec = audioDurationSec
             ).onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not send message")
             }

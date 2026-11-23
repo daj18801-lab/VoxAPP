@@ -829,6 +829,10 @@ class MainViewModel(
                 return
             }
         }
+        if (locked && imageBase64.isNotBlank() && !effectiveMyProfile().isAdult18Plus()) {
+            _snackbarEvents.tryEmit("You must verify that you are 18+ to lock photos.")
+            return
+        }
         if (boostToTop) {
             val currentPoints = currentProfile?.pointsBalance ?: 0L
             if (currentPoints < 5L) {
@@ -993,11 +997,28 @@ class MainViewModel(
         }
     }
 
+    fun verifyAge18Plus(birthYear: Int, onVerified: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.verifyUserAge18Plus(birthYear)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("18+ age verified! You can now lock and unlock 18+ photos.")
+                    onVerified()
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Age verification failed")
+                }
+        }
+    }
+
     fun unlockProfilePost(
         post: ProfilePost,
         onInsufficientPoints: () -> Unit = {}
     ) {
         if (_isProcessingWallet.value) return
+        if (!effectiveMyProfile().isAdult18Plus()) {
+            _snackbarEvents.tryEmit("You must verify that you are 18+ to view or unlock locked photos.")
+            return
+        }
         val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
         if (currentPoints < 2L) {
             _snackbarEvents.tryEmit("You need 2 points (\$2) to unlock this photo. Buy points in Profile Settings.")
@@ -1021,6 +1042,10 @@ class MainViewModel(
 
     fun subscribeToCreator(creatorId: String, creatorName: String) {
         if (_isProcessingWallet.value) return
+        if (!effectiveMyProfile().isAdult18Plus()) {
+            _snackbarEvents.tryEmit("You must verify that you are 18+ to subscribe to locked photos.")
+            return
+        }
         viewModelScope.launch {
             _isProcessingWallet.value = true
             repository.subscribeToCreator(

@@ -48,6 +48,7 @@ import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Stars
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -158,6 +159,7 @@ fun ProfileScreen(
     onBuyPoints: (Long) -> Unit,
     onSetDmPolicy: (DmPolicy) -> Unit,
     onKickPaidDmMember: (senderId: String, senderName: String) -> Unit,
+    onRequestAgeVerification: () -> Unit,
     onSaveProfile: (
         displayName: String,
         handle: String,
@@ -620,22 +622,29 @@ fun ProfileScreen(
                                     }
                                 }
 
-                                // Lock Photo Toggle (2 pts / $2 unlock · $1 to creator, $1 to app owner)
+                                // Lock Photo Toggle (18+ · 2 pts / $2 unlock · $1 to creator, $1 to app owner)
+                                val isAdultVerified = userProfile?.isAdult18Plus() == true
                                 Surface(
                                     shape = RoundedCornerShape(14.dp),
-                                    color = if (lockPostPhoto) {
+                                    color = if (lockPostPhoto && isAdultVerified) {
                                         ModAmber.copy(alpha = 0.14f)
                                     } else {
                                         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                                     },
                                     border = BorderStroke(
                                         1.dp,
-                                        if (lockPostPhoto) ModAmber.copy(alpha = 0.55f)
+                                        if (lockPostPhoto && isAdultVerified) ModAmber.copy(alpha = 0.55f)
                                         else MaterialTheme.colorScheme.outlineVariant
                                     ),
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { lockPostPhoto = !lockPostPhoto }
+                                        .clickable {
+                                            if (!lockPostPhoto && !isAdultVerified) {
+                                                onRequestAgeVerification()
+                                            } else {
+                                                lockPostPhoto = !lockPostPhoto
+                                            }
+                                        }
                                         .testTag("lock_post_photo_toggle_row")
                                 ) {
                                     Row(
@@ -645,25 +654,35 @@ fun ProfileScreen(
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Lock,
-                                            contentDescription = "Lock photo",
-                                            tint = if (lockPostPhoto) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            contentDescription = "Lock photo (18+)",
+                                            tint = if (lockPostPhoto && isAdultVerified) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
                                             modifier = Modifier.size(20.dp)
                                         )
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
-                                                text = "Lock Photo (2 pts / \$2 to unlock)",
+                                                text = "Lock Photo (18+ · 2 pts / \$2 to unlock)",
                                                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                                color = if (lockPostPhoto) ModAmber else MaterialTheme.colorScheme.onSurface
+                                                color = if (lockPostPhoto && isAdultVerified) ModAmber else MaterialTheme.colorScheme.onSurface
                                             )
                                             Text(
-                                                text = "You earn \$1 & app owner gets \$1 per unlock, or viewers subscribe \$15/mo",
+                                                text = if (isAdultVerified) {
+                                                    "You earn \$1 & app owner gets \$1 per unlock, or viewers subscribe \$15/mo"
+                                                } else {
+                                                    "18+ age verification required — tap to verify your age first"
+                                                },
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
                                         Switch(
-                                            checked = lockPostPhoto,
-                                            onCheckedChange = { lockPostPhoto = it },
+                                            checked = lockPostPhoto && isAdultVerified,
+                                            onCheckedChange = { wantLock ->
+                                                if (wantLock && !isAdultVerified) {
+                                                    onRequestAgeVerification()
+                                                } else {
+                                                    lockPostPhoto = wantLock
+                                                }
+                                            },
                                             modifier = Modifier.testTag("lock_post_photo_switch")
                                         )
                                     }
@@ -853,9 +872,11 @@ fun ProfileScreen(
                                     currentUserId = currentUserId,
                                     canDelete = true,
                                     latestAuthorPhotoBase64 = currentPhotoBase64,
+                                    viewerIsAdultVerified = userProfile?.isAdult18Plus() == true,
                                     isProcessingUnlock = isProcessingWallet,
                                     onAuthorClick = null,
                                     onOriginalAuthorClick = onOpenUserProfile,
+                                    onRequestAgeVerification = onRequestAgeVerification,
                                     onBoostPost = {
                                         onBoostPost(post) { showNeedPointsForBoostDialog = true }
                                     },
@@ -894,6 +915,79 @@ fun ProfileScreen(
                         onSelectPolicy = onSetDmPolicy,
                         onKickMember = onKickPaidDmMember
                     )
+                }
+
+                // 18+ AGE VERIFICATION STATUS CARD
+                item(key = "age_verification_card") {
+                    val isAdultVerified = userProfile?.isAdult18Plus() == true
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isAdultVerified) SafetyEmerald.copy(alpha = 0.5f)
+                            else ModAmber.copy(alpha = 0.55f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_age_verification_card")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = if (isAdultVerified) SafetyEmerald.copy(alpha = 0.14f) else ModAmber.copy(alpha = 0.16f),
+                                modifier = Modifier.size(44.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.VerifiedUser,
+                                        contentDescription = "18+ age verification status",
+                                        tint = if (isAdultVerified) SafetyEmerald else ModAmber,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (isAdultVerified) "18+ Verified" else "18+ Verification Required",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = if (isAdultVerified) SafetyEmerald else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = if (isAdultVerified) {
+                                        "Born ${userProfile?.birthYear} · Eligible to lock & unlock 18+ photos"
+                                    } else {
+                                        "Verify that you are 18+ to lock photos or view locked photos"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (!isAdultVerified) {
+                                Button(
+                                    onClick = onRequestAgeVerification,
+                                    shape = RoundedCornerShape(999.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = ModAmber,
+                                        contentColor = Color.Black
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                    modifier = Modifier.testTag("settings_verify_age_button")
+                                ) {
+                                    Text(
+                                        text = "Verify 18+",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // RESTRICTIONS, HARDWARE READINESS, PREFERENCES & SIGN OUT

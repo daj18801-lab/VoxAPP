@@ -572,6 +572,18 @@ class RoomViewModel(
         }
     }
 
+    fun toggleMessageReaction(message: ChatMessage, emoji: String) {
+        viewModelScope.launch {
+            repository.toggleRoomMessageReaction(
+                roomId = roomId,
+                message = message,
+                emoji = emoji
+            ).onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not update reaction")
+            }
+        }
+    }
+
     private fun startSlowModeCountdown(seconds: Int) {
         slowModeJob?.cancel()
         slowModeJob = viewModelScope.launch {

@@ -26,6 +26,8 @@
         "creatorEarningsCents": { "type": "integer", "description": "Accumulated creator earnings in USD cents ($1 per 2-pt photo unlock, $5 per $10 paid DM, $7.50 per $15/mo subscription)." },
         "totalSpentCents": { "type": "integer", "description": "Total USD cents spent on points, paid DMs, and creator subscriptions." },
         "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"], "description": "Private message privacy setting: OPEN (anyone), PAID ($10 lock, $5 user / $5 app), or DISABLED (no private messages)." },
+        "adultVerified": { "type": "boolean", "description": "Whether the user has verified they are 18+ years old (required to lock photos or view/unlock locked photos)." },
+        "birthYear": { "type": "integer", "description": "User's self-verified birth year (0 if unverified; must satisfy age >= 18 when adultVerified is true)." },
         "blockedUserIds": { "type": "array", "description": "Bounded list of up to 100 blocked UIDs." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
@@ -173,6 +175,7 @@
         "messageType": { "type": "string", "enum": ["TEXT", "REACTION", "MOD_NOTICE", "JOIN_LEAVE"] },
         "flaggedByAutoMod": { "type": "boolean" },
         "deletedByMod": { "type": "boolean" },
+        "reactionsByEmoji": { "type": "object", "description": "Map of emoji string to array of reacting user UIDs stored in Firestore." },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -318,6 +321,8 @@
         "senderTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
         "text": { "type": "string" },
         "imageBase64": { "type": "string", "description": "Optional compressed JPEG snap picture." },
+        "audioBase64": { "type": "string", "description": "Optional compressed M4A/AAC voice note encoded as Base64." },
+        "audioDurationSec": { "type": "integer", "description": "Duration of the attached voice note in seconds (0-60)." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["threadId", "participantIds", "senderId", "senderName", "senderTier", "text", "createdAt"]

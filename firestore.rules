@@ -121,6 +121,19 @@ service cloud.firestore {
              isAdmin();
     }
 
+    function isAdultVerifiedProfile(p) {
+      return ('adultVerified' in p) &&
+             p.adultVerified == true &&
+             ('birthYear' in p) &&
+             p.birthYear is int &&
+             p.birthYear >= 1900 &&
+             p.birthYear <= request.time.year() - 18;
+    }
+
+    function isAdultVerifiedCaller() {
+      return callerProfileExists() && isAdultVerifiedProfile(callerProfile());
+    }
+
     function roomDoc(roomId) {
       return get(/databases/$(database)/documents/rooms/$(roomId));
     }
@@ -161,6 +174,7 @@ service cloud.firestore {
                'globallyBanned', 'disableCreateRoom', 'disableEnterRoom',
                'disableMic', 'disableVideo', 'suspendedUntilMillis', 'suspensionReason',
                'pointsBalance', 'creatorEarningsCents', 'totalSpentCents', 'dmPolicy',
+               'adultVerified', 'birthYear',
                'blockedUserIds', 'createdAt', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
@@ -184,6 +198,9 @@ service cloud.firestore {
              (!('creatorEarningsCents' in data) || (data.creatorEarningsCents is int && data.creatorEarningsCents >= 0 && data.creatorEarningsCents <= 1000000000)) &&
              (!('totalSpentCents' in data) || (data.totalSpentCents is int && data.totalSpentCents >= 0 && data.totalSpentCents <= 1000000000)) &&
              (!('dmPolicy' in data) || data.dmPolicy in ['OPEN', 'PAID', 'DISABLED']) &&
+             (!('adultVerified' in data) || data.adultVerified is bool) &&
+             (!('birthYear' in data) || (data.birthYear is int && (data.birthYear == 0 || (data.birthYear >= 1900 && data.birthYear <= request.time.year())))) &&
+             (!('adultVerified' in data) || !data.adultVerified || isAdultVerifiedProfile(data)) &&
              isBoundedStringList(data.blockedUserIds, 100) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
@@ -347,7 +364,7 @@ service cloud.firestore {
              data.keys().hasOnly([
                'roomId', 'senderId', 'senderName', 'senderRole', 'senderTier',
                'text', 'messageType', 'flaggedByAutoMod', 'deletedByMod',
-               'createdAt', 'updatedAt'
+               'reactionsByEmoji', 'createdAt', 'updatedAt'
              ]) &&
              data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 128 &&
              data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
@@ -358,6 +375,10 @@ service cloud.firestore {
              data.messageType in ['TEXT', 'REACTION', 'MOD_NOTICE', 'JOIN_LEAVE'] &&
              data.flaggedByAutoMod is bool &&
              data.deletedByMod is bool &&
+             (!('reactionsByEmoji' in data) ||
+              (data.reactionsByEmoji is map &&
+               data.reactionsByEmoji.size() <= 8 &&
+               data.reactionsByEmoji.keys().hasOnly(['❤️', '😂', '🔥', '👏', '😮', '👍', '🎉', '🙌']))) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
@@ -567,7 +588,8 @@ service cloud.firestore {
                'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier', 'text', 'createdAt'
              ]) &&
              data.keys().hasOnly([
-               'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier', 'text', 'imageBase64', 'createdAt'
+               'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier',
+               'text', 'imageBase64', 'audioBase64', 'audioDurationSec', 'createdAt'
              ]) &&
              data.threadId is string && data.threadId.size() >= 1 && data.threadId.size() <= 260 &&
              data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 15 &&
@@ -577,7 +599,11 @@ service cloud.firestore {
              data.senderTier in ['USER', 'SUPPORT', 'ADMIN'] &&
              data.text is string && data.text.size() <= 500 &&
              (!('imageBase64' in data) || (data.imageBase64 is string && data.imageBase64.size() <= 460000)) &&
-             (data.text.size() >= 1 || ('imageBase64' in data && data.imageBase64.size() >= 1)) &&
+             (!('audioBase64' in data) || (data.audioBase64 is string && data.audioBase64.size() <= 300000)) &&
+             (!('audioDurationSec' in data) || (data.audioDurationSec is int && data.audioDurationSec >= 0 && data.audioDurationSec <= 60)) &&
+             (data.text.size() >= 1 ||
+              ('imageBase64' in data && data.imageBase64.size() >= 1) ||
+              ('audioBase64' in data && data.audioBase64.size() >= 1)) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
     }
 
@@ -765,7 +791,10 @@ service cloud.firestore {
       let diffKeys = newData.diff(oldData).affectedKeys();
       let isAuthor = oldData.authorId == request.auth.uid;
       let isLocked = ('locked' in oldData) && oldData.locked == true;
-      return (isAuthor && diffKeys.hasOnly([
+      let nextLocked = ('locked' in newData) && newData.locked == true;
+      return (isAuthor &&
+              (!nextLocked || isAdultVerifiedCaller()) &&
+              diffKeys.hasOnly([
                 'text', 'imageBase64', 'locked', 'authorName', 'authorHandle',
                 'authorColorHex', 'authorPhotoBase64', 'updatedAt'
               ])) ||
@@ -778,7 +807,8 @@ service cloud.firestore {
                 newData.likedByUserIds.size() == oldData.likedByUserIds.size() - 1)
              )) ||
              (isAdmin() && diffKeys.hasOnly(['authorName', 'authorHandle', 'updatedAt'])) ||
-             (!isAuthor && isLocked && diffKeys.hasOnly(['unlockedByUserIds', 'updatedAt']) &&
+             (!isAuthor && isLocked && isAdultVerifiedCaller() &&
+              diffKeys.hasOnly(['unlockedByUserIds', 'updatedAt']) &&
               request.auth.uid in newData.unlockedByUserIds &&
               (!('unlockedByUserIds' in oldData)
                 ? newData.unlockedByUserIds.size() == 1
@@ -792,6 +822,17 @@ service cloud.firestore {
                 newData.commentCount == existingInt(oldData, 'commentCount') - 1))) ||
              (!isLocked && diffKeys.hasOnly(['shareCount', 'updatedAt']) &&
               newData.shareCount == existingInt(oldData, 'shareCount') + 1);
+    }
+
+    function canToggleMessageReaction(rId, newData, oldData) {
+      let room = roomDoc(rId).data;
+      return oldData.deletedByMod == false &&
+             roomExists(rId) &&
+             room.status == 'LIVE' &&
+             callerPassesProfileChecks(false, false, false, false) &&
+             (!(request.auth.uid in room.bannedUserIds) || isAdmin()) &&
+             (!isBouncedFromRoom(room, request.auth.uid) || isAdmin()) &&
+             newData.diff(oldData).affectedKeys().hasOnly(['reactionsByEmoji', 'updatedAt']);
     }
 
     function canUpdateDirectThread(newData, oldData) {
@@ -860,7 +901,8 @@ service cloud.firestore {
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
                             'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled',
-                            'invisibleModePreferred', 'dmPolicy', 'blockedUserIds', 'updatedAt'
+                            'invisibleModePreferred', 'dmPolicy', 'adultVerified', 'birthYear',
+                            'blockedUserIds', 'updatedAt'
                           ])) ||
                          // Action 1b: Owner buys points (2..500 pts at $1/pt), spends 2 pts to unlock photo, or pays $15/mo subscription
                          (request.auth.uid == userId &&
@@ -1205,10 +1247,12 @@ service cloud.firestore {
                          isValidMessage(incoming()) &&
                          incoming().roomId == existing().roomId &&
                          incoming().senderId == existing().senderId &&
-                         incoming().createdAt == existing().createdAt &&
-                         isRoomHostOrMod(roomId) &&
-                         incoming().deletedByMod == true &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['text', 'deletedByMod', 'updatedAt']);
+                         incoming().createdAt == existing().createdAt && (
+                           (isRoomHostOrMod(roomId) &&
+                            incoming().deletedByMod == true &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['text', 'deletedByMod', 'updatedAt'])) ||
+                           canToggleMessageReaction(roomId, incoming(), existing())
+                         );
 
         allow delete: if isSignedIn() &&
                          isValidId(roomId) &&
@@ -1447,6 +1491,7 @@ service cloud.firestore {
                           (!('boostedUntilMillis' in incoming()) || incoming().boostedUntilMillis == 0)) ||
                          (isValidBoostWindow(incoming()) && callerPaidFivePointsInBatch())
                        ) &&
+                       (!('locked' in incoming()) || incoming().locked == false || isAdultVerifiedCaller()) &&
                        isAllowedStaffTierClaim(incoming().authorTier) &&
                        callerPassesProfileChecks(false, false, false, false) &&
                        isValidProfilePost(incoming());
@@ -1506,6 +1551,7 @@ service cloud.firestore {
                        incoming().subscriberId != incoming().creatorId &&
                        subId == incoming().subscriberId + '_' + incoming().creatorId &&
                        incoming().active == true &&
+                       isAdultVerifiedCaller() &&
                        isValidCreatorSubscription(incoming());
 
       allow update: if isSignedIn() &&

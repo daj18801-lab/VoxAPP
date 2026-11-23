@@ -77,9 +77,11 @@ fun ProfilePostCard(
     canDelete: Boolean,
     latestAuthorPhotoBase64: String? = null,
     isUnlocked: Boolean = true,
+    viewerIsAdultVerified: Boolean = true,
     isProcessingUnlock: Boolean = false,
     onAuthorClick: (() -> Unit)? = null,
     onOriginalAuthorClick: ((String) -> Unit)? = null,
+    onRequestAgeVerification: (() -> Unit)? = null,
     onUnlockPost: (() -> Unit)? = null,
     onSubscribeCreator: (() -> Unit)? = null,
     onBoostPost: (() -> Unit)? = null,
@@ -93,7 +95,7 @@ fun ProfilePostCard(
     val liked = post.isLikedBy(currentUserId)
     val isBoosted = post.isCurrentlyBoosted()
     val effectiveAvatarPhoto = latestAuthorPhotoBase64?.ifBlank { post.authorPhotoBase64 } ?: post.authorPhotoBase64
-    val showLockedPaywall = post.locked && post.imageBase64.isNotBlank() && !isUnlocked
+    val showLockedPaywall = post.locked && post.imageBase64.isNotBlank() && (!isUnlocked || !viewerIsAdultVerified)
     val postImageBitmap = if (showLockedPaywall) null else rememberBase64ImageBitmap(post.imageBase64)
     val blurredBitmap = if (showLockedPaywall) rememberBlurredBase64ImageBitmap(post.imageBase64) else null
     var showFullPhoto by remember { mutableStateOf(false) }
@@ -283,67 +285,93 @@ fun ProfilePostCard(
                             }
                         }
                         Text(
-                            text = "Locked Photo",
+                            text = if (!viewerIsAdultVerified) "18+ Locked Photo" else "Locked Photo",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             color = Color.White
                         )
-                        Text(
-                            text = "Unlock for 2 pts (\$2) or subscribe for \$15/mo to view all locked photos from ${post.authorName}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.88f),
-                            textAlign = TextAlign.Center
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
-                        ) {
-                            if (onUnlockPost != null) {
+                        if (!viewerIsAdultVerified) {
+                            Text(
+                                text = "You must verify that you are 18 or older to view or unlock locked photos.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.88f),
+                                textAlign = TextAlign.Center
+                            )
+                            if (onRequestAgeVerification != null) {
                                 Button(
-                                    onClick = onUnlockPost,
-                                    enabled = !isProcessingUnlock,
+                                    onClick = onRequestAgeVerification,
                                     shape = RoundedCornerShape(999.dp),
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.primary,
-                                        contentColor = Color.White
+                                        containerColor = ModAmber,
+                                        contentColor = Color.Black
                                     ),
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                                    modifier = Modifier.testTag("unlock_photo_button_${post.id}")
+                                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+                                    modifier = Modifier.testTag("verify_age_from_post_${post.id}")
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.LockOpen,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "Unlock · 2 pts (\$2)",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                        text = "Verify Age (18+)",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.ExtraBold)
                                     )
                                 }
                             }
-                            if (onSubscribeCreator != null) {
-                                OutlinedButton(
-                                    onClick = onSubscribeCreator,
-                                    enabled = !isProcessingUnlock,
-                                    shape = RoundedCornerShape(999.dp),
-                                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.7f)),
-                                    colors = ButtonDefaults.outlinedButtonColors(
-                                        containerColor = Color.White.copy(alpha = 0.14f),
-                                        contentColor = Color.White
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                                    modifier = Modifier.testTag("subscribe_creator_from_post_${post.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.CardMembership,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(5.dp))
-                                    Text(
-                                        text = "Sub \$15/mo",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                                    )
+                        } else {
+                            Text(
+                                text = "Unlock for 2 pts (\$2) or subscribe for \$15/mo to view all locked photos from ${post.authorName}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.88f),
+                                textAlign = TextAlign.Center
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                            ) {
+                                if (onUnlockPost != null) {
+                                    Button(
+                                        onClick = onUnlockPost,
+                                        enabled = !isProcessingUnlock,
+                                        shape = RoundedCornerShape(999.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.primary,
+                                            contentColor = Color.White
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                        modifier = Modifier.testTag("unlock_photo_button_${post.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.LockOpen,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Unlock · 2 pts (\$2)",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    }
+                                }
+                                if (onSubscribeCreator != null) {
+                                    OutlinedButton(
+                                        onClick = onSubscribeCreator,
+                                        enabled = !isProcessingUnlock,
+                                        shape = RoundedCornerShape(999.dp),
+                                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.7f)),
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            containerColor = Color.White.copy(alpha = 0.14f),
+                                            contentColor = Color.White
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                        modifier = Modifier.testTag("subscribe_creator_from_post_${post.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.CardMembership,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(5.dp))
+                                        Text(
+                                            text = "Sub \$15/mo",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    }
                                 }
                             }
                         }

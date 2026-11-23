@@ -1149,8 +1149,20 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
   const ts = pastDate(4000);
   const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
-  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
-  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      adultVerified: true,
+      birthYear: 1995,
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).set({
+      ...validProfilePayload(BOB_UID),
+      adultVerified: true,
+      birthYear: 1992,
+    })
+  );
 
   // Alice posts a locked photo (2 points)
   await assertSucceeds(
@@ -1491,6 +1503,15 @@ test("Users can comment on posts and share unlocked posts, while locked pictures
   const charlieDb = testEnv.authenticatedContext("charlie_999").firestore();
   const ts = pastDate(4000);
   const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  // Alice verifies 18+ age so she can publish a locked photo post in addition to a public photo post
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      adultVerified: true,
+      birthYear: 1994,
+    })
+  );
 
   // Alice creates an unlocked photo post AND a locked photo post
   await assertSucceeds(
@@ -1883,6 +1904,178 @@ test("Group chats, DM privacy controls, $10 paid DM ($5/$5 split), and kicking p
       senderTier: "USER",
       text: "Welcome to the group chat everyone!",
       createdAt: pastDate(1500),
+    })
+  );
+});
+
+// 17. ROOM MESSAGE EMOJI REACTIONS, PRIVATE VOICE NOTES & 18+ AGE VERIFICATION FOR LOCKED PHOTOS
+test("Room message emoji reactions, private voice notes, and 18+ locked photo gating are enforced", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const minorUid = "minor_user_17";
+  const minorDb = testEnv.authenticatedContext(minorUid).firestore();
+  const ts = pastDate(5000);
+  const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const sampleAudioBase64 = "AAAAIGZ0eXBNNEEgAAACAGlzb21pc28y";
+
+  // 1) Room message emoji reactions stored in Firestore
+  await assertSucceeds(aliceDb.collection("rooms").doc("room_react").set(validRoomPayload(ALICE_UID)));
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_react").collection("messages").doc("msg_r1").set(
+      validMessagePayload("room_react", ALICE_UID)
+    )
+  );
+  // Bob reacts with ❤️ and 🔥
+  await assertSucceeds(
+    bobDb.collection("rooms").doc("room_react").collection("messages").doc("msg_r1").update({
+      reactionsByEmoji: { "❤️": [BOB_UID], "🔥": [BOB_UID] },
+      updatedAt: pastDate(2000),
+    })
+  );
+  // Bob CANNOT edit message text while reacting
+  await assertFails(
+    bobDb.collection("rooms").doc("room_react").collection("messages").doc("msg_r1").update({
+      text: "Tampered text",
+      reactionsByEmoji: { "❤️": [BOB_UID] },
+      updatedAt: pastDate(1900),
+    })
+  );
+  // Invalid emoji key is rejected
+  await assertFails(
+    bobDb.collection("rooms").doc("room_react").collection("messages").doc("msg_r1").update({
+      reactionsByEmoji: { "INVALID_KEY": [BOB_UID] },
+      updatedAt: pastDate(1800),
+    })
+  );
+
+  // 2) Private chat voice note (audioBase64 + audioDurationSec with empty text)
+  const dmThreadId = `${ALICE_UID}_${BOB_UID}`;
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(dmThreadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(dmThreadId).collection("messages").doc("dm_voice_1").set({
+      threadId: dmThreadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: ALICE_UID,
+      senderName: "Alice",
+      senderTier: "USER",
+      text: "",
+      audioBase64: sampleAudioBase64,
+      audioDurationSec: 7,
+      createdAt: pastDate(1500),
+    })
+  );
+
+  // 3) 18+ age verification enforcement for locking & unlocking photos
+  await assertSucceeds(minorDb.collection("users").doc(minorUid).set(validProfilePayload(minorUid)));
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+
+  // Under-18 birthYear CANNOT set adultVerified = true
+  await assertFails(
+    minorDb.collection("users").doc(minorUid).update({
+      adultVerified: true,
+      birthYear: 2012,
+      updatedAt: pastDate(1400),
+    })
+  );
+
+  // Unverified user CANNOT create a locked photo post
+  await assertFails(
+    minorDb.collection("profilePosts").doc("post_minor_locked").set({
+      authorId: minorUid,
+      authorName: "Minor",
+      authorHandle: "minor_u",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Locked photo attempt",
+      imageBase64: sampleBase64,
+      locked: true,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      likedByUserIds: [],
+      createdAt: pastDate(1300),
+      updatedAt: pastDate(1300),
+    })
+  );
+
+  // Alice verifies 18+ age (birthYear 1996) -> CAN create a locked photo
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      adultVerified: true,
+      birthYear: 1996,
+      updatedAt: pastDate(1200),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_adult_locked").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "18+ locked studio photo",
+      imageBase64: sampleBase64,
+      locked: true,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      likedByUserIds: [],
+      createdAt: pastDate(1100),
+      updatedAt: pastDate(1100),
+    })
+  );
+
+  // Unverified user CANNOT unlock Alice's locked photo or subscribe to view locked photos
+  await assertFails(
+    minorDb.collection("profilePosts").doc("post_adult_locked").update({
+      unlockedByUserIds: [minorUid],
+      updatedAt: pastDate(1000),
+    })
+  );
+  await assertFails(
+    minorDb.collection("creatorSubscriptions").doc(`${minorUid}_${ALICE_UID}`).set({
+      subscriberId: minorUid,
+      creatorId: ALICE_UID,
+      creatorName: "Alice",
+      priceCents: 1500,
+      creatorShareCents: 750,
+      platformShareCents: 750,
+      active: true,
+      expiresAtMillis: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      createdAt: pastDate(900),
+      updatedAt: pastDate(900),
+    })
+  );
+
+  // Bob verifies 18+ age -> CAN unlock Alice's locked photo!
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).set({
+      ...validProfilePayload(BOB_UID),
+      adultVerified: true,
+      birthYear: 1990,
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("profilePosts").doc("post_adult_locked").update({
+      unlockedByUserIds: [BOB_UID],
+      updatedAt: pastDate(800),
     })
   );
 });

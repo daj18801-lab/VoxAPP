@@ -670,6 +670,8 @@ class VoxStageRepository(
                     "creatorEarningsCents" to 0L,
                     "totalSpentCents" to 0L,
                     "dmPolicy" to DmPolicy.OPEN.name,
+                    "adultVerified" to false,
+                    "birthYear" to 0L,
                     "blockedUserIds" to emptyList<String>(),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -770,6 +772,34 @@ class VoxStageRepository(
                 staffTier = currentStaffTier,
                 dmPolicy = policy
             )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun verifyUserAge18Plus(birthYear: Int): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+            require(birthYear >= 1900 && birthYear <= currentYear) {
+                "Please enter a valid birth year."
+            }
+            require(currentYear - birthYear >= 18) {
+                "You must be 18 or older to lock photos or view locked photos."
+            }
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "adultVerified" to true,
+                    "birthYear" to birthYear.toLong(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -2080,6 +2110,60 @@ class VoxStageRepository(
         }
     }
 
+    suspend fun toggleRoomMessageReaction(
+        roomId: String,
+        message: ChatMessage,
+        emoji: String
+    ): Result<Unit> {
+        val path = "rooms/$roomId/messages/${message.id}"
+        return try {
+            val uid = requireUserId()
+            require(!message.deletedByMod) { "Cannot react to a removed message." }
+            require(emoji in ROOM_REACTION_EMOJIS) { "Unsupported reaction emoji." }
+            val msgRef = db.collection("rooms").document(roomId)
+                .collection("messages").document(message.id)
+
+            db.runTransaction { txn ->
+                val snap = txn.get(msgRef)
+                if (!snap.exists()) return@runTransaction null
+                val rawMap = snap.get("reactionsByEmoji") as? Map<*, *>
+                val nextMap = mutableMapOf<String, List<String>>()
+                rawMap?.forEach { (k, v) ->
+                    val key = k as? String
+                    val uids = (v as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+                    if (key != null && uids.isNotEmpty()) {
+                        nextMap[key] = uids
+                    }
+                }
+                val currentUids = nextMap[emoji].orEmpty()
+                val updatedUids = if (currentUids.contains(uid)) {
+                    currentUids.filter { it != uid }
+                } else {
+                    (currentUids + uid).distinct().take(200)
+                }
+                if (updatedUids.isEmpty()) {
+                    nextMap.remove(emoji)
+                } else {
+                    nextMap[emoji] = updatedUids
+                }
+                txn.update(
+                    msgRef,
+                    mapOf(
+                        "reactionsByEmoji" to nextMap,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                null
+            }.await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     private suspend fun sendModNotice(
         roomId: String,
         actorName: String,
@@ -2968,19 +3052,24 @@ class VoxStageRepository(
         senderName: String,
         senderTier: StaffTier,
         text: String,
-        imageBase64: String = ""
+        imageBase64: String = "",
+        audioBase64: String = "",
+        audioDurationSec: Long = 0L
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
         val cleanText = text.trim().take(500)
         val cleanImage = imageBase64.trim()
-        if (cleanText.isEmpty() && cleanImage.isEmpty()) return Result.success(Unit)
+        val cleanAudio = audioBase64.trim()
+        val safeAudioDuration = audioDurationSec.coerceIn(0L, 60L)
+        if (cleanText.isEmpty() && cleanImage.isEmpty() && cleanAudio.isEmpty()) return Result.success(Unit)
         val msgRef = db.collection("directThreads").document(thread.id)
             .collection("messages").document()
         val path = msgRef.path
         return try {
             require(!thread.isUserKicked(uid)) { "You have been removed from messaging in this chat." }
             require(cleanImage.length <= 460_000) { "Picture is too large to send. Please try again." }
+            require(cleanAudio.length <= 300_000) { "Voice note is too long. Please keep voice notes under 30 seconds." }
             val safeName = senderName.trim().ifBlank { "Member" }.take(40)
             val payload = mutableMapOf<String, Any>(
                 "threadId" to thread.id,
@@ -2994,9 +3083,15 @@ class VoxStageRepository(
             if (cleanImage.isNotEmpty()) {
                 payload["imageBase64"] = cleanImage
             }
+            if (cleanAudio.isNotEmpty()) {
+                payload["audioBase64"] = cleanAudio
+                payload["audioDurationSec"] = safeAudioDuration.coerceAtLeast(1L)
+            }
             msgRef.set(payload).await()
 
             val previewText = when {
+                cleanAudio.isNotEmpty() && cleanText.isNotEmpty() -> "🎤 $cleanText"
+                cleanAudio.isNotEmpty() -> "🎤 Voice note (${safeAudioDuration.coerceAtLeast(1L)}s)"
                 cleanImage.isNotEmpty() && cleanText.isNotEmpty() -> "📷 $cleanText"
                 cleanImage.isNotEmpty() -> "📷 Sent a snap"
                 else -> cleanText
@@ -3139,6 +3234,11 @@ class VoxStageRepository(
                 "Image is too large to post. Try selecting another photo."
             }
             val effectiveLocked = locked && cleanImage.isNotEmpty()
+            if (effectiveLocked) {
+                require(myProfile.isAdult18Plus()) {
+                    "You must verify you are 18+ before locking photos."
+                }
+            }
             val safeName = myProfile.displayName.trim().ifBlank { "Member" }.take(40)
             val safeHandle = myProfile.handle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
             val safeColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(myProfile.avatarColorHex)) myProfile.avatarColorHex else "#0088FF"
@@ -3735,6 +3835,10 @@ class VoxStageRepository(
 
             val buyerRef = db.collection("users").document(uid)
             val buyerSnap = buyerRef.get().await()
+            val isAdult = buyerSnap.getBoolean("adultVerified") == true
+            require(isAdult) {
+                "You must verify you are 18+ to unlock or view locked photos."
+            }
             val currentPoints = (buyerSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
             require(currentPoints >= 2L) {
                 "Not enough points. You need 2 points ($2) to unlock this photo — buy points in Profile Settings."
@@ -3824,6 +3928,10 @@ class VoxStageRepository(
             val newExpiryMs = baseExpiry + 30L * 24L * 60L * 60L * 1000L
 
             val buyerRef = db.collection("users").document(uid)
+            val buyerSnap = buyerRef.get().await()
+            require(buyerSnap.getBoolean("adultVerified") == true) {
+                "You must verify you are 18+ to subscribe and view locked photos."
+            }
             val creatorRef = db.collection("users").document(creatorId)
             val txRef = db.collection("pointTransactions").document()
 

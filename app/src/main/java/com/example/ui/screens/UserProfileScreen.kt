@@ -92,7 +92,9 @@ fun UserProfileScreen(
     friendship: Friendship?,
     myPointsBalance: Long,
     activeSubscription: CreatorSubscription?,
+    viewerIsAdultVerified: Boolean,
     isProcessingWallet: Boolean,
+    onRequestAgeVerification: () -> Unit,
     onBack: () -> Unit,
     onOpenUserProfile: (String) -> Unit,
     onMessageUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
@@ -474,7 +476,13 @@ fun UserProfileScreen(
                                                 }
                                             } else {
                                                 Button(
-                                                    onClick = { onSubscribeCreator(user.userId, user.displayName) },
+                                                    onClick = {
+                                                        if (!viewerIsAdultVerified) {
+                                                            onRequestAgeVerification()
+                                                        } else {
+                                                            onSubscribeCreator(user.userId, user.displayName)
+                                                        }
+                                                    },
                                                     enabled = !isProcessingWallet,
                                                     shape = RoundedCornerShape(999.dp),
                                                     colors = ButtonDefaults.buttonColors(
@@ -493,7 +501,11 @@ fun UserProfileScreen(
                                                     )
                                                     Spacer(modifier = Modifier.width(8.dp))
                                                     Text(
-                                                        text = "Subscribe \$15/mo · Unlock All Locked Photos",
+                                                        text = if (viewerIsAdultVerified) {
+                                                            "Subscribe \$15/mo · Unlock All Locked Photos"
+                                                        } else {
+                                                            "Verify 18+ to Subscribe (\$15/mo)"
+                                                        },
                                                         style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                                                     )
                                                 }
@@ -574,7 +586,8 @@ fun UserProfileScreen(
                             items(posts, key = { it.id }) { post ->
                                 val unlocked = post.isUnlockedFor(
                                     uid = viewModel.currentUserId,
-                                    subscribedCreatorIds = subscribedCreatorIds
+                                    subscribedCreatorIds = subscribedCreatorIds,
+                                    viewerIsAdultVerified = viewerIsAdultVerified
                                 )
                                 ProfilePostCard(
                                     post = post,
@@ -582,17 +595,27 @@ fun UserProfileScreen(
                                     canDelete = post.authorId == viewModel.currentUserId || staffCapabilities.isStaff,
                                     latestAuthorPhotoBase64 = entry?.photoBase64,
                                     isUnlocked = unlocked,
+                                    viewerIsAdultVerified = viewerIsAdultVerified,
                                     isProcessingUnlock = isProcessingWallet,
                                     onAuthorClick = null,
                                     onOriginalAuthorClick = onOpenUserProfile,
+                                    onRequestAgeVerification = onRequestAgeVerification,
                                     onUnlockPost = {
-                                        onUnlockPost(post) {
-                                            buyPointsNeededCount = 2
-                                            showBuyPointsDialog = true
+                                        if (!viewerIsAdultVerified) {
+                                            onRequestAgeVerification()
+                                        } else {
+                                            onUnlockPost(post) {
+                                                buyPointsNeededCount = 2
+                                                showBuyPointsDialog = true
+                                            }
                                         }
                                     },
                                     onSubscribeCreator = {
-                                        onSubscribeCreator(post.authorId, post.authorName)
+                                        if (!viewerIsAdultVerified) {
+                                            onRequestAgeVerification()
+                                        } else {
+                                            onSubscribeCreator(post.authorId, post.authorName)
+                                        }
                                     },
                                     onBoostPost = if (post.authorId == viewModel.currentUserId) {
                                         {
