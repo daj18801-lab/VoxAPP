@@ -37,7 +37,7 @@ class LiveKitRoomManager(private val appContext: Context) {
     private val _remoteVideoTracks = MutableStateFlow(emptyMap<String, RemoteVideoTrack>())
     val remoteVideoTracks = _remoteVideoTracks.asStateFlow()
 
-    suspend fun connectToRoom(
+        suspend fun connectToRoom(
         roomName: String,
         participantIdentity: String,
         participantName: String
@@ -57,7 +57,7 @@ class LiveKitRoomManager(private val appContext: Context) {
                     is RoomEvent.TrackSubscribed -> {
                         val videoTrack = event.track as? RemoteVideoTrack
                         val identity = event.participant.identity?.value
-                                                if (videoTrack != null && identity != null) {
+                        if (videoTrack != null && identity != null) {
                             _remoteVideoTracks.update { it + (identity to videoTrack) }
                         }
                     }
@@ -126,9 +126,9 @@ class LiveKitRoomManager(private val appContext: Context) {
             readTimeout = 10_000
         }
         val payload = JSONObject().apply {
-            put("room_name", roomName)
-            put("participant_name", name)
-            put("participant_identity", identity)
+            put("roomName", roomName)
+            put("participantName", name)
+            put("participantIdentity", identity)
         }.toString()
         conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
 
@@ -146,7 +146,7 @@ class LiveKitRoomManager(private val appContext: Context) {
         private const val TAG = "LiveKitRoomManager"
         private const val LIVEKIT_URL = "wss://vox-r29t0v8w.livekit.cloud"
         private const val SANDBOX_ID = "vox-2qnude"
-        private const val TOKEN_ENDPOINT_URL = "https://vox-2qnude.sandbox.livekit.io/api/token"
+        private const val TOKEN_ENDPOINT_URL = "https://cloud-api.livekit.io/api/sandbox/connection-details"
     }
 }
 
