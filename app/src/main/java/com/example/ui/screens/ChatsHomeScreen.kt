@@ -916,16 +916,19 @@ private fun NewPrivateChatSheetContent(
     val filteredFriends = remember(friends, query, currentUserId) {
         val q = query.trim()
         friends.filter {
+            val otherTier = it.otherTier(currentUserId)
             q.isEmpty() ||
                 it.otherName(currentUserId).contains(q, ignoreCase = true) ||
-                it.otherHandle(currentUserId).contains(q, ignoreCase = true)
+                (otherTier != StaffTier.ADMIN && it.otherHandle(currentUserId).contains(q, ignoreCase = true))
         }
     }
     val filteredOthers = remember(directoryUsers, friendIds, query) {
         val q = query.trim()
         directoryUsers.filter {
             !friendIds.contains(it.userId) &&
-                (q.isEmpty() || it.displayName.contains(q, ignoreCase = true) || it.handle.contains(q, ignoreCase = true))
+                (q.isEmpty() ||
+                    it.displayName.contains(q, ignoreCase = true) ||
+                    (it.tierEnum() != StaffTier.ADMIN && it.handle.contains(q, ignoreCase = true)))
         }
     }
 
@@ -1064,11 +1067,13 @@ private fun NewChatPickerRow(
                     )
                     StaffTierBadge(tier = tier)
                 }
-                Text(
-                    text = "@$handle",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                if (tier != StaffTier.ADMIN && handle.isNotBlank()) {
+                    Text(
+                        text = "@$handle",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             when (dmPolicy) {
                 DmPolicy.PAID -> {

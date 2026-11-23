@@ -95,10 +95,71 @@ class DirectChatViewModel(
         }
     }
 
-    fun markReadIfNeeded(thread: DirectThread?) {
-        if (thread == null || !thread.isUnreadFor(currentUserId)) return
+    private val purgedMessageIds = mutableSetOf<String>()
+
+    fun markReadIfNeeded(thread: DirectThread?, sendReadReceipt: Boolean = true) {
+        if (thread == null) return
+        val needsClearUnread = thread.isUnreadFor(currentUserId)
+        val allowReceipt = sendReadReceipt && thread.isReadReceiptsEnabledFor(currentUserId)
+        val threadUpdatedMs = thread.updatedAt?.toDate()?.time ?: 0L
+        val myLastReadMs = thread.lastReadMillisFor(currentUserId)
+        val needsReceipt = allowReceipt &&
+            thread.lastMessageSenderId.isNotBlank() &&
+            thread.lastMessageSenderId != currentUserId &&
+            (needsClearUnread || myLastReadMs < threadUpdatedMs)
+        if (!needsClearUnread && !needsReceipt) return
         viewModelScope.launch {
-            repository.markDirectThreadRead(thread)
+            repository.markDirectThreadRead(thread, sendReadReceipt = sendReadReceipt)
+        }
+    }
+
+    fun setDisappearingDuration(durationSec: Long) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setDirectThreadDisappearingDuration(thread, durationSec)
+                .onSuccess {
+                    val label = DirectThread.formatDisappearingDuration(durationSec)
+                    val msg = if (durationSec > 0L) {
+                        "Disappearing messages set to $label for new messages."
+                    } else {
+                        "Disappearing messages turned off."
+                    }
+                    _snackbarEvents.tryEmit(msg)
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update disappearing timer")
+                }
+        }
+    }
+
+    fun setReadReceiptsEnabled(enabled: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setDirectThreadReadReceiptsEnabled(thread, enabled)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (enabled) "Read receipts enabled for this chat."
+                        else "Read receipts hidden for this chat."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update read receipts")
+                }
+        }
+    }
+
+    fun purgeExpiredSentMessages(messages: List<DirectMessage>, nowMs: Long) {
+        val expiredMine = messages.filter { msg ->
+            msg.senderId == currentUserId &&
+                msg.isExpired(nowMs) &&
+                msg.id.isNotBlank() &&
+                purgedMessageIds.add(msg.id)
+        }
+        if (expiredMine.isEmpty()) return
+        viewModelScope.launch {
+            expiredMine.forEach { msg ->
+                repository.deleteDirectMessage(threadId, msg.id)
+            }
         }
     }
 

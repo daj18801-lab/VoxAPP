@@ -25,6 +25,9 @@ import com.example.data.StaffCapabilities
 import com.example.data.StaffInvite
 import com.example.data.StaffRole
 import com.example.data.StaffTier
+import com.example.data.SupportTicket
+import com.example.data.SupportTicketCategory
+import com.example.data.SupportTicketStatus
 import com.example.data.UiState
 import com.example.data.UserAlert
 import com.example.data.UserProfile
@@ -107,6 +110,10 @@ class MainViewModel(
 
     private val isAdminFlow = staffCapabilities
         .map { it.isAdmin }
+        .distinctUntilChanged()
+
+    private val isStaffFlow = staffCapabilities
+        .map { it.isStaff }
         .distinctUntilChanged()
 
     val userProfileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
@@ -271,6 +278,19 @@ class MainViewModel(
             initialValue = UiState.Loading
         )
 
+    val supportTicketsState: StateFlow<List<SupportTicket>> =
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            repository.observeSupportTickets(currentUserId, isStaffNow)
+                .catch { error ->
+                    Log.w(TAG, "Error observing support tickets", unwrapFirestoreError(error))
+                    emit(emptyList())
+                }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
     val unreadAlertsState: StateFlow<List<UserAlert>> =
         repository.observeMyUnreadAlerts(currentUserId)
             .catch { error ->
@@ -423,6 +443,25 @@ class MainViewModel(
                     staffTier = caps.tier
                 )
             }
+        }
+        // Keep acceptedFriendIds synced on our userDirectory entry for Friends-of-Friends suggestions
+        viewModelScope.launch {
+            var lastSyncedFriends: List<String>? = null
+            friendshipsState
+                .map { list ->
+                    list.filter { it.isAccepted() }
+                        .map { it.otherUserId(currentUserId) }
+                        .filter { it.isNotBlank() && it != currentUserId }
+                        .distinct()
+                        .sorted()
+                }
+                .distinctUntilChanged()
+                .collect { acceptedIds ->
+                    if (lastSyncedFriends != acceptedIds) {
+                        lastSyncedFriends = acceptedIds
+                        repository.syncAcceptedFriendIdsToDirectory(acceptedIds)
+                    }
+                }
         }
     }
 
@@ -1501,6 +1540,66 @@ class MainViewModel(
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not update report")
             }
+        }
+    }
+
+    // --- SUPPORT TICKETS ---
+
+    fun createSupportTicket(
+        category: SupportTicketCategory,
+        subject: String,
+        details: String,
+        assignedStaffId: String = "",
+        assignedStaffName: String = "",
+        onCreated: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            repository.createSupportTicket(
+                requesterName = effectiveMyProfile().displayName,
+                category = category,
+                subject = subject,
+                details = details,
+                assignedStaffId = assignedStaffId,
+                assignedStaffName = assignedStaffName
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Support ticket submitted! Our Admin & Support team has been notified.")
+                onCreated()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not submit support ticket")
+            }
+        }
+    }
+
+    fun respondToSupportTicket(
+        ticketId: String,
+        status: SupportTicketStatus,
+        staffResponse: String,
+        onUpdated: () -> Unit = {}
+    ) {
+        if (!staffCapabilities.value.isStaff) {
+            _snackbarEvents.tryEmit("Only Admin or Support staff can respond to tickets.")
+            return
+        }
+        viewModelScope.launch {
+            repository.respondToSupportTicket(
+                ticketId = ticketId,
+                status = status,
+                staffResponse = staffResponse,
+                staffName = currentActorName()
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Ticket updated (${status.label})")
+                onUpdated()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update support ticket")
+            }
+        }
+    }
+
+    fun closeMySupportTicket(ticketId: String) {
+        viewModelScope.launch {
+            repository.closeMySupportTicket(ticketId)
+                .onSuccess { _snackbarEvents.tryEmit("Support ticket marked as resolved") }
+                .onFailure { err -> _snackbarEvents.tryEmit(err.message ?: "Could not close ticket") }
         }
     }
 

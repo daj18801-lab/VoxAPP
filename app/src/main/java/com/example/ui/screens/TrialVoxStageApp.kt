@@ -385,6 +385,7 @@ fun TrialVoxStageApp(
                                                 photoBase64 = member.photoBase64
                                             )
                                             Column(modifier = Modifier.weight(1f)) {
+                                                val memberTier = member.tierEnum()
                                                 Row(
                                                     verticalAlignment = Alignment.CenterVertically,
                                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -397,7 +398,11 @@ fun TrialVoxStageApp(
                                                     )
                                                 }
                                                 Text(
-                                                    text = "@${member.handle}",
+                                                    text = if (memberTier == com.example.data.StaffTier.ADMIN) {
+                                                        if (isOnline) "Online" else "Offline"
+                                                    } else {
+                                                        "@${member.handle}"
+                                                    },
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
@@ -553,7 +558,11 @@ private fun TrialUnlockedPostCard(post: ProfilePost) {
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                     )
                     Text(
-                        text = "@${post.authorHandle} · ${formatTimestampShort(post.createdAt)}",
+                        text = if (post.authorTierEnum() == com.example.data.StaffTier.ADMIN) {
+                            formatTimestampShort(post.createdAt)
+                        } else {
+                            "@${post.authorHandle} · ${formatTimestampShort(post.createdAt)}"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

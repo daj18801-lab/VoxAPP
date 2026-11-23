@@ -48,6 +48,8 @@ import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Done
+import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Groups
@@ -61,6 +63,7 @@ import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material3.AlertDialog
@@ -68,6 +71,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -78,6 +83,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -86,6 +92,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -122,6 +129,7 @@ import com.example.media.VoiceNotePlayer
 import com.example.media.VoiceNoteRecorder
 import com.example.media.formatVoiceDuration
 import com.example.notifications.DirectMessageNotificationHelper
+import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.VoxStageNotificationState
 import com.example.ui.components.FullScreenPhotoDialog
 import com.example.ui.components.OnlinePresenceDot
@@ -189,6 +197,10 @@ fun DirectChatScreen(
     var showAddPersonSheet by remember { mutableStateOf(false) }
     var showKickPaidMemberDialog by remember { mutableStateOf(false) }
     var showBlockContactDialog by remember { mutableStateOf(false) }
+    var showChatPrivacyDialog by remember { mutableStateOf(false) }
+    val globalReadReceiptsEnabled = remember(context) {
+        DirectMessageNotificationPrefs.isReadReceiptsEnabled(context)
+    }
 
     // Live Walkie-Talkie PTT state (synced across both users via Firestore + LivePttSessionManager)
     val pttActiveThreadId by LivePttSessionManager.activeThreadId.collectAsStateWithLifecycle()
@@ -443,14 +455,38 @@ fun DirectChatScreen(
 
     val thread = (threadState as? UiState.Success)?.data
     val messages = (messagesState as? UiState.Success)?.data.orEmpty()
+    val hasDisappearingMessages = remember(messages) { messages.any { it.isDisappearing() } }
+    var expiryClockMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
-    LaunchedEffect(thread?.id, thread?.unreadByUserIds) {
-        viewModel.markReadIfNeeded(thread)
+    LaunchedEffect(hasDisappearingMessages) {
+        if (hasDisappearingMessages) {
+            while (true) {
+                expiryClockMs = System.currentTimeMillis()
+                delay(1000L)
+            }
+        }
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(messages, expiryClockMs) {
+        if (hasDisappearingMessages) {
+            viewModel.purgeExpiredSentMessages(messages, expiryClockMs)
+        }
+    }
+
+    val visibleMessages = remember(messages, expiryClockMs) {
+        messages.filterNot { it.isExpired(expiryClockMs) }
+    }
+
+    val isMyChatReadReceiptsEnabled = globalReadReceiptsEnabled &&
+        (thread?.isReadReceiptsEnabledFor(viewModel.currentUserId) != false)
+
+    LaunchedEffect(thread?.id, thread?.unreadByUserIds, thread?.updatedAt, isMyChatReadReceiptsEnabled) {
+        viewModel.markReadIfNeeded(thread, sendReadReceipt = isMyChatReadReceiptsEnabled)
+    }
+
+    LaunchedEffect(visibleMessages.size) {
+        if (visibleMessages.isNotEmpty()) {
+            listState.animateScrollToItem(visibleMessages.lastIndex)
         }
     }
 
@@ -615,6 +651,32 @@ fun DirectChatScreen(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                }
+                            }
+
+                            // Disappearing Messages & Read Receipts Options
+                            if (!amIKicked && !isBlockedThread && thread != null) {
+                                val disappearingOn = thread.isDisappearingEnabled()
+                                IconButton(
+                                    onClick = { showChatPrivacyDialog = true },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .testTag("dm_privacy_options_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (disappearingOn) ModAmber else MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Timer,
+                                                contentDescription = "Disappearing messages and read receipts",
+                                                tint = if (disappearingOn) Color.White else MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                        }
+                                    }
                                 }
                             }
 
@@ -813,6 +875,36 @@ fun DirectChatScreen(
                                         }
                                     }
                                 }
+                            }
+                        }
+                        if (thread?.isDisappearingEnabled() == true) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(ModAmber.copy(alpha = 0.14f))
+                                    .clickable { showChatPrivacyDialog = true }
+                                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                                    .testTag("dm_disappearing_active_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Timer,
+                                    contentDescription = "Disappearing messages active",
+                                    tint = ModAmber,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Disappearing messages ON (${thread.disappearingLabel()}) · New messages auto-vanish",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = "Edit",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
                             }
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -1660,7 +1752,7 @@ fun DirectChatScreen(
                         }
 
                         is UiState.Success -> {
-                            if (messages.isEmpty()) {
+                            if (visibleMessages.isEmpty()) {
                                 Column(
                                     modifier = Modifier
                                         .fillMaxSize()
@@ -1684,12 +1776,28 @@ fun DirectChatScreen(
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "Send a message, voice note, snap a picture, or start a live mic/video call.",
+                                        text = if (thread?.isDisappearingEnabled() == true) {
+                                            "Disappearing messages (${thread.disappearingLabel()}) are enabled in this chat."
+                                        } else {
+                                            "Send a message, voice note, snap a picture, or start a live mic/video call."
+                                        },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                             } else {
+                                val showReadReceipts = !isGroup &&
+                                    otherUid.isNotBlank() &&
+                                    globalReadReceiptsEnabled &&
+                                    (thread?.areReadReceiptsMutual(viewModel.currentUserId, otherUid) == true)
+                                val otherLastReadMs = if (otherUid.isNotBlank()) {
+                                    thread?.lastReadMillisFor(otherUid) ?: 0L
+                                } else {
+                                    0L
+                                }
+                                val latestMyMessageId = remember(visibleMessages, viewModel.currentUserId) {
+                                    visibleMessages.lastOrNull { it.senderId == viewModel.currentUserId }?.id
+                                }
                                 LazyColumn(
                                     state = listState,
                                     modifier = Modifier
@@ -1698,11 +1806,20 @@ fun DirectChatScreen(
                                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    items(messages, key = { it.id }) { msg ->
+                                    items(visibleMessages, key = { it.id }) { msg ->
                                         val isPlayingThis = playingVoiceMessageId == msg.id
+                                        val isMine = msg.senderId == viewModel.currentUserId
+                                        val msgCreatedMs = msg.createdAt?.toDate()?.time ?: 0L
+                                        val isReadByOther = isMine && showReadReceipts &&
+                                            msgCreatedMs > 0L && otherLastReadMs >= msgCreatedMs
                                         SnapChatMessageBlock(
                                             message = msg,
-                                            isMe = msg.senderId == viewModel.currentUserId,
+                                            isMe = isMine,
+                                            nowMs = expiryClockMs,
+                                            showReadReceipt = isMine && showReadReceipts,
+                                            isReadByOther = isReadByOther,
+                                            showReadTimeLabel = isMine && msg.id == latestMyMessageId && isReadByOther,
+                                            otherReadMillis = otherLastReadMs,
                                             isPlayingVoice = isPlayingThis,
                                             voicePlaybackProgress = if (isPlayingThis) voicePlaybackProgress else 0f,
                                             onToggleVoicePlay = {
@@ -1815,7 +1932,7 @@ fun DirectChatScreen(
             if (q.isEmpty()) candidates
             else candidates.filter {
                 it.displayName.contains(q, ignoreCase = true) ||
-                    it.handle.contains(q, ignoreCase = true)
+                    (it.tierEnum() != StaffTier.ADMIN && it.handle.contains(q, ignoreCase = true))
             }
         }
 
@@ -1871,6 +1988,7 @@ fun DirectChatScreen(
                         }
                     } else {
                         items(filteredCandidates, key = { "add_cand_${it.userId}" }) { candidate ->
+                            val candTier = candidate.tierEnum()
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
@@ -1896,16 +2014,24 @@ fun DirectChatScreen(
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = candidate.displayName,
-                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                            color = usernameColor(candidate.tierEnum())
-                                        )
-                                        Text(
-                                            text = "@${candidate.handle}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = candidate.displayName,
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = usernameColor(candTier)
+                                            )
+                                            StaffTierBadge(tier = candTier)
+                                        }
+                                        if (candTier != StaffTier.ADMIN) {
+                                            Text(
+                                                text = "@${candidate.handle}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
                                     }
                                     Icon(
                                         imageVector = Icons.Rounded.GroupAdd,
@@ -1921,6 +2047,146 @@ fun DirectChatScreen(
             }
         }
     }
+
+    if (showChatPrivacyDialog && thread != null) {
+        ChatPrivacyOptionsDialog(
+            currentDurationSec = thread.disappearingDurationSec,
+            isReadReceiptsEnabledForMe = thread.isReadReceiptsEnabledFor(viewModel.currentUserId),
+            globalReadReceiptsEnabled = globalReadReceiptsEnabled,
+            isOtherReadReceiptsEnabled = if (!isGroup && otherUid.isNotBlank()) {
+                thread.isReadReceiptsEnabledFor(otherUid)
+            } else {
+                true
+            },
+            otherName = otherName,
+            isGroup = isGroup,
+            onSelectDisappearingDuration = { sec ->
+                viewModel.setDisappearingDuration(sec)
+            },
+            onToggleReadReceipts = { enabled ->
+                viewModel.setReadReceiptsEnabled(enabled)
+            },
+            onDismiss = { showChatPrivacyDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun ChatPrivacyOptionsDialog(
+    currentDurationSec: Long,
+    isReadReceiptsEnabledForMe: Boolean,
+    globalReadReceiptsEnabled: Boolean,
+    isOtherReadReceiptsEnabled: Boolean,
+    otherName: String,
+    isGroup: Boolean,
+    onSelectDisappearingDuration: (Long) -> Unit,
+    onToggleReadReceipts: (Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Timer,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "Chat Privacy Options",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Disappearing Messages",
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "When enabled, new messages sent in this chat automatically disappear after the chosen timer.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        DirectThread.DISAPPEARING_OPTIONS_SEC.forEach { sec ->
+                            val selected = currentDurationSec == sec
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onSelectDisappearingDuration(sec) },
+                                label = {
+                                    Text(
+                                        text = DirectThread.formatDisappearingDuration(sec),
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                },
+                                shape = RoundedCornerShape(999.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = if (sec > 0L) ModAmber else MaterialTheme.colorScheme.primary,
+                                    selectedLabelColor = Color.White
+                                ),
+                                modifier = Modifier.testTag("dm_disappearing_option_$sec")
+                            )
+                        }
+                    }
+                }
+
+                if (!isGroup) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(
+                                text = "Read Receipts",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = when {
+                                    !globalReadReceiptsEnabled ->
+                                        "Turned off globally in Profile Settings."
+                                    !isReadReceiptsEnabledForMe ->
+                                        "You disabled read receipts for this chat — neither of you will see Read status."
+                                    !isOtherReadReceiptsEnabled ->
+                                        "$otherName has read receipts turned off for this chat."
+                                    else ->
+                                        "Show when you and $otherName have read each other's messages."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = isReadReceiptsEnabledForMe && globalReadReceiptsEnabled,
+                            enabled = globalReadReceiptsEnabled,
+                            onCheckedChange = onToggleReadReceipts,
+                            modifier = Modifier.testTag("dm_read_receipts_switch")
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("dm_privacy_options_done")
+            ) {
+                Text("Done")
+            }
+        }
+    )
 }
 
 /**
@@ -1930,6 +2196,11 @@ fun DirectChatScreen(
 private fun SnapChatMessageBlock(
     message: DirectMessage,
     isMe: Boolean,
+    nowMs: Long,
+    showReadReceipt: Boolean,
+    isReadByOther: Boolean,
+    showReadTimeLabel: Boolean,
+    otherReadMillis: Long,
     isPlayingVoice: Boolean,
     voicePlaybackProgress: Float,
     onToggleVoicePlay: () -> Unit,
@@ -1961,6 +2232,30 @@ private fun SnapChatMessageBlock(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (message.isDisappearing()) {
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = ModAmber.copy(alpha = 0.16f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Timer,
+                            contentDescription = "Disappearing countdown",
+                            tint = ModAmber,
+                            modifier = Modifier.size(11.dp)
+                        )
+                        Text(
+                            text = message.remainingExpiryLabel(nowMs),
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = ModAmber
+                        )
+                    }
+                }
+            }
         }
 
         Row(
@@ -2092,6 +2387,40 @@ private fun SnapChatMessageBlock(
                         )
                     }
                 }
+            }
+        }
+
+        if (showReadReceipt) {
+            Row(
+                modifier = Modifier
+                    .padding(start = 14.dp, top = 1.dp)
+                    .testTag("dm_read_receipt_${message.id}"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = if (isReadByOther) Icons.Rounded.DoneAll else Icons.Rounded.Done,
+                    contentDescription = if (isReadByOther) "Read" else "Delivered",
+                    tint = if (isReadByOther) SnapBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp)
+                )
+                val receiptLabel = if (isReadByOther) {
+                    if (showReadTimeLabel && otherReadMillis > 0L) {
+                        val fmt = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
+                        "Read · ${fmt.format(java.util.Date(otherReadMillis))}"
+                    } else {
+                        "Read"
+                    }
+                } else {
+                    "Delivered"
+                }
+                Text(
+                    text = receiptLabel,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = if (isReadByOther) FontWeight.Bold else FontWeight.Medium
+                    ),
+                    color = if (isReadByOther) SnapBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

@@ -2613,5 +2613,165 @@ test("Participants can toggle only their own UID in directThreads.pttEnabledUser
   );
 });
 
+// 26. DISAPPEARING PRIVATE MESSAGES & READ RECEIPTS OPTIONS
+test("Participants can configure disappearing private messages and read receipts", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(3000);
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      disappearingDurationSec: 0,
+      readReceiptsDisabledByUserIds: [],
+      readTimestampsByUserId: {},
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Alice enables 5-minute disappearing messages -> succeeds
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      disappearingDurationSec: 300,
+      updatedAt: pastDate(2500),
+    })
+  );
+
+  // Invalid disappearing duration (e.g. 999s) -> denied
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      disappearingDurationSec: 999,
+      updatedAt: pastDate(2400),
+    })
+  );
+
+  // Alice sends a disappearing message with expiresAtMillis -> succeeds
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_ephem_1").set({
+      threadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: ALICE_UID,
+      senderName: "Alice",
+      senderTier: "USER",
+      text: "Self-destructing note",
+      expiresAtMillis: Date.now() + 300_000,
+      createdAt: pastDate(2000),
+    })
+  );
+
+  // Bob records read timestamp receipt -> succeeds
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).update({
+      unreadByUserIds: [],
+      readTimestampsByUserId: { [BOB_UID]: Date.now() },
+      updatedAt: pastDate(1500),
+    })
+  );
+
+  // Bob disables read receipts for himself -> succeeds; Bob CANNOT toggle Alice's read receipt setting -> denied
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).update({
+      readReceiptsDisabledByUserIds: [BOB_UID],
+      updatedAt: pastDate(1200),
+    })
+  );
+  await assertFails(
+    bobDb.collection("directThreads").doc(threadId).update({
+      readReceiptsDisabledByUserIds: [BOB_UID, ALICE_UID],
+      updatedAt: pastDate(1000),
+    })
+  );
+});
+
+// 27. SUPPORT TICKETS (Users create/view own tickets; Admin/Support respond and resolve; others denied)
+test("Users can create and read their own support tickets; Support/Admin can reply and resolve", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(3000);
+
+  await assertSucceeds(
+    aliceDb.collection("supportTickets").doc("ticket_1").set({
+      requesterId: ALICE_UID,
+      requesterName: "Alice",
+      requesterTier: "USER",
+      assignedStaffId: "",
+      assignedStaffName: "",
+      category: "ACCOUNT",
+      subject: "Need help with profile",
+      message: "Can support check my account settings?",
+      status: "OPEN",
+      staffResponse: "",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Alice can read her own ticket; Bob CANNOT read Alice's ticket
+  await assertSucceeds(aliceDb.collection("supportTickets").doc("ticket_1").get());
+  await assertFails(bobDb.collection("supportTickets").doc("ticket_1").get());
+
+  // Non-staff CANNOT inject a staffResponse
+  await assertFails(
+    aliceDb.collection("supportTickets").doc("ticket_1").update({
+      staffResponse: "Fake response",
+      status: "RESOLVED",
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Admin can read, reply, and resolve the ticket
+  await assertSucceeds(adminDb.collection("supportTickets").doc("ticket_1").get());
+  await assertSucceeds(
+    adminDb.collection("supportTickets").doc("ticket_1").update({
+      status: "RESOLVED",
+      staffResponse: "All fixed for you!",
+      assignedStaffId: ADMIN_UID,
+      assignedStaffName: "VoxStage Admin",
+      updatedAt: pastDate(1500),
+    })
+  );
+});
+
+// 28. SUGGESTED FRIENDS (acceptedFriendIds synced on userDirectory)
+test("Users can sync acceptedFriendIds on their own userDirectory document for friend-of-friend discovery", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const ts = pastDate(3000);
+
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      bio: "Hello",
+      avatarColorHex: "#0088FF",
+      photoBase64: "",
+      staffTier: "USER",
+      postCount: 0,
+      dmPolicy: "OPEN",
+      online: true,
+      lastActiveAt: ts,
+      acceptedFriendIds: [BOB_UID],
+      updatedAt: ts,
+    })
+  );
+});
+
+
 
 

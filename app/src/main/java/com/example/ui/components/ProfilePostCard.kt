@@ -56,6 +56,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.ProfilePost
+import com.example.data.StaffTier
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
@@ -165,7 +166,7 @@ fun ProfilePostCard(
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
-                        text = "Shared from ${post.sharedFromAuthorName} (@${post.sharedFromAuthorHandle})",
+                        text = "Shared from ${post.sharedFromAuthorName}",
                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
@@ -205,7 +206,11 @@ fun ProfilePostCard(
                         StaffTierBadge(tier = tier)
                     }
                     Text(
-                        text = "@${post.authorHandle} · ${formatPostDateTime(post.createdAt)}",
+                        text = if (tier == StaffTier.ADMIN) {
+                            formatPostDateTime(post.createdAt)
+                        } else {
+                            "@${post.authorHandle} · ${formatPostDateTime(post.createdAt)}"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,

@@ -486,6 +486,7 @@ data class DirectoryEntry(
     val postCount: Long = 0L,
     val dmPolicy: String = DmPolicy.OPEN.name,
     val online: Boolean = false,
+    val acceptedFriendIds: List<String> = emptyList(),
     @ServerTimestamp val lastActiveAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -562,6 +563,9 @@ data class DirectThread(
     val lastMessageSenderId: String = "",
     val unreadByUserIds: List<String> = emptyList(),
     val pttEnabledUserIds: List<String> = emptyList(),
+    val disappearingDurationSec: Long = 0L,
+    val readReceiptsDisabledByUserIds: List<String> = emptyList(),
+    val readTimestampsByUserId: Map<String, Long> = emptyMap(),
     val lastAlertSenderId: String = "",
     val lastAlertSenderName: String = "",
     val lastAlertAtMillis: Long = 0L,
@@ -582,6 +586,12 @@ data class DirectThread(
     fun isOtherPttEnabled(myUid: String): Boolean = pttEnabledUserIds.any { it != myUid }
     fun isMutualPttActive(myUid: String): Boolean =
         isPttEnabledFor(myUid) && pttEnabledUserIds.any { it != myUid }
+    fun isDisappearingEnabled(): Boolean = disappearingDurationSec > 0L
+    fun disappearingLabel(): String = formatDisappearingDuration(disappearingDurationSec)
+    fun isReadReceiptsEnabledFor(uid: String): Boolean = !readReceiptsDisabledByUserIds.contains(uid)
+    fun areReadReceiptsMutual(myUid: String, otherUid: String): Boolean =
+        isReadReceiptsEnabledFor(myUid) && isReadReceiptsEnabledFor(otherUid)
+    fun lastReadMillisFor(uid: String): Long = readTimestampsByUserId[uid] ?: 0L
     fun displayTitle(myUid: String): String {
         if (!isGroup) return otherName(myUid)
         if (groupName.isNotBlank()) return groupName
@@ -598,6 +608,18 @@ data class DirectThread(
     fun memberNamesSummary(): String {
         val names = participantNamesById.values.filter { it.isNotBlank() }
         return if (names.isNotEmpty()) names.joinToString(" · ") else "${participantIds.size} members"
+    }
+
+    companion object {
+        val DISAPPEARING_OPTIONS_SEC = listOf(0L, 30L, 300L, 3600L, 86400L)
+
+        fun formatDisappearingDuration(seconds: Long): String = when (seconds) {
+            30L -> "30s"
+            300L -> "5m"
+            3600L -> "1h"
+            86400L -> "24h"
+            else -> "Off"
+        }
     }
 }
 
@@ -633,10 +655,24 @@ data class DirectMessage(
     val imageBase64: String = "",
     val audioBase64: String = "",
     val audioDurationSec: Long = 0L,
+    val expiresAtMillis: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     fun senderTierEnum(): StaffTier = StaffTier.fromRaw(senderTier)
     fun hasVoiceNote(): Boolean = audioBase64.isNotBlank()
+    fun isDisappearing(): Boolean = expiresAtMillis > 0L
+    fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean =
+        expiresAtMillis > 0L && nowMs >= expiresAtMillis
+    fun remainingExpiryLabel(nowMs: Long = System.currentTimeMillis()): String {
+        if (expiresAtMillis <= 0L) return ""
+        val remSec = ((expiresAtMillis - nowMs).coerceAtLeast(0L) + 999L) / 1000L
+        return when {
+            remSec <= 0L -> "0s"
+            remSec < 60L -> "${remSec}s"
+            remSec < 3600L -> "${(remSec + 59L) / 60L}m"
+            else -> "${(remSec + 3599L) / 3600L}h"
+        }
+    }
 }
 
 @Keep
@@ -795,6 +831,50 @@ data class RoomTransfer(
     val consumed: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
+
+enum class SupportTicketCategory(val label: String) {
+    GENERAL("General Help"),
+    ACCOUNT("Account & Profile"),
+    BILLING("Points & Billing"),
+    SAFETY("Safety & Moderation"),
+    TECHNICAL("App Bug / Audio");
+
+    companion object {
+        fun fromRaw(raw: String?): SupportTicketCategory =
+            entries.firstOrNull { it.name == raw } ?: GENERAL
+    }
+}
+
+enum class SupportTicketStatus(val label: String) {
+    OPEN("Open"),
+    IN_PROGRESS("In Progress"),
+    RESOLVED("Resolved");
+
+    companion object {
+        fun fromRaw(raw: String?): SupportTicketStatus =
+            entries.firstOrNull { it.name == raw } ?: OPEN
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class SupportTicket(
+    @DocumentId val id: String = "",
+    val requesterId: String = "",
+    val requesterName: String = "",
+    val category: String = SupportTicketCategory.GENERAL.name,
+    val subject: String = "",
+    val details: String = "",
+    val status: String = SupportTicketStatus.OPEN.name,
+    val assignedStaffId: String = "",
+    val assignedStaffName: String = "",
+    val staffResponse: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun categoryEnum(): SupportTicketCategory = SupportTicketCategory.fromRaw(category)
+    fun statusEnum(): SupportTicketStatus = SupportTicketStatus.fromRaw(status)
+}
 
 fun formatUsdCents(cents: Long): String {
     val safe = cents.coerceAtLeast(0L)

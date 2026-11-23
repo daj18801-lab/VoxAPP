@@ -3185,6 +3185,9 @@ class VoxStageRepository(
                 payload["audioBase64"] = cleanAudio
                 payload["audioDurationSec"] = safeAudioDuration.coerceAtLeast(1L)
             }
+            if (thread.disappearingDurationSec > 0L) {
+                payload["expiresAtMillis"] = System.currentTimeMillis() + (thread.disappearingDurationSec * 1000L)
+            }
 
             val previewText = when {
                 cleanAudio.isNotEmpty() && cleanText.isNotEmpty() -> "🎤 $cleanText"
@@ -3225,18 +3228,32 @@ class VoxStageRepository(
         }
     }
 
-    suspend fun markDirectThreadRead(thread: DirectThread): Result<Unit> {
+    suspend fun markDirectThreadRead(
+        thread: DirectThread,
+        sendReadReceipt: Boolean = true
+    ): Result<Unit> {
         val uid = auth.currentUser?.uid ?: return Result.success(Unit)
-        if (!thread.unreadByUserIds.contains(uid)) return Result.success(Unit)
+        val needsClearUnread = thread.unreadByUserIds.contains(uid)
+        val allowReceipt = sendReadReceipt && thread.isReadReceiptsEnabledFor(uid)
+        val threadUpdatedMs = thread.updatedAt?.toDate()?.time ?: 0L
+        val myLastReadMs = thread.lastReadMillisFor(uid)
+        val needsReceiptBump = allowReceipt &&
+            thread.lastMessageSenderId.isNotBlank() &&
+            thread.lastMessageSenderId != uid &&
+            (needsClearUnread || myLastReadMs < threadUpdatedMs)
+        if (!needsClearUnread && !needsReceiptBump) return Result.success(Unit)
         val path = "directThreads/${thread.id}"
         return try {
-            val updatedUnread = thread.unreadByUserIds.filter { it != uid }
-            db.collection("directThreads").document(thread.id).update(
-                mapOf(
-                    "unreadByUserIds" to updatedUnread,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val updates = mutableMapOf<String, Any>(
+                "unreadByUserIds" to thread.unreadByUserIds.filter { it != uid },
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (allowReceipt) {
+                val updatedMap = thread.readTimestampsByUserId.toMutableMap()
+                updatedMap[uid] = maxOf(System.currentTimeMillis(), threadUpdatedMs + 1L)
+                updates["readTimestampsByUserId"] = updatedMap
+            }
+            db.collection("directThreads").document(thread.id).update(updates).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -4392,6 +4409,227 @@ class VoxStageRepository(
             db.collection("directThreads").document(thread.id).update(
                 mapOf(
                     "pttEnabledUserIds" to updatedList,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setDirectThreadDisappearingDuration(
+        thread: DirectThread,
+        durationSec: Long
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/${thread.id}"
+        return try {
+            require(durationSec in DirectThread.DISAPPEARING_OPTIONS_SEC) {
+                "Unsupported disappearing message timer."
+            }
+            require(!thread.hasAnyBlock()) { "Unavailable in a blocked chat." }
+            require(!thread.isUserKicked(uid)) { "You can no longer change settings in this chat." }
+            db.collection("directThreads").document(thread.id).update(
+                mapOf(
+                    "disappearingDurationSec" to durationSec,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setDirectThreadReadReceiptsEnabled(
+        thread: DirectThread,
+        enabled: Boolean
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/${thread.id}"
+        return try {
+            val currentDisabled = thread.readReceiptsDisabledByUserIds
+            val updatedDisabled = if (enabled) {
+                if (!currentDisabled.contains(uid)) return Result.success(Unit)
+                currentDisabled.filter { it != uid }
+            } else {
+                if (currentDisabled.contains(uid)) return Result.success(Unit)
+                currentDisabled + uid
+            }
+            db.collection("directThreads").document(thread.id).update(
+                mapOf(
+                    "readReceiptsDisabledByUserIds" to updatedDisabled,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteDirectMessage(
+        threadId: String,
+        messageId: String
+    ): Result<Unit> {
+        if (auth.currentUser?.uid == null) return Result.success(Unit)
+        val path = "directThreads/$threadId/messages/$messageId"
+        return try {
+            db.collection("directThreads").document(threadId)
+                .collection("messages").document(messageId)
+                .delete()
+                .await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Silent cleanup for expired messages if already deleted
+            Result.failure(e)
+        }
+    }
+
+    suspend fun syncAcceptedFriendIdsToDirectory(friendIds: List<String>): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val path = "userDirectory/$uid"
+        return try {
+            val cleanIds = friendIds.filter { it.isNotBlank() && it != uid }.distinct().take(200)
+            db.collection("userDirectory").document(uid).update(
+                mapOf(
+                    "acceptedFriendIds" to cleanIds,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Non-fatal if directory doc is still being created on first launch
+            Result.failure(e)
+        }
+    }
+
+    // --- SUPPORT TICKETS (DISCOVERY SUPPORT TAB) ---
+
+    fun observeSupportTickets(userId: String, isStaff: Boolean): Flow<List<SupportTicket>> = flow {
+        val uid = requireUserId()
+        val path = "supportTickets"
+        val query = if (isStaff) {
+            db.collection("supportTickets").limit(100)
+        } else {
+            db.collection("supportTickets")
+                .whereEqualTo("requesterId", userId)
+                .limit(50)
+        }
+        emitAll(
+            query.snapshots()
+                .map { snapshot ->
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(
+                            SupportTicket::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                        )
+                    }.sortedByDescending { it.createdAt?.toDate()?.time ?: 0L }
+                }
+                .catch { error ->
+                    val unwrapped = unwrapFirestoreError(error)
+                    if (auth.currentUser?.uid == uid) {
+                        handleFirestoreError(unwrapped, OperationType.LIST, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    suspend fun createSupportTicket(
+        requesterName: String,
+        category: SupportTicketCategory,
+        subject: String,
+        details: String,
+        assignedStaffId: String = "",
+        assignedStaffName: String = ""
+    ): Result<String> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanSubject = subject.trim().take(100)
+        val cleanDetails = details.trim().take(1000)
+        if (cleanSubject.length < 2) {
+            return Result.failure(IllegalArgumentException("Subject must be at least 2 characters."))
+        }
+        if (cleanDetails.length < 4) {
+            return Result.failure(IllegalArgumentException("Please describe your issue (at least 4 characters)."))
+        }
+        val docRef = db.collection("supportTickets").document()
+        val path = docRef.path
+        return try {
+            val payload = mapOf(
+                "requesterId" to uid,
+                "requesterName" to requesterName.trim().ifBlank { "Member" }.take(40),
+                "category" to category.name,
+                "subject" to cleanSubject,
+                "details" to cleanDetails,
+                "status" to SupportTicketStatus.OPEN.name,
+                "assignedStaffId" to assignedStaffId.trim().take(128),
+                "assignedStaffName" to assignedStaffName.trim().take(40),
+                "staffResponse" to "",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).await()
+            Result.success(docRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun respondToSupportTicket(
+        ticketId: String,
+        status: SupportTicketStatus,
+        staffResponse: String,
+        staffName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "supportTickets/$ticketId"
+        return try {
+            db.collection("supportTickets").document(ticketId).update(
+                mapOf(
+                    "status" to status.name,
+                    "staffResponse" to staffResponse.trim().take(1000),
+                    "assignedStaffId" to uid,
+                    "assignedStaffName" to staffName.trim().ifBlank { "Support" }.take(40),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun closeMySupportTicket(ticketId: String): Result<Unit> {
+        val path = "supportTickets/$ticketId"
+        return try {
+            db.collection("supportTickets").document(ticketId).update(
+                mapOf(
+                    "status" to SupportTicketStatus.RESOLVED.name,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()

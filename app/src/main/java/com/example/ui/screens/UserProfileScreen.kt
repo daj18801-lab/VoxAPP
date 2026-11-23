@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -28,13 +31,18 @@ import androidx.compose.material.icons.rounded.CardMembership
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DynamicFeed
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,10 +62,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -78,8 +89,11 @@ import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopSnackbarOverlay
+import com.example.ui.components.rememberBase64ImageBitmap
+import com.example.ui.components.rememberBlurredBase64ImageBitmap
 import com.example.ui.components.showTopMessage
 import com.example.ui.components.usernameColor
+import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
 import com.example.viewmodel.UserProfileViewModel
@@ -116,7 +130,10 @@ fun UserProfileScreen(
     val entryState by viewModel.directoryEntryState.collectAsStateWithLifecycle()
     val postsState by viewModel.postsState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    var selectedProfileTab by remember { mutableIntStateOf(0) } // 0 = Posts, 1 = Photos
     var showFullAvatar by remember { mutableStateOf(false) }
+    var fullScreenPhotoBase64 by remember { mutableStateOf<String?>(null) }
+    var lockedPhotoDialogPost by remember { mutableStateOf<ProfilePost?>(null) }
     var showBuyPointsDialog by remember { mutableStateOf(false) }
     var buyPointsNeededCount by remember { mutableIntStateOf(2) }
     var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
@@ -130,6 +147,7 @@ fun UserProfileScreen(
 
     val entry = (entryState as? UiState.Success)?.data
     val posts = (postsState as? UiState.Success)?.data.orEmpty()
+    val photoPosts = remember(posts) { posts.filter { it.imageBase64.isNotBlank() } }
     val isSelf = viewModel.currentUserId == viewModel.targetUserId
     val tier = entry?.tierEnum() ?: StaffTier.USER
     val isSubscribed = activeSubscription?.isCurrentlyActive() == true
@@ -175,7 +193,7 @@ fun UserProfileScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            if (entry != null) {
+                            if (entry != null && tier != StaffTier.ADMIN) {
                                 Text(
                                     text = "@${entry.handle}",
                                     style = MaterialTheme.typography.labelSmall,
@@ -275,11 +293,13 @@ fun UserProfileScreen(
                                             StaffTierBadge(tier = tier)
                                         }
 
-                                        Text(
-                                            text = "@${user.handle}",
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
+                                        if (tier != StaffTier.ADMIN) {
+                                            Text(
+                                                text = "@${user.handle}",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
 
                                         if (user.bio.isNotBlank()) {
                                             Text(
@@ -289,27 +309,73 @@ fun UserProfileScreen(
                                             )
                                         }
 
-                                        // Stats Pill
-                                        Surface(
-                                            shape = RoundedCornerShape(999.dp),
-                                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                                        // Quick Stats & Pictures Button Row
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            Surface(
+                                                shape = RoundedCornerShape(999.dp),
+                                                color = if (selectedProfileTab == 0) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                                                },
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(999.dp))
+                                                    .clickable { selectedProfileTab = 0 }
+                                                    .testTag("user_profile_posts_pill")
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.DynamicFeed,
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.size(16.dp)
-                                                )
-                                                Text(
-                                                    text = "${posts.size} ${if (posts.size == 1) "Post" else "Posts"}",
-                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                                    color = MaterialTheme.colorScheme.primary
-                                                )
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.DynamicFeed,
+                                                        contentDescription = null,
+                                                        tint = if (selectedProfileTab == 0) Color.White else MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Text(
+                                                        text = "${posts.size} ${if (posts.size == 1) "Post" else "Posts"}",
+                                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                                        color = if (selectedProfileTab == 0) Color.White else MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
+
+                                            // Prominent Pictures Button -> Opens Photos Tab
+                                            Surface(
+                                                shape = RoundedCornerShape(999.dp),
+                                                color = if (selectedProfileTab == 1) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.primaryContainer
+                                                },
+                                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(999.dp))
+                                                    .clickable { selectedProfileTab = 1 }
+                                                    .testTag("user_profile_pictures_button")
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.PhotoLibrary,
+                                                        contentDescription = "View all photos",
+                                                        tint = if (selectedProfileTab == 1) Color.White else MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Text(
+                                                        text = "Pictures (${photoPosts.size})",
+                                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                                        color = if (selectedProfileTab == 1) Color.White else MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
                                             }
                                         }
 
@@ -518,12 +584,62 @@ fun UserProfileScreen(
                     }
                 }
 
-                item(key = "posts_section_header") {
-                    Text(
-                        text = "Posts (${posts.size})",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
+                // Segmented Posts / Photos Tabs
+                item(key = "profile_content_tabs") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = selectedProfileTab == 0,
+                            onClick = { selectedProfileTab = 0 },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.DynamicFeed,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "Posts (${posts.size})",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            shape = RoundedCornerShape(999.dp),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = Color.White,
+                                selectedLeadingIconColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("user_profile_tab_posts")
+                        )
+                        FilterChip(
+                            selected = selectedProfileTab == 1,
+                            onClick = { selectedProfileTab = 1 },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.PhotoLibrary,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "Photos (${photoPosts.size})",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            shape = RoundedCornerShape(999.dp),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = Color.White,
+                                selectedLeadingIconColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("user_profile_tab_photos")
+                        )
+                    }
                 }
 
                 when (postsState) {
@@ -551,7 +667,74 @@ fun UserProfileScreen(
                     }
 
                     is UiState.Success -> {
-                        if (posts.isEmpty()) {
+                        if (selectedProfileTab == 1) {
+                            // PHOTOS GALLERY TAB (2-column grid with blurred locked photos + pay to unlock)
+                            if (photoPosts.isEmpty()) {
+                                item(key = "photos_empty") {
+                                    Surface(
+                                        shape = RoundedCornerShape(18.dp),
+                                        color = MaterialTheme.colorScheme.surface,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(24.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.PhotoLibrary,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(34.dp)
+                                            )
+                                            Text(
+                                                text = "No photos yet",
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                            )
+                                            Text(
+                                                text = "Photos posted by ${entry?.displayName ?: "this user"} will appear in this gallery.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                val photoRows = photoPosts.chunked(2)
+                                items(photoRows, key = { row -> "photo_row_${row.first().id}" }) { rowPosts ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        rowPosts.forEach { photoPost ->
+                                            val unlocked = photoPost.isUnlockedFor(
+                                                uid = viewModel.currentUserId,
+                                                subscribedCreatorIds = subscribedCreatorIds,
+                                                viewerIsAdultVerified = viewerIsAdultVerified
+                                            )
+                                            UserProfilePhotoGridTile(
+                                                post = photoPost,
+                                                isUnlocked = unlocked,
+                                                viewerIsAdultVerified = viewerIsAdultVerified,
+                                                onClick = {
+                                                    if (photoPost.locked && (!unlocked || !viewerIsAdultVerified)) {
+                                                        lockedPhotoDialogPost = photoPost
+                                                    } else {
+                                                        fullScreenPhotoBase64 = photoPost.imageBase64
+                                                    }
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                        if (rowPosts.size == 1) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (posts.isEmpty()) {
                             item(key = "posts_empty") {
                                 Surface(
                                     shape = RoundedCornerShape(18.dp),
@@ -726,5 +909,270 @@ fun UserProfileScreen(
             },
             onDismiss = { activeSharePost = null }
         )
+    }
+
+    fullScreenPhotoBase64?.let { photo ->
+        FullScreenPhotoDialog(
+            photoBase64 = photo,
+            contentDescription = "Photo by ${entry?.displayName ?: "user"}",
+            onDismiss = { fullScreenPhotoBase64 = null }
+        )
+    }
+
+    lockedPhotoDialogPost?.let { post ->
+        val blurred = rememberBlurredBase64ImageBitmap(post.imageBase64)
+        AlertDialog(
+            onDismissRequest = { lockedPhotoDialogPost = null },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Lock,
+                        contentDescription = null,
+                        tint = ModAmber
+                    )
+                    Text(
+                        text = if (!viewerIsAdultVerified) "18+ Locked Photo" else "Unlock Locked Photo",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(170.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFF0E1B33)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (blurred != null) {
+                            Image(
+                                bitmap = blurred,
+                                contentDescription = "Blurred locked photo preview",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0x99081224))
+                        )
+                        Icon(
+                            imageVector = Icons.Rounded.Lock,
+                            contentDescription = "Locked",
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                    Text(
+                        text = if (!viewerIsAdultVerified) {
+                            "You must verify that you are 18 or older to view or unlock locked photos."
+                        } else {
+                            "Unlock this photo for 2 points (\$2) — or subscribe to ${post.authorName} for \$15/mo to unlock all their locked photos."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
+            confirmButton = {
+                if (!viewerIsAdultVerified) {
+                    Button(
+                        onClick = {
+                            lockedPhotoDialogPost = null
+                            onRequestAgeVerification()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ModAmber, contentColor = Color.Black),
+                        modifier = Modifier.testTag("photo_tab_verify_age_button")
+                    ) {
+                        Text("Verify Age (18+)", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalAlignment = Alignment.End
+                    ) {
+                        Button(
+                            onClick = {
+                                lockedPhotoDialogPost = null
+                                onUnlockPost(post) {
+                                    buyPointsNeededCount = 2
+                                    showBuyPointsDialog = true
+                                }
+                            },
+                            enabled = !isProcessingWallet,
+                            modifier = Modifier.testTag("photo_tab_unlock_button_${post.id}")
+                        ) {
+                            Icon(Icons.Rounded.LockOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Unlock · 2 pts (\$2)")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                lockedPhotoDialogPost = null
+                                onSubscribeCreator(post.authorId, post.authorName)
+                            },
+                            enabled = !isProcessingWallet,
+                            modifier = Modifier.testTag("photo_tab_subscribe_button_${post.id}")
+                        ) {
+                            Text("Subscribe \$15/mo")
+                        }
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { lockedPhotoDialogPost = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun UserProfilePhotoGridTile(
+    post: ProfilePost,
+    isUnlocked: Boolean,
+    viewerIsAdultVerified: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val showLockedBlur = post.locked && (!isUnlocked || !viewerIsAdultVerified)
+    val sharpBitmap = if (showLockedBlur) null else rememberBase64ImageBitmap(post.imageBase64)
+    val blurredBitmap = if (showLockedBlur) rememberBlurredBase64ImageBitmap(post.imageBase64) else null
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(
+            width = if (showLockedBlur) 1.5.dp else 1.dp,
+            color = if (showLockedBlur) ModAmber.copy(alpha = 0.65f) else MaterialTheme.colorScheme.outlineVariant
+        ),
+        modifier = modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .testTag("user_profile_photo_tile_${post.id}")
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (showLockedBlur) {
+                if (blurredBitmap != null) {
+                    Image(
+                        bitmap = blurredBitmap,
+                        contentDescription = "Locked photo preview",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0x99081224))
+                )
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = ModAmber.copy(alpha = 0.92f),
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.Lock,
+                                contentDescription = "Locked photo",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = Color.Black.copy(alpha = 0.62f)
+                    ) {
+                        Text(
+                            text = if (!viewerIsAdultVerified) "18+ Locked" else "Unlock · 2 pts (\$2)",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            } else if (sharpBitmap != null) {
+                Image(
+                    bitmap = sharpBitmap,
+                    contentDescription = "Photo by ${post.authorName}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                if (post.locked) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = SafetyEmerald.copy(alpha = 0.92f),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.LockOpen,
+                                contentDescription = "Unlocked",
+                                tint = Color.White,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Text(
+                                text = "Unlocked",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+                if (post.likedByUserIds.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = Color.Black.copy(alpha = 0.56f),
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Favorite,
+                                contentDescription = null,
+                                tint = LiveCoral,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "${post.likedByUserIds.size}",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -191,6 +191,9 @@ fun ProfileScreen(
     var friendAttentionAlertsEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isFriendAttentionAlertsEnabled(context))
     }
+    var readReceiptsEnabled by remember {
+        mutableStateOf(DirectMessageNotificationPrefs.isReadReceiptsEnabled(context))
+    }
     var hasNotificationPermission by remember {
         mutableStateOf(DirectMessageNotificationHelper.hasNotificationPermission(context))
     }
@@ -403,11 +406,13 @@ fun ProfileScreen(
                                     )
                                     StaffTierBadge(tier = staffCapabilities.tier)
                                 }
-                                Text(
-                                    text = "@${handle.ifBlank { "studio" }}",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                                if (!staffCapabilities.isAdmin) {
+                                    Text(
+                                        text = "@${handle.ifBlank { "studio" }}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                                 if (bio.isNotBlank()) {
                                     Spacer(modifier = Modifier.height(3.dp))
                                     Text(
@@ -416,7 +421,7 @@ fun ProfileScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                if (userEmail.isNotBlank()) {
+                                if (userEmail.isNotBlank() && !staffCapabilities.isAdmin) {
                                     Text(
                                         text = userEmail,
                                         style = MaterialTheme.typography.labelSmall,
@@ -1251,6 +1256,18 @@ fun ProfileScreen(
                                         if (enable) {
                                             DirectMessageNotificationHelper.ensureChannel(context)
                                         }
+                                    }
+                                )
+                            }
+
+                            Box(modifier = Modifier.testTag("toggle_dm_read_receipts")) {
+                                ToggleSettingRow(
+                                    title = "Private Message Read Receipts",
+                                    subtitle = "Let others see when you've read their private messages (can also be toggled per chat)",
+                                    checked = readReceiptsEnabled,
+                                    onCheckedChange = { enable ->
+                                        readReceiptsEnabled = enable
+                                        DirectMessageNotificationPrefs.setReadReceiptsEnabled(context, enable)
                                     }
                                 )
                             }

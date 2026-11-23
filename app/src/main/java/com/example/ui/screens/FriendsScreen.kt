@@ -90,10 +90,11 @@ fun FriendsScreen(
     val acceptedFriends = remember(friendships, currentUserId, searchQuery) {
         val q = searchQuery.trim()
         friendships.filter { f ->
+            val otherTier = f.otherTier(currentUserId)
             f.isAccepted() && (
                 q.isEmpty() ||
                     f.otherName(currentUserId).contains(q, ignoreCase = true) ||
-                    f.otherHandle(currentUserId).contains(q, ignoreCase = true)
+                    (otherTier != StaffTier.ADMIN && f.otherHandle(currentUserId).contains(q, ignoreCase = true))
                 )
         }
     }
@@ -111,7 +112,7 @@ fun FriendsScreen(
             !connectedUserIds.contains(entry.userId) && (
                 q.isEmpty() ||
                     entry.displayName.contains(q, ignoreCase = true) ||
-                    entry.handle.contains(q, ignoreCase = true)
+                    (entry.tierEnum() != StaffTier.ADMIN && entry.handle.contains(q, ignoreCase = true))
                 )
         }
     }
@@ -254,7 +255,11 @@ fun FriendsScreen(
                                     StaffTierBadge(tier = tier)
                                 }
                                 Text(
-                                    text = "@$handle wants to be friends",
+                                    text = if (tier == StaffTier.ADMIN) {
+                                        "Wants to be friends"
+                                    } else {
+                                        "@$handle wants to be friends"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -371,7 +376,12 @@ fun FriendsScreen(
                                     StaffTierBadge(tier = tier)
                                 }
                                 Text(
-                                    text = if (isOnline) "@$handle · Online" else "@$handle · Offline",
+                                    text = when {
+                                        tier == StaffTier.ADMIN && isOnline -> "Online"
+                                        tier == StaffTier.ADMIN -> "Offline"
+                                        isOnline -> "@$handle · Online"
+                                        else -> "@$handle · Offline"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = if (isOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -456,7 +466,11 @@ fun FriendsScreen(
                                     )
                                 }
                                 Text(
-                                    text = "@$handle · Request pending",
+                                    text = if (tier == StaffTier.ADMIN) {
+                                        "Request pending"
+                                    } else {
+                                        "@$handle · Request pending"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -543,9 +557,17 @@ fun FriendsScreen(
                                     StaffTierBadge(tier = tier)
                                 }
                                 Text(
-                                    text = "@${person.handle}",
+                                    text = if (tier == StaffTier.ADMIN) {
+                                        if (isOnline) "Online" else "Offline"
+                                    } else {
+                                        "@${person.handle}"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (tier == StaffTier.ADMIN && isOnline) {
+                                        PresenceOnlineGreen
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

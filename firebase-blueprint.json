@@ -250,6 +250,7 @@
         "postCount": { "type": "integer" },
         "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"] },
         "online": { "type": "boolean" },
+        "acceptedFriendIds": { "type": "array", "description": "Bounded list of accepted friend UIDs (max 200) used to compute Friends-of-Friends suggestions." },
         "lastActiveAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -304,6 +305,9 @@
         "lastMessageSenderId": { "type": "string" },
         "unreadByUserIds": { "type": "array" },
         "pttEnabledUserIds": { "type": "array", "description": "Participant UIDs who enabled Live Push-to-Talk on this thread." },
+        "disappearingDurationSec": { "type": "integer", "description": "Disappearing message timer in seconds (0 = off, 30, 300, 3600, or 86400)." },
+        "readReceiptsDisabledByUserIds": { "type": "array", "description": "Participant UIDs who disabled read receipts for this thread." },
+        "readTimestampsByUserId": { "type": "object", "description": "Map of participant UID to epoch ms when they last read this thread." },
         "lastAlertSenderId": { "type": "string", "description": "UID of friend who last sent a ring & vibrate attention alert." },
         "lastAlertSenderName": { "type": "string", "description": "Display name of friend who last sent an attention alert." },
         "lastAlertAtMillis": { "type": "integer", "description": "Epoch ms of the last attention alert (enforces 1 alert per 5 minutes)." },
@@ -331,6 +335,7 @@
         "imageBase64": { "type": "string", "description": "Optional compressed JPEG snap picture." },
         "audioBase64": { "type": "string", "description": "Optional compressed M4A/AAC voice note encoded as Base64." },
         "audioDurationSec": { "type": "integer", "description": "Duration of the attached voice note in seconds (0-60)." },
+        "expiresAtMillis": { "type": "integer", "description": "Optional epoch ms when a disappearing message expires (0 = permanent)." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["threadId", "participantIds", "senderId", "senderName", "senderTier", "text", "createdAt"]
@@ -487,6 +492,29 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "targetRoomId", "targetRoomTitle", "fromRoomId", "movedByAdminId", "movedByAdminName", "reason", "consumed", "createdAt"]
+    },
+    "SupportTicket": {
+      "title": "SupportTicket",
+      "description": "User-submitted support ticket visible to the requester and all Admin/Support staff.",
+      "type": "object",
+      "properties": {
+        "requesterId": { "type": "string", "description": "UID of the user who opened the ticket." },
+        "requesterName": { "type": "string", "description": "Display name of the requester." },
+        "category": { "type": "string", "enum": ["GENERAL", "ACCOUNT", "BILLING", "SAFETY", "TECHNICAL"], "description": "Support ticket category." },
+        "subject": { "type": "string", "description": "Short ticket title (2-100 chars)." },
+        "details": { "type": "string", "description": "Detailed description of the issue (4-1000 chars)." },
+        "status": { "type": "string", "enum": ["OPEN", "IN_PROGRESS", "RESOLVED"], "description": "Current resolution status." },
+        "assignedStaffId": { "type": "string", "description": "Optional UID of the targeted or responding Admin/Support member." },
+        "assignedStaffName": { "type": "string", "description": "Optional display name of the targeted or responding Admin/Support member." },
+        "staffResponse": { "type": "string", "description": "Reply note from Admin or Support staff." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "requesterId", "requesterName", "category", "subject", "details",
+        "status", "assignedStaffId", "assignedStaffName", "staffResponse",
+        "createdAt", "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -569,6 +597,10 @@
     "/roomTransfers/{userId}": {
       "schema": { "$ref": "#/entities/RoomTransfer" },
       "description": "Admin-issued live room transfer directives automatically moving a target user into a different room."
+    },
+    "/supportTickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/SupportTicket" },
+      "description": "User support tickets managed by Admin and Support staff."
     }
   }
 }

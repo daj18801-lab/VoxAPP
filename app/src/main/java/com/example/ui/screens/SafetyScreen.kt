@@ -153,11 +153,12 @@ fun SafetyScreen(
     var userBeingTransferred by remember { mutableStateOf<UserProfile?>(null) }
     var alertBeingEdited by remember { mutableStateOf<UserAlert?>(null) }
 
-    val filteredUsers = remember(allUsers, userSearch) {
+    val filteredUsers = remember(allUsers, userSearch, staffTierByUid) {
         val q = userSearch.trim()
         if (q.isEmpty()) allUsers
         else allUsers.filter {
-            it.displayName.contains(q, ignoreCase = true) || it.handle.contains(q, ignoreCase = true)
+            it.displayName.contains(q, ignoreCase = true) ||
+                (staffTierByUid[it.userId] != StaffTier.ADMIN && it.handle.contains(q, ignoreCase = true))
         }
     }
 
@@ -420,13 +421,11 @@ fun SafetyScreen(
                                                 )
                                                 StaffTierBadge(tier = StaffTier.ADMIN)
                                             }
-                                            if (role.email.isNotBlank()) {
-                                                Text(
-                                                    text = if (isOwnerAccount) "${role.email} · Primary Owner" else role.email,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
+                                            Text(
+                                                text = if (isOwnerAccount) "Primary Owner · Details hidden" else "App Administrator · Details hidden",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
                                         }
                                         if (!isOwnerAccount && role.userId != currentUserId) {
                                             IconButton(
@@ -566,14 +565,22 @@ fun SafetyScreen(
                                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                                 ) {
                                                     Text(
-                                                        text = invite.displayName.ifBlank { invite.email },
+                                                        text = if (invTier == StaffTier.ADMIN) {
+                                                            invite.displayName.ifBlank { "Invited Admin" }
+                                                        } else {
+                                                            invite.displayName.ifBlank { invite.email }
+                                                        },
                                                         style = MaterialTheme.typography.titleSmall,
                                                         color = usernameColor(invTier)
                                                     )
                                                     StaffTierBadge(tier = invTier)
                                                 }
                                                 Text(
-                                                    text = invite.email,
+                                                    text = if (invTier == StaffTier.ADMIN) {
+                                                        "Pending Admin invite · Email hidden"
+                                                    } else {
+                                                        invite.email
+                                                    },
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
@@ -1156,7 +1163,11 @@ private fun AdminUserDirectoryCard(
                 StaffTierBadge(tier = tier)
             }
             Text(
-                text = "@${profile.handle} · ${profile.bio.ifBlank { "No bio" }}",
+                text = if (tier == StaffTier.ADMIN) {
+                    profile.bio.ifBlank { "Administrator" }
+                } else {
+                    "@${profile.handle} · ${profile.bio.ifBlank { "No bio" }}"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

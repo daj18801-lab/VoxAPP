@@ -56,12 +56,17 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.PostComment
 import com.example.data.ProfilePost
+import com.example.data.StaffTier
 import kotlinx.coroutines.flow.Flow
 
 fun launchSystemPostShare(context: Context, post: ProfilePost) {
     if (post.locked) return
     val body = buildString {
-        append("${post.authorName} (@${post.authorHandle}) on VoxStage")
+        if (post.authorTierEnum() == StaffTier.ADMIN) {
+            append("${post.authorName} on VoxStage")
+        } else {
+            append("${post.authorName} (@${post.authorHandle}) on VoxStage")
+        }
         if (post.text.isNotBlank()) {
             append(":\n\n")
             append(post.text)

@@ -317,6 +317,7 @@ private fun AuthenticatedVoxStageApp(
     val staffInvites by mainViewModel.staffInvitesState.collectAsStateWithLifecycle()
     val allUsers by mainViewModel.allUsersState.collectAsStateWithLifecycle()
     val allAlerts by mainViewModel.allAlertsState.collectAsStateWithLifecycle()
+    val supportTickets by mainViewModel.supportTicketsState.collectAsStateWithLifecycle()
     val appConfig by mainViewModel.appConfigState.collectAsStateWithLifecycle()
     val pendingRoomTransfer by mainViewModel.pendingRoomTransferState.collectAsStateWithLifecycle()
     val searchQuery by mainViewModel.searchQuery.collectAsStateWithLifecycle()
@@ -733,7 +734,12 @@ private fun AuthenticatedVoxStageApp(
                                     onSharePostToFeed = mainViewModel::shareProfilePostToFeed,
                                     onExternalSharePost = mainViewModel::recordExternalPostShare,
                                     onSubscribeCreator = mainViewModel::subscribeToCreator,
-                                    onOpenBuyPoints = ::openProfileBuyPoints
+                                    onOpenBuyPoints = ::openProfileBuyPoints,
+                                    blockedUserIds = userProfile?.blockedUserIds?.toSet().orEmpty(),
+                                    supportTickets = supportTickets,
+                                    onCreateSupportTicket = mainViewModel::createSupportTicket,
+                                    onRespondToSupportTicket = mainViewModel::respondToSupportTicket,
+                                    onCloseSupportTicket = mainViewModel::closeMySupportTicket
                                 )
                             }
 

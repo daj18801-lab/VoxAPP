@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,6 +27,7 @@ import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ConfirmationNumber
 import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Group
@@ -33,6 +36,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SupportAgent
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -70,6 +74,9 @@ import com.example.data.PostComment
 import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
+import com.example.data.SupportTicket
+import com.example.data.SupportTicketCategory
+import com.example.data.SupportTicketStatus
 import com.example.data.UiState
 import com.example.ui.components.OnlinePresenceDot
 import com.example.ui.components.PostCommentsDialog
@@ -111,14 +118,34 @@ fun DiscoverUsersScreen(
     onSharePostToFeed: (ProfilePost, String, () -> Unit) -> Unit,
     onExternalSharePost: (ProfilePost) -> Unit,
     onSubscribeCreator: (creatorId: String, creatorName: String) -> Unit,
-    onOpenBuyPoints: () -> Unit
+    onOpenBuyPoints: () -> Unit,
+    blockedUserIds: Set<String> = emptySet(),
+    supportTickets: List<SupportTicket> = emptyList(),
+    onCreateSupportTicket: (
+        category: SupportTicketCategory,
+        subject: String,
+        details: String,
+        assignedStaffId: String,
+        assignedStaffName: String,
+        onCreated: () -> Unit
+    ) -> Unit = { _, _, _, _, _, _ -> },
+    onRespondToSupportTicket: (
+        ticketId: String,
+        status: SupportTicketStatus,
+        staffResponse: String,
+        onUpdated: () -> Unit
+    ) -> Unit = { _, _, _, _ -> },
+    onCloseSupportTicket: (ticketId: String) -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Browse People, 1 = Posts Feed, 2 = Friends
+    var selectedTab by remember { mutableIntStateOf(0) } // 0=People, 1=Suggested, 2=Posts, 3=Friends, 4=Support
     var showBuyPointsDialog by remember { mutableStateOf(false) }
     var buyPointsNeededCount by remember { mutableIntStateOf(2) }
     var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
     var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
+    var showCreateTicketDialog by remember { mutableStateOf(false) }
+    var ticketTargetStaff by remember { mutableStateOf<DirectoryEntry?>(null) }
+    var ticketBeingReplied by remember { mutableStateOf<SupportTicket?>(null) }
     val nowMillis = rememberPresenceClockMillis()
 
     val directoryByUid = remember(directoryEntries) {
@@ -144,7 +171,7 @@ fun DiscoverUsersScreen(
             .filter { entry ->
                 q.isEmpty() ||
                     entry.displayName.contains(q, ignoreCase = true) ||
-                    entry.handle.contains(q, ignoreCase = true) ||
+                    (entry.tierEnum() != StaffTier.ADMIN && entry.handle.contains(q, ignoreCase = true)) ||
                     entry.bio.contains(q, ignoreCase = true)
             }
             .sortedWith(
@@ -154,13 +181,90 @@ fun DiscoverUsersScreen(
             )
     }
 
+    val suggestedFriends = remember(
+        acceptedFriends,
+        friendshipByOtherUid,
+        directoryByUid,
+        blockedUserIds,
+        currentUserId,
+        searchQuery
+    ) {
+        val q = searchQuery.trim()
+        val candidateToMutuals = linkedMapOf<String, MutableList<String>>()
+        acceptedFriends.forEach { friend ->
+            val friendId = friend.otherUserId(currentUserId)
+            val friendEntry = directoryByUid[friendId] ?: return@forEach
+            val friendName = friendEntry.displayName.ifBlank { friend.otherName(currentUserId) }
+            friendEntry.acceptedFriendIds.forEach { fofId ->
+                if (fofId.isNotBlank() &&
+                    fofId != currentUserId &&
+                    fofId !in friendshipByOtherUid.keys &&
+                    fofId !in blockedUserIds
+                ) {
+                    val list = candidateToMutuals.getOrPut(fofId) { mutableListOf() }
+                    if (friendName.isNotBlank() && friendName !in list) {
+                        list.add(friendName)
+                    }
+                }
+            }
+        }
+        candidateToMutuals.entries
+            .mapNotNull { (candidateUid, mutualNames) ->
+                val entry = directoryByUid[candidateUid] ?: return@mapNotNull null
+                SuggestedFriend(entry = entry, mutualNames = mutualNames.toList())
+            }
+            .filter { suggestion ->
+                val entry = suggestion.entry
+                q.isEmpty() ||
+                    entry.displayName.contains(q, ignoreCase = true) ||
+                    (entry.tierEnum() != StaffTier.ADMIN && entry.handle.contains(q, ignoreCase = true)) ||
+                    suggestion.mutualNames.any { it.contains(q, ignoreCase = true) }
+            }
+            .sortedWith(
+                compareByDescending<SuggestedFriend> { it.mutualNames.size }
+                    .thenBy { it.entry.displayName.lowercase() }
+            )
+    }
+
+    val staffMembers = remember(directoryEntries, searchQuery, nowMillis) {
+        val q = searchQuery.trim()
+        directoryEntries
+            .filter { it.tierEnum() == StaffTier.ADMIN || it.tierEnum() == StaffTier.SUPPORT }
+            .filter { entry ->
+                q.isEmpty() ||
+                    entry.displayName.contains(q, ignoreCase = true) ||
+                    (entry.tierEnum() != StaffTier.ADMIN && entry.handle.contains(q, ignoreCase = true)) ||
+                    entry.bio.contains(q, ignoreCase = true)
+            }
+            .sortedWith(
+                compareBy<DirectoryEntry> { if (it.tierEnum() == StaffTier.ADMIN) 0 else 1 }
+                    .thenByDescending { it.isCurrentlyOnline(nowMillis) }
+                    .thenBy { it.displayName.lowercase() }
+            )
+    }
+
+    val filteredSupportTickets = remember(supportTickets, searchQuery) {
+        val q = searchQuery.trim()
+        if (q.isEmpty()) supportTickets
+        else supportTickets.filter { ticket ->
+            ticket.subject.contains(q, ignoreCase = true) ||
+                ticket.details.contains(q, ignoreCase = true) ||
+                ticket.categoryEnum().label.contains(q, ignoreCase = true) ||
+                ticket.requesterName.contains(q, ignoreCase = true) ||
+                ticket.assignedStaffName.contains(q, ignoreCase = true)
+        }
+    }
+    val openTicketCount = remember(supportTickets) {
+        supportTickets.count { it.statusEnum() != SupportTicketStatus.RESOLVED }
+    }
+
     val allRecentPosts = (recentPostsState as? UiState.Success)?.data.orEmpty()
     val filteredPosts = remember(allRecentPosts, searchQuery) {
         val q = searchQuery.trim()
         if (q.isEmpty()) allRecentPosts
         else allRecentPosts.filter { post ->
             post.authorName.contains(q, ignoreCase = true) ||
-                post.authorHandle.contains(q, ignoreCase = true) ||
+                (post.authorTierEnum() != StaffTier.ADMIN && post.authorHandle.contains(q, ignoreCase = true)) ||
                 post.text.contains(q, ignoreCase = true)
         }
     }
@@ -245,20 +349,22 @@ fun DiscoverUsersScreen(
                             .testTag("discover_search_input")
                     )
 
-                    Row(
+                    val tabs = listOf(
+                        "People (${browseUsers.size})",
+                        "Suggested (${suggestedFriends.size})",
+                        "Posts (${allRecentPosts.size})",
+                        if (incomingRequests.isNotEmpty()) {
+                            "Friends (${acceptedFriends.size} · +${incomingRequests.size})"
+                        } else {
+                            "Friends (${acceptedFriends.size})"
+                        },
+                        if (openTicketCount > 0) "Support ($openTicketCount)" else "Support"
+                    )
+                    LazyRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        val tabs = listOf(
-                            "People (${browseUsers.size})",
-                            "Posts (${allRecentPosts.size})",
-                            if (incomingRequests.isNotEmpty()) {
-                                "Friends (${acceptedFriends.size} · +${incomingRequests.size})"
-                            } else {
-                                "Friends (${acceptedFriends.size})"
-                            }
-                        )
-                        tabs.forEachIndexed { idx, label ->
+                        itemsIndexed(tabs) { idx, label ->
                             FilterChip(
                                 selected = selectedTab == idx,
                                 onClick = { selectedTab = idx },
@@ -332,8 +438,68 @@ fun DiscoverUsersScreen(
                     }
                 }
 
-                // TAB 1: COMMUNITY POSTS FEED
+                // TAB 1: SUGGESTED FRIENDS (FRIENDS OF YOUR FRIENDS)
                 1 -> {
+                    item(key = "discover_suggested_header") {
+                        Text(
+                            text = "Suggested Friends (${suggestedFriends.size})",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                    }
+                    if (suggestedFriends.isEmpty()) {
+                        item(key = "discover_suggested_empty") {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Group,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(34.dp)
+                                    )
+                                    Text(
+                                        text = "No suggested friends yet",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        text = "Friends of your accepted friends will appear here automatically so you can connect through mutual friends.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        items(suggestedFriends, key = { "suggested_${it.entry.userId}" }) { suggestion ->
+                            SuggestedFriendCard(
+                                suggestion = suggestion,
+                                isOnline = suggestion.entry.isCurrentlyOnline(nowMillis),
+                                onClickProfile = { onOpenUserProfile(suggestion.entry.userId) },
+                                onSendFriendRequest = { onSendFriendRequest(suggestion.entry) },
+                                onMessageUser = {
+                                    onMessageUser(
+                                        suggestion.entry.userId,
+                                        suggestion.entry.displayName,
+                                        suggestion.entry.avatarColorHex,
+                                        suggestion.entry.tierEnum()
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // TAB 2: COMMUNITY POSTS FEED
+                2 -> {
                     when (recentPostsState) {
                         is UiState.Loading -> {
                             item(key = "discover_posts_loading") {
@@ -450,8 +616,8 @@ fun DiscoverUsersScreen(
                     }
                 }
 
-                // TAB 2: FRIENDS & REQUESTS
-                else -> {
+                // TAB 3: FRIENDS & REQUESTS
+                3 -> {
                     if (incomingRequests.isNotEmpty()) {
                         item(key = "disc_in_header") {
                             Text(
@@ -510,7 +676,11 @@ fun DiscoverUsersScreen(
                                             StaffTierBadge(tier = tier)
                                         }
                                         Text(
-                                            text = "@$handle wants to be friends",
+                                            text = if (tier == StaffTier.ADMIN) {
+                                                "Wants to be friends"
+                                            } else {
+                                                "@$handle wants to be friends"
+                                            },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -608,7 +778,11 @@ fun DiscoverUsersScreen(
                                             StaffTierBadge(tier = tier)
                                         }
                                         Text(
-                                            text = if (isOnline) "@$handle · Online" else "@$handle · Offline",
+                                            text = if (tier == StaffTier.ADMIN) {
+                                                if (isOnline) "Online" else "Offline"
+                                            } else {
+                                                if (isOnline) "@$handle · Online" else "@$handle · Offline"
+                                            },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = if (isOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -693,7 +867,7 @@ fun DiscoverUsersScreen(
                                             )
                                         }
                                         Text(
-                                            text = "@$handle · Pending",
+                                            text = if (tier == StaffTier.ADMIN) "Pending" else "@$handle · Pending",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -706,6 +880,164 @@ fun DiscoverUsersScreen(
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // TAB 4: ADMIN / SUPPORT DIRECTORY & SUPPORT TICKETS
+                else -> {
+                    item(key = "discover_support_banner") {
+                        Surface(
+                            shape = RoundedCornerShape(22.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(44.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.SupportAgent,
+                                                contentDescription = "Support team",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Admin & Support Desk",
+                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "Reach verified Admin & Support team members or open a tracked support ticket.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Button(
+                                    onClick = {
+                                        ticketTargetStaff = null
+                                        showCreateTicketDialog = true
+                                    },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("discover_create_support_ticket_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.ConfirmationNumber,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Create Support Ticket")
+                                }
+                            }
+                        }
+                    }
+
+                    item(key = "discover_staff_team_header") {
+                        Text(
+                            text = "Admin & Support Team (${staffMembers.size})",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                    }
+
+                    if (staffMembers.isEmpty()) {
+                        item(key = "discover_staff_empty") {
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "No Admin or Support members matched your search. You can still open a support ticket above.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        items(staffMembers, key = { "staff_${it.userId}" }) { member ->
+                            SupportStaffMemberCard(
+                                entry = member,
+                                isOnline = member.isCurrentlyOnline(nowMillis),
+                                isSelf = member.userId == currentUserId,
+                                onClickProfile = { onOpenUserProfile(member.userId) },
+                                onMessageStaff = {
+                                    onMessageUser(
+                                        member.userId,
+                                        member.displayName,
+                                        member.avatarColorHex,
+                                        member.tierEnum()
+                                    )
+                                },
+                                onOpenTicketWithStaff = {
+                                    ticketTargetStaff = member
+                                    showCreateTicketDialog = true
+                                }
+                            )
+                        }
+                    }
+
+                    item(key = "discover_tickets_header") {
+                        Text(
+                            text = if (staffCapabilities.isStaff) {
+                                "All Support Tickets (${filteredSupportTickets.size})"
+                            } else {
+                                "My Support Tickets (${filteredSupportTickets.size})"
+                            },
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                    }
+
+                    if (filteredSupportTickets.isEmpty()) {
+                        item(key = "discover_tickets_empty") {
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = if (staffCapabilities.isStaff) {
+                                        "No support tickets submitted yet."
+                                    } else {
+                                        "You haven't created any support tickets yet. Tap \"Create Support Ticket\" above anytime you need help."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        items(filteredSupportTickets, key = { "ticket_${it.id}" }) { ticket ->
+                            SupportTicketCard(
+                                ticket = ticket,
+                                currentUserId = currentUserId,
+                                isStaff = staffCapabilities.isStaff,
+                                onReplyTicket = { ticketBeingReplied = ticket },
+                                onCloseTicket = { onCloseSupportTicket(ticket.id) }
+                            )
                         }
                     }
                 }
@@ -782,6 +1114,40 @@ fun DiscoverUsersScreen(
             onDismiss = { activeSharePost = null }
         )
     }
+
+    if (showCreateTicketDialog) {
+        CreateSupportTicketDialog(
+            initialStaffMember = ticketTargetStaff,
+            onDismiss = {
+                showCreateTicketDialog = false
+                ticketTargetStaff = null
+            },
+            onSubmit = { category, subject, details, assignedStaffId, assignedStaffName ->
+                onCreateSupportTicket(
+                    category,
+                    subject,
+                    details,
+                    assignedStaffId,
+                    assignedStaffName
+                ) {
+                    showCreateTicketDialog = false
+                    ticketTargetStaff = null
+                }
+            }
+        )
+    }
+
+    ticketBeingReplied?.let { ticket ->
+        RespondSupportTicketDialog(
+            ticket = ticket,
+            onDismiss = { ticketBeingReplied = null },
+            onSubmit = { status, response ->
+                onRespondToSupportTicket(ticket.id, status, response) {
+                    ticketBeingReplied = null
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -843,7 +1209,11 @@ private fun DiscoverUserCard(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "@${entry.handle} · ${entry.postCount} ${if (entry.postCount == 1L) "post" else "posts"}",
+                            text = if (tier == StaffTier.ADMIN) {
+                                "${entry.postCount} ${if (entry.postCount == 1L) "post" else "posts"}"
+                            } else {
+                                "@${entry.handle} · ${entry.postCount} ${if (entry.postCount == 1L) "post" else "posts"}"
+                            },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary
                         )

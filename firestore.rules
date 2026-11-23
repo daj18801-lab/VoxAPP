@@ -468,7 +468,8 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'userId', 'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
-               'staffTier', 'postCount', 'dmPolicy', 'online', 'lastActiveAt', 'updatedAt'
+               'staffTier', 'postCount', 'dmPolicy', 'online', 'lastActiveAt',
+               'acceptedFriendIds', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 40 &&
@@ -478,6 +479,7 @@ service cloud.firestore {
              (!('photoBase64' in data) || (data.photoBase64 is string && data.photoBase64.size() <= 140000)) &&
              data.staffTier in ['USER', 'SUPPORT', 'ADMIN'] &&
              (!('postCount' in data) || (data.postCount is int && data.postCount >= 0 && data.postCount <= 100000)) &&
+             (!('acceptedFriendIds' in data) || isBoundedStringList(data.acceptedFriendIds, 200)) &&
              (!('dmPolicy' in data) || data.dmPolicy in ['OPEN', 'PAID', 'DISABLED']) &&
              (!('online' in data) || data.online is bool) &&
              (!('lastActiveAt' in data) || (data.lastActiveAt is timestamp && data.lastActiveAt <= request.time)) &&
@@ -588,6 +590,7 @@ service cloud.firestore {
              data.keys().hasOnly([
                'participantIds', 'isGroup', 'groupName', 'participantNamesById', 'kickedUserIds',
                'blockedByUserIds', 'pttEnabledUserIds',
+               'disappearingDurationSec', 'readReceiptsDisabledByUserIds', 'readTimestampsByUserId',
                'lastAlertSenderId', 'lastAlertSenderName', 'lastAlertAtMillis',
                'userAId', 'userAName', 'userAColorHex', 'userATier',
                'userBId', 'userBName', 'userBColorHex', 'userBTier',
@@ -601,6 +604,9 @@ service cloud.firestore {
              (!('kickedUserIds' in data) || isBoundedStringList(data.kickedUserIds, 20)) &&
              (!('blockedByUserIds' in data) || isBoundedStringList(data.blockedByUserIds, 15)) &&
              (!('pttEnabledUserIds' in data) || isBoundedStringList(data.pttEnabledUserIds, 15)) &&
+             (!('disappearingDurationSec' in data) || (data.disappearingDurationSec is int && data.disappearingDurationSec in [0, 30, 300, 3600, 86400])) &&
+             (!('readReceiptsDisabledByUserIds' in data) || isBoundedStringList(data.readReceiptsDisabledByUserIds, 15)) &&
+             (!('readTimestampsByUserId' in data) || (data.readTimestampsByUserId is map && data.readTimestampsByUserId.size() <= 15)) &&
              (!('lastAlertSenderId' in data) || (data.lastAlertSenderId is string && data.lastAlertSenderId.size() <= 128)) &&
              (!('lastAlertSenderName' in data) || (data.lastAlertSenderName is string && data.lastAlertSenderName.size() <= 40)) &&
              (!('lastAlertAtMillis' in data) || (data.lastAlertAtMillis is int && data.lastAlertAtMillis >= 0)) &&
@@ -627,7 +633,7 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier',
-               'text', 'imageBase64', 'audioBase64', 'audioDurationSec', 'createdAt'
+               'text', 'imageBase64', 'audioBase64', 'audioDurationSec', 'expiresAtMillis', 'createdAt'
              ]) &&
              data.threadId is string && data.threadId.size() >= 1 && data.threadId.size() <= 260 &&
              data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 15 &&
@@ -639,10 +645,37 @@ service cloud.firestore {
              (!('imageBase64' in data) || (data.imageBase64 is string && data.imageBase64.size() <= 460000)) &&
              (!('audioBase64' in data) || (data.audioBase64 is string && data.audioBase64.size() <= 300000)) &&
              (!('audioDurationSec' in data) || (data.audioDurationSec is int && data.audioDurationSec >= 0 && data.audioDurationSec <= 60)) &&
+             (!('expiresAtMillis' in data) || (data.expiresAtMillis is int && data.expiresAtMillis >= 0)) &&
              (data.text.size() >= 1 ||
               ('imageBase64' in data && data.imageBase64.size() >= 1) ||
               ('audioBase64' in data && data.audioBase64.size() >= 1)) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidSupportTicket(data) {
+      return data.keys().hasAll([
+               'requesterId', 'requesterName', 'requesterTier',
+               'category', 'subject', 'message', 'status', 'staffResponse',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'requesterId', 'requesterName', 'requesterTier',
+               'assignedStaffId', 'assignedStaffName',
+               'category', 'subject', 'message', 'status', 'staffResponse',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.requesterId is string && data.requesterId.size() >= 1 && data.requesterId.size() <= 128 &&
+             data.requesterName is string && data.requesterName.size() >= 1 && data.requesterName.size() <= 40 &&
+             data.requesterTier in ['USER', 'SUPPORT', 'ADMIN'] &&
+             (!('assignedStaffId' in data) || (data.assignedStaffId is string && data.assignedStaffId.size() <= 128)) &&
+             (!('assignedStaffName' in data) || (data.assignedStaffName is string && data.assignedStaffName.size() <= 40)) &&
+             data.category in ['ACCOUNT', 'BILLING', 'SAFETY', 'BUG', 'OTHER'] &&
+             data.subject is string && data.subject.size() >= 2 && data.subject.size() <= 100 &&
+             data.message is string && data.message.size() >= 4 && data.message.size() <= 600 &&
+             data.status in ['OPEN', 'IN_PROGRESS', 'RESOLVED'] &&
+             data.staffResponse is string && data.staffResponse.size() <= 600 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
     function isValidDmAccessPass(data) {
@@ -946,7 +979,7 @@ service cloud.firestore {
               'userAName', 'userAColorHex', 'userATier',
               'userBName', 'userBColorHex', 'userBTier',
               'lastMessageText', 'lastMessageSenderId',
-              'unreadByUserIds', 'updatedAt'
+              'unreadByUserIds', 'readTimestampsByUserId', 'updatedAt'
             ])) ||
            (hasAnyThreadBlock(oldData) &&
             diffKeys.hasOnly(['unreadByUserIds', 'updatedAt']))
@@ -1016,6 +1049,29 @@ service cloud.firestore {
             (request.auth.uid in oldData.pttEnabledUserIds) &&
             newData.pttEnabledUserIds.size() == oldData.pttEnabledUserIds.size() - 1 &&
             oldData.pttEnabledUserIds.hasAll(newData.pttEnabledUserIds))
+         )) ||
+        // Action 7: Participant updates disappearing messages timer for this chat
+        (newData.participantIds == oldData.participantIds &&
+         !hasAnyThreadBlock(oldData) &&
+         !isKickedFromThread(oldData, request.auth.uid) &&
+         diffKeys.hasOnly(['disappearingDurationSec', 'updatedAt'])) ||
+        // Action 8: Participant toggles their own UID in readReceiptsDisabledByUserIds
+        (newData.participantIds == oldData.participantIds &&
+         !hasAnyThreadBlock(oldData) &&
+         !isKickedFromThread(oldData, request.auth.uid) &&
+         diffKeys.hasOnly(['readReceiptsDisabledByUserIds', 'updatedAt']) &&
+         (
+           (request.auth.uid in newData.readReceiptsDisabledByUserIds &&
+            (!('readReceiptsDisabledByUserIds' in oldData)
+              ? newData.readReceiptsDisabledByUserIds.size() == 1
+              : (!(request.auth.uid in oldData.readReceiptsDisabledByUserIds) &&
+                 newData.readReceiptsDisabledByUserIds.size() == oldData.readReceiptsDisabledByUserIds.size() + 1 &&
+                 newData.readReceiptsDisabledByUserIds.hasAll(oldData.readReceiptsDisabledByUserIds)))) ||
+           (!(request.auth.uid in newData.readReceiptsDisabledByUserIds) &&
+            ('readReceiptsDisabledByUserIds' in oldData) &&
+            (request.auth.uid in oldData.readReceiptsDisabledByUserIds) &&
+            newData.readReceiptsDisabledByUserIds.size() == oldData.readReceiptsDisabledByUserIds.size() - 1 &&
+            oldData.readReceiptsDisabledByUserIds.hasAll(newData.readReceiptsDisabledByUserIds))
          ))
       );
     }
@@ -1796,6 +1852,43 @@ service cloud.firestore {
       allow delete: if isSignedIn() &&
                        isValidId(userId) &&
                        (request.auth.uid == userId || isAdmin());
+    }
+
+    // --- 12. SUPPORT TICKETS (Created from Discovery Support Tab, managed by Admin/Support) ---
+    match /supportTickets/{ticketId} {
+      allow get: if isSignedIn() &&
+                    isValidId(ticketId) &&
+                    (resource == null ||
+                     existing().requesterId == request.auth.uid ||
+                     isAdminOrSupport());
+
+      allow list: if isSignedIn() &&
+                     (resource.data.requesterId == request.auth.uid ||
+                      isAdminOrSupport());
+
+      allow create: if isSignedIn() &&
+                       isValidId(ticketId) &&
+                       incoming().requesterId == request.auth.uid &&
+                       isAllowedStaffTierClaim(incoming().requesterTier) &&
+                       incoming().status == 'OPEN' &&
+                       incoming().staffResponse == '' &&
+                       isValidSupportTicket(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(ticketId) &&
+                       isValidSupportTicket(incoming()) &&
+                       incoming().requesterId == existing().requesterId &&
+                       incoming().createdAt == existing().createdAt && (
+                         (isAdminOrSupport() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'status', 'staffResponse', 'assignedStaffId', 'assignedStaffName', 'updatedAt'
+                          ])) ||
+                         (existing().requesterId == request.auth.uid &&
+                          incoming().status == 'RESOLVED' &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(ticketId) && isAdmin();
     }
   }
 }
