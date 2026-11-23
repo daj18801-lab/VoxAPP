@@ -56,10 +56,13 @@ import com.example.R
 import com.example.data.DirectoryEntry
 import com.example.data.Friendship
 import com.example.data.StaffTier
+import com.example.ui.components.OnlinePresenceDot
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
+import com.example.ui.theme.PresenceOnlineGreen
 
 @Composable
 fun FriendsScreen(
@@ -73,6 +76,10 @@ fun FriendsScreen(
     onOpenUserProfile: (String) -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
+    val nowMillis = rememberPresenceClockMillis()
+    val directoryByUid = remember(directoryEntries) {
+        directoryEntries.associateBy { it.userId }
+    }
     val directoryPhotoByUid = remember(directoryEntries) {
         directoryEntries.associate { it.userId to it.photoBase64 }
     }
@@ -227,16 +234,22 @@ fun FriendsScreen(
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
+                                val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    OnlinePresenceDot(
+                                        isOnline = isOnline,
+                                        modifier = Modifier.testTag("friend_request_presence_$otherId")
+                                    )
                                     Text(
                                         text = name,
                                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                         color = usernameColor(tier),
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
                                     StaffTierBadge(tier = tier)
                                 }
@@ -337,24 +350,30 @@ fun FriendsScreen(
                                 photoBase64 = directoryPhotoByUid[otherId].orEmpty()
                             )
                             Spacer(modifier = Modifier.width(12.dp))
+                            val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    OnlinePresenceDot(
+                                        isOnline = isOnline,
+                                        modifier = Modifier.testTag("friend_presence_$otherId")
+                                    )
                                     Text(
                                         text = name,
                                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                         color = usernameColor(tier),
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
                                     StaffTierBadge(tier = tier)
                                 }
                                 Text(
-                                    text = "@$handle",
+                                    text = if (isOnline) "@$handle · Online" else "@$handle · Offline",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (isOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Button(
@@ -393,10 +412,12 @@ fun FriendsScreen(
                     )
                 }
                 items(outgoingRequests, key = { "out_${it.id}" }) { req ->
+                    val otherId = req.otherUserId(currentUserId)
                     val name = req.otherName(currentUserId)
                     val handle = req.otherHandle(currentUserId)
                     val color = req.otherColorHex(currentUserId)
                     val tier = req.otherTier(currentUserId)
+                    val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
 
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -413,15 +434,27 @@ fun FriendsScreen(
                                 colorHex = color,
                                 speakingLevel = 0f,
                                 micActive = false,
-                                size = 42.dp
+                                size = 42.dp,
+                                photoBase64 = directoryPhotoByUid[otherId].orEmpty()
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = name,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = usernameColor(tier)
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    OnlinePresenceDot(
+                                        isOnline = isOnline,
+                                        modifier = Modifier.testTag("outgoing_friend_presence_$otherId")
+                                    )
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = usernameColor(tier),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                                 Text(
                                     text = "@$handle · Request pending",
                                     style = MaterialTheme.typography.bodySmall,
@@ -489,17 +522,23 @@ fun FriendsScreen(
                                 photoBase64 = person.photoBase64
                             )
                             Spacer(modifier = Modifier.width(12.dp))
+                            val isOnline = person.isCurrentlyOnline(nowMillis)
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    OnlinePresenceDot(
+                                        isOnline = isOnline,
+                                        modifier = Modifier.testTag("directory_presence_${person.userId}")
+                                    )
                                     Text(
                                         text = person.displayName,
                                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                         color = usernameColor(tier),
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
                                     StaffTierBadge(tier = tier)
                                 }

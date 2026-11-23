@@ -2080,8 +2080,42 @@ test("Room message emoji reactions, private voice notes, and 18+ locked photo ga
   );
 });
 
+test("Users can update their own online/offline presence in userDirectory; cross-user spoofing is denied", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
 
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      bio: "",
+      avatarColorHex: "#0088FF",
+      photoBase64: "",
+      staffTier: "USER",
+      postCount: 0,
+      dmPolicy: "OPEN",
+      online: true,
+      lastActiveAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
 
+  // Alice can mark herself offline
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).update({
+      online: false,
+      lastActiveAt: pastDate(1000),
+      updatedAt: pastDate(1000),
+    })
+  );
 
-
-
+  // Bob cannot spoof Alice's online presence
+  await assertFails(
+    bobDb.collection("userDirectory").doc(ALICE_UID).update({
+      online: true,
+      lastActiveAt: pastDate(500),
+      updatedAt: pastDate(500),
+    })
+  );
+});

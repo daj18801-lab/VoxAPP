@@ -75,11 +75,13 @@ import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
+import com.example.ui.components.OnlinePresenceDot
 import com.example.ui.components.QuickCreatePostSheet
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.parseHexColor
+import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SnapBlue
@@ -118,6 +120,7 @@ fun ChatsHomeScreen(
     var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Unread, 2 = Friends
     var showNewChatSheet by remember { mutableStateOf(false) }
     var showQuickCreateSheet by remember { mutableStateOf(false) }
+    val nowMillis = rememberPresenceClockMillis()
     val directoryByUid = remember(directoryEntries) {
         directoryEntries.associateBy { it.userId }
     }
@@ -422,6 +425,7 @@ fun ChatsHomeScreen(
                                         colorHex = otherColor,
                                         photoBase64 = directoryPhotoByUid[otherId].orEmpty(),
                                         tier = otherTier,
+                                        isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true,
                                         onClick = {
                                             onStartChatWithUser(otherId, otherName, otherColor, otherTier)
                                         }
@@ -570,6 +574,7 @@ fun ChatsHomeScreen(
                                     thread = thread,
                                     currentUserId = currentUserId,
                                     otherPhotoBase64 = if (thread.isGroup) "" else directoryPhotoByUid[otherUid].orEmpty(),
+                                    isOtherOnline = !thread.isGroup && directoryByUid[otherUid]?.isCurrentlyOnline(nowMillis) == true,
                                     onClick = { onOpenThread(thread.id) },
                                     onAvatarClick = {
                                         if (thread.isGroup) onOpenThread(thread.id)
@@ -637,6 +642,7 @@ fun ChatsHomeScreen(
                 directoryUsers = otherDirectoryUsers,
                 directoryByUid = directoryByUid,
                 currentUserId = currentUserId,
+                nowMillis = nowMillis,
                 onSelectUser = { uid, name, color, tier ->
                     showNewChatSheet = false
                     onStartChatWithUser(uid, name, color, tier)
@@ -668,12 +674,13 @@ private fun QuickFriendCircleItem(
     colorHex: String,
     photoBase64: String,
     tier: StaffTier,
+    isOnline: Boolean,
     onClick: () -> Unit
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
-            .width(66.dp)
+            .width(70.dp)
             .clickable(onClick = onClick)
     ) {
         Box(
@@ -694,13 +701,22 @@ private fun QuickFriendCircleItem(
             )
         }
         Spacer(modifier = Modifier.height(5.dp))
-        Text(
-            text = name.substringBefore(" "),
-            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-            color = usernameColor(tier),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            OnlinePresenceDot(
+                isOnline = isOnline,
+                size = 8.dp
+            )
+            Text(
+                text = name.substringBefore(" "),
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = usernameColor(tier),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 
@@ -709,6 +725,7 @@ private fun SnapChatFeedRow(
     thread: DirectThread,
     currentUserId: String,
     otherPhotoBase64: String,
+    isOtherOnline: Boolean,
     onClick: () -> Unit,
     onAvatarClick: () -> Unit
 ) {
@@ -770,6 +787,12 @@ private fun SnapChatFeedRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    if (!isGroup) {
+                        OnlinePresenceDot(
+                            isOnline = isOtherOnline,
+                            modifier = Modifier.testTag("chat_row_presence_${thread.id}")
+                        )
+                    }
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium.copy(
@@ -883,6 +906,7 @@ private fun NewPrivateChatSheetContent(
     directoryUsers: List<DirectoryEntry>,
     directoryByUid: Map<String, DirectoryEntry>,
     currentUserId: String,
+    nowMillis: Long,
     onSelectUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
@@ -951,6 +975,7 @@ private fun NewPrivateChatSheetContent(
                         handle = handle,
                         colorHex = color,
                         tier = tier,
+                        isOnline = directoryByUid[uid]?.isCurrentlyOnline(nowMillis) == true,
                         dmPolicy = directoryByUid[uid]?.dmPolicyEnum() ?: DmPolicy.OPEN,
                         onClick = { onSelectUser(uid, name, color, tier) }
                     )
@@ -971,6 +996,7 @@ private fun NewPrivateChatSheetContent(
                         handle = entry.handle,
                         colorHex = entry.avatarColorHex,
                         tier = entry.tierEnum(),
+                        isOnline = entry.isCurrentlyOnline(nowMillis),
                         dmPolicy = entry.dmPolicyEnum(),
                         onClick = {
                             onSelectUser(entry.userId, entry.displayName, entry.avatarColorHex, entry.tierEnum())
@@ -999,6 +1025,7 @@ private fun NewChatPickerRow(
     handle: String,
     colorHex: String,
     tier: StaffTier,
+    isOnline: Boolean = false,
     dmPolicy: DmPolicy = DmPolicy.OPEN,
     onClick: () -> Unit
 ) {
@@ -1026,10 +1053,14 @@ private fun NewChatPickerRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    OnlinePresenceDot(isOnline = isOnline)
                     Text(
                         text = name,
                         style = MaterialTheme.typography.titleSmall,
-                        color = usernameColor(tier)
+                        color = usernameColor(tier),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     StaffTierBadge(tier = tier)
                 }

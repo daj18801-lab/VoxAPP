@@ -35,6 +35,8 @@ val VoiceCyanContainer = Color(0xFF0C345E)
 val ModAmber = Color(0xFFE69500)
 val ModAmberContainer = Color(0xFF422C08)
 val SafetyEmerald = Color(0xFF12A166)
+val PresenceOnlineGreen = Color(0xFF22C55E)
+val PresenceOfflineRed = Color(0xFFEF4444)
 
 // Role-Coded Username Colors (Users = Blue, Support = Green, Admins = Red)
 val UserNameBlueDark = Color(0xFF5CB0FF)

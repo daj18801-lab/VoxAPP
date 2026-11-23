@@ -110,6 +110,7 @@ import com.example.media.formatVoiceDuration
 import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.VoxStageNotificationState
 import com.example.ui.components.FullScreenPhotoDialog
+import com.example.ui.components.OnlinePresenceDot
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopSnackbarOverlay
@@ -117,10 +118,12 @@ import com.example.ui.components.encodeBitmapToBase64Jpeg
 import com.example.ui.components.encodeImageUriToBase64Jpeg
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.rememberBase64ImageBitmap
+import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.showTopMessage
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
+import com.example.ui.theme.PresenceOnlineGreen
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SnapBlue
 import com.example.viewmodel.DirectChatViewModel
@@ -399,6 +402,11 @@ fun DirectChatScreen(
     val otherColorHex = thread?.otherColorHex(viewModel.currentUserId) ?: "#0088FF"
     val otherTier = if (isGroup) StaffTier.USER else (thread?.otherTier(viewModel.currentUserId) ?: StaffTier.USER)
     val otherUid = thread?.otherUserId(viewModel.currentUserId).orEmpty()
+    val nowMillis = rememberPresenceClockMillis()
+    val otherDirectoryEntry = remember(directoryEntries, otherUid) {
+        directoryEntries.firstOrNull { it.userId == otherUid }
+    }
+    val isOtherOnline = !isGroup && (otherDirectoryEntry?.isCurrentlyOnline(nowMillis) == true)
     val amIKicked = thread?.isUserKicked(viewModel.currentUserId) == true
     val otherPaidPass = remember(paidDmMembersForMe, otherUid, isGroup) {
         if (!isGroup && otherUid.isNotBlank()) {
@@ -480,6 +488,12 @@ fun DirectChatScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                                     ) {
+                                        if (!isGroup) {
+                                            OnlinePresenceDot(
+                                                isOnline = isOtherOnline,
+                                                modifier = Modifier.testTag("dm_header_presence_dot")
+                                            )
+                                        }
                                         Text(
                                             text = otherName,
                                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
@@ -496,10 +510,15 @@ fun DirectChatScreen(
                                         text = when {
                                             isInCall -> if (isGroup) "Live Group Call Active" else "Live Call Active"
                                             isGroup -> "${thread?.participantIds?.size ?: 0} members · ${thread?.memberNamesSummary().orEmpty()}"
-                                            else -> "Private Chat · Tap profile"
+                                            isOtherOnline -> "Online · Tap profile"
+                                            else -> "Offline · Tap profile"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (isInCall) SafetyEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = when {
+                                            isInCall -> SafetyEmerald
+                                            !isGroup && isOtherOnline -> PresenceOnlineGreen
+                                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )

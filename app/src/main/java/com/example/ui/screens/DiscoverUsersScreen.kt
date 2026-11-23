@@ -71,14 +71,17 @@ import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
+import com.example.ui.components.OnlinePresenceDot
 import com.example.ui.components.PostCommentsDialog
 import com.example.ui.components.ProfilePostCard
 import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
+import com.example.ui.theme.PresenceOnlineGreen
 import kotlinx.coroutines.flow.Flow
 
 @Composable
@@ -116,6 +119,7 @@ fun DiscoverUsersScreen(
     var buyPointsNeededCount by remember { mutableIntStateOf(2) }
     var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
     var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
+    val nowMillis = rememberPresenceClockMillis()
 
     val directoryByUid = remember(directoryEntries) {
         directoryEntries.associateBy { it.userId }
@@ -309,6 +313,7 @@ fun DiscoverUsersScreen(
                         items(browseUsers, key = { "browse_${it.userId}" }) { person ->
                             DiscoverUserCard(
                                 entry = person,
+                                isOnline = person.isCurrentlyOnline(nowMillis),
                                 currentUserId = currentUserId,
                                 friendship = friendshipByOtherUid[person.userId],
                                 onClickProfile = { onOpenUserProfile(person.userId) },
@@ -484,15 +489,23 @@ fun DiscoverUsersScreen(
                                         photoBase64 = photo
                                     )
                                     Spacer(modifier = Modifier.width(12.dp))
+                                    val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
                                     Column(modifier = Modifier.weight(1f)) {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
+                                            OnlinePresenceDot(
+                                                isOnline = isOnline,
+                                                modifier = Modifier.testTag("discover_request_presence_$otherId")
+                                            )
                                             Text(
                                                 text = name,
                                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                                color = usernameColor(tier)
+                                                color = usernameColor(tier),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
                                             )
                                             StaffTierBadge(tier = tier)
                                         }
@@ -574,22 +587,30 @@ fun DiscoverUsersScreen(
                                         photoBase64 = photo
                                     )
                                     Spacer(modifier = Modifier.width(12.dp))
+                                    val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
                                     Column(modifier = Modifier.weight(1f)) {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
+                                            OnlinePresenceDot(
+                                                isOnline = isOnline,
+                                                modifier = Modifier.testTag("discover_friend_presence_$otherId")
+                                            )
                                             Text(
                                                 text = name,
                                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                                color = usernameColor(tier)
+                                                color = usernameColor(tier),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
                                             )
                                             StaffTierBadge(tier = tier)
                                         }
                                         Text(
-                                            text = "@$handle · Tap to view posts",
+                                            text = if (isOnline) "@$handle · Online" else "@$handle · Offline",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = if (isOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                     Button(
@@ -653,12 +674,24 @@ fun DiscoverUsersScreen(
                                         photoBase64 = photo
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))
+                                    val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = name,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = usernameColor(tier)
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            OnlinePresenceDot(
+                                                isOnline = isOnline,
+                                                modifier = Modifier.testTag("discover_outgoing_presence_$otherId")
+                                            )
+                                            Text(
+                                                text = name,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = usernameColor(tier),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                         Text(
                                             text = "@$handle · Pending",
                                             style = MaterialTheme.typography.bodySmall,
@@ -754,6 +787,7 @@ fun DiscoverUsersScreen(
 @Composable
 private fun DiscoverUserCard(
     entry: DirectoryEntry,
+    isOnline: Boolean,
     currentUserId: String,
     friendship: Friendship?,
     onClickProfile: () -> Unit,
@@ -790,12 +824,17 @@ private fun DiscoverUserCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        OnlinePresenceDot(
+                            isOnline = isOnline,
+                            modifier = Modifier.testTag("discover_user_presence_${entry.userId}")
+                        )
                         Text(
                             text = entry.displayName,
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             color = usernameColor(tier),
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         StaffTierBadge(tier = tier)
                     }

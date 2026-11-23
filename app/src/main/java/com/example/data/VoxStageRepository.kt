@@ -1,6 +1,7 @@
 package com.example.data
 
 import android.content.Context
+import com.example.R
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -23,7 +24,7 @@ class VoxStageRepository(
     private val auth: FirebaseAuth = Firebase.auth
 ) {
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance()
+        FirebaseFirestore.getInstance(context.getString(R.string.firestore_database_id))
     )
 
     companion object {
@@ -730,20 +731,44 @@ class VoxStageRepository(
             val existing = ref.get().await()
             val existingPostCount = (existing.get("postCount") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
             val effectivePolicy = dmPolicy ?: DmPolicy.fromRaw(existing.getString("dmPolicy"))
-            ref.set(
-                mapOf(
-                    "userId" to userId,
-                    "displayName" to safeName,
-                    "handle" to safeHandle,
-                    "bio" to safeBio,
-                    "avatarColorHex" to safeColor,
-                    "photoBase64" to safePhoto,
-                    "staffTier" to staffTier.name,
-                    "postCount" to existingPostCount,
-                    "dmPolicy" to effectivePolicy.name,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val isSelfSync = auth.currentUser?.uid == userId
+            val effectiveOnline = if (isSelfSync) true else (existing.getBoolean("online") == true)
+            val payload = mutableMapOf<String, Any>(
+                "userId" to userId,
+                "displayName" to safeName,
+                "handle" to safeHandle,
+                "bio" to safeBio,
+                "avatarColorHex" to safeColor,
+                "photoBase64" to safePhoto,
+                "staffTier" to staffTier.name,
+                "postCount" to existingPostCount,
+                "dmPolicy" to effectivePolicy.name,
+                "online" to effectiveOnline,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (isSelfSync) {
+                payload["lastActiveAt"] = FieldValue.serverTimestamp()
+            } else {
+                existing.getTimestamp("lastActiveAt")?.let { payload["lastActiveAt"] = it }
+            }
+            ref.set(payload).await()
+        }
+    }
+
+    suspend fun updateOnlinePresence(online: Boolean) {
+        val uid = auth.currentUser?.uid ?: return
+        runCatching {
+            val ref = db.collection("userDirectory").document(uid)
+            val snap = ref.get().await()
+            if (snap.exists()) {
+                ref.update(
+                    mapOf(
+                        "online" to online,
+                        "lastActiveAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
         }
     }
 

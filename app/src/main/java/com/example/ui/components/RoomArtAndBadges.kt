@@ -27,7 +27,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,6 +42,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.R
@@ -49,6 +55,8 @@ import com.example.ui.theme.AdminNameRedLight
 import com.example.ui.theme.ElectricIndigoBright
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
+import com.example.ui.theme.PresenceOfflineRed
+import com.example.ui.theme.PresenceOnlineGreen
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SupportNameGreenDark
 import com.example.ui.theme.SupportNameGreenLight
@@ -56,6 +64,7 @@ import com.example.ui.theme.UserNameBlueDark
 import com.example.ui.theme.UserNameBlueLight
 import com.example.ui.theme.VoiceCyan
 import com.google.firebase.Timestamp
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -310,4 +319,43 @@ fun VoiceWaveformBars(
             )
         }
     }
+}
+
+/**
+ * High-contrast circular presence dot rendered beside usernames:
+ * - Green when the user is online
+ * - Red when the user is offline
+ */
+@Composable
+fun OnlinePresenceDot(
+    isOnline: Boolean,
+    modifier: Modifier = Modifier,
+    size: Dp = 10.dp
+) {
+    val dotColor = if (isOnline) PresenceOnlineGreen else PresenceOfflineRed
+    val statusLabel = if (isOnline) "Online" else "Offline"
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(dotColor)
+            .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape)
+            .semantics { contentDescription = statusLabel }
+    )
+}
+
+/**
+ * Periodic wall-clock tick so stale online indicators automatically transition to offline
+ * if a peer loses network or force-closes the app without writing an offline event.
+ */
+@Composable
+fun rememberPresenceClockMillis(intervalMs: Long = 30_000L): Long {
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(intervalMs) {
+        while (true) {
+            delay(intervalMs)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    return nowMillis
 }

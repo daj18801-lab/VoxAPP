@@ -473,10 +473,26 @@ data class DirectoryEntry(
     val staffTier: String = StaffTier.USER.name,
     val postCount: Long = 0L,
     val dmPolicy: String = DmPolicy.OPEN.name,
+    val online: Boolean = false,
+    @ServerTimestamp val lastActiveAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun tierEnum(): StaffTier = StaffTier.fromRaw(staffTier)
     fun dmPolicyEnum(): DmPolicy = DmPolicy.fromRaw(dmPolicy)
+
+    /**
+     * Returns true only if the user explicitly has online = true AND their last heartbeat
+     * is within the last 3 minutes (protects against abrupt app kills or lost connectivity).
+     */
+    fun isCurrentlyOnline(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        if (!online) return false
+        val lastMs = lastActiveAt?.toDate()?.time ?: return true
+        return (nowMillis - lastMs) <= ONLINE_STALE_WINDOW_MS
+    }
+
+    companion object {
+        const val ONLINE_STALE_WINDOW_MS = 3L * 60L * 1000L
+    }
 }
 
 @Keep

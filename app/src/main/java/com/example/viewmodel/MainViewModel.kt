@@ -385,7 +385,9 @@ class MainViewModel(
                 displayName = safeName,
                 emailPrefix = emailPrefix,
                 staffTier = staffCapabilities.value.tier
-            ).onFailure { err ->
+            ).onSuccess {
+                repository.updateOnlinePresence(true)
+            }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not initialize profile")
             }
         }
@@ -404,6 +406,16 @@ class MainViewModel(
                 )
             }
         }
+    }
+
+    fun setOnlinePresence(online: Boolean) {
+        viewModelScope.launch {
+            repository.updateOnlinePresence(online)
+        }
+    }
+
+    suspend fun setOnlinePresenceNow(online: Boolean) {
+        repository.updateOnlinePresence(online)
     }
 
     private fun currentActorName(): String =

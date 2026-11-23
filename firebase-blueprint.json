@@ -248,6 +248,8 @@
         "staffTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
         "postCount": { "type": "integer" },
         "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"] },
+        "online": { "type": "boolean" },
+        "lastActiveAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "displayName", "handle", "avatarColorHex", "staffTier", "updatedAt"]

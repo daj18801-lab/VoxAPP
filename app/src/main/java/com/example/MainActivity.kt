@@ -42,6 +42,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -58,6 +59,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -98,6 +102,8 @@ import com.example.viewmodel.UserProfileViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -200,11 +206,15 @@ private fun AuthenticatedVoxStageApp(
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
+    val firestoreDatabaseId = remember(context) {
+        context.getString(R.string.firestore_database_id)
+    }
+
     val mainViewModel: MainViewModel = viewModel(
         key = currentUserId,
         factory = viewModelFactory {
             initializer {
-                val db = FirebaseFirestore.getInstance()
+                val db = FirebaseFirestore.getInstance(firestoreDatabaseId)
                 MainViewModel(
                     repository = VoxStageRepository(db),
                     currentUserId = currentUserId,
@@ -335,6 +345,34 @@ private fun AuthenticatedVoxStageApp(
                 launchSingleTop = true
             }
             onConsumePendingDmThread()
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, currentUserId) {
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            mainViewModel.setOnlinePresence(true)
+        }
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> mainViewModel.setOnlinePresence(true)
+                Lifecycle.Event.ON_STOP -> mainViewModel.setOnlinePresence(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            mainViewModel.setOnlinePresence(false)
+        }
+    }
+
+    LaunchedEffect(lifecycleOwner, currentUserId) {
+        while (true) {
+            delay(60_000L)
+            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                mainViewModel.setOnlinePresence(true)
+            }
         }
     }
 
@@ -660,10 +698,13 @@ private fun AuthenticatedVoxStageApp(
                                     onRequestAgeVerification = { showAgeVerificationDialog = true },
                                     onSaveProfile = mainViewModel::updateProfile,
                                     onSignOut = {
-                                        signOutFromVoxStage(
-                                            credentialManager = credentialManager,
-                                            scope = scope
-                                        )
+                                        scope.launch {
+                                            mainViewModel.setOnlinePresenceNow(false)
+                                            signOutFromVoxStage(
+                                                credentialManager = credentialManager,
+                                                scope = scope
+                                            )
+                                        }
                                     }
                                 )
                             }
@@ -677,7 +718,7 @@ private fun AuthenticatedVoxStageApp(
                                     key = "user_profile_${currentUserId}_$targetUserId",
                                     factory = viewModelFactory {
                                         initializer {
-                                            val db = FirebaseFirestore.getInstance()
+                                            val db = FirebaseFirestore.getInstance(firestoreDatabaseId)
                                             UserProfileViewModel(
                                                 repository = VoxStageRepository(db),
                                                 currentUserId = currentUserId,
@@ -740,7 +781,7 @@ private fun AuthenticatedVoxStageApp(
                                     key = "dm_${currentUserId}_$threadId",
                                     factory = viewModelFactory {
                                         initializer {
-                                            val db = FirebaseFirestore.getInstance()
+                                            val db = FirebaseFirestore.getInstance(firestoreDatabaseId)
                                             DirectChatViewModel(
                                                 context = context,
                                                 repository = VoxStageRepository(db),
@@ -792,7 +833,7 @@ private fun AuthenticatedVoxStageApp(
                                     key = "${currentUserId}_$roomId",
                                     factory = viewModelFactory {
                                         initializer {
-                                            val db = FirebaseFirestore.getInstance()
+                                            val db = FirebaseFirestore.getInstance(firestoreDatabaseId)
                                             RoomViewModel(
                                                 context = context,
                                                 repository = VoxStageRepository(db),
