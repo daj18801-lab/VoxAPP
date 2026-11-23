@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DynamicFeed
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockPerson
 import androidx.compose.material.icons.rounded.Mic
@@ -130,6 +131,8 @@ fun ProfileScreen(
     userEmail: String,
     staffCapabilities: StaffCapabilities,
     friendsCount: Int,
+    followersCount: Int = 0,
+    followingCount: Int = 0,
     myPostsState: UiState<List<ProfilePost>>,
     mySubscriptions: List<CreatorSubscription>,
     myTransactions: List<PointTransaction>,
@@ -171,6 +174,7 @@ fun ProfileScreen(
         darkThemePreferred: Boolean,
         invisibleModePreferred: Boolean
     ) -> Unit,
+    onSaveBio: (String, () -> Unit) -> Unit = { _, _ -> },
     onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
@@ -178,6 +182,8 @@ fun ProfileScreen(
 
     var selectedTab by remember(initialTabIndex) { mutableIntStateOf(initialTabIndex) } // 0 = My Posts, 1 = Settings & Points
     var showFullAvatar by remember { mutableStateOf(false) }
+    var showEditBioDialog by remember { mutableStateOf(false) }
+    var bioDialogDraft by remember { mutableStateOf("") }
     var showNeedPointsForBoostDialog by remember { mutableStateOf(false) }
     var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
     var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
@@ -413,14 +419,6 @@ fun ProfileScreen(
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
-                                if (bio.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Text(
-                                        text = bio,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
                                 if (userEmail.isNotBlank() && !staffCapabilities.isAdmin) {
                                     Text(
                                         text = userEmail,
@@ -431,50 +429,177 @@ fun ProfileScreen(
                             }
                         }
 
-                        // Quick Stats + Change/Remove Photo Buttons
+                        // Dedicated Bio Section with Inline Edit Bio Button
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("profile_bio_section")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Bio",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            bioDialogDraft = bio
+                                            showEditBioDialog = true
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.testTag("profile_edit_bio_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Edit,
+                                            contentDescription = "Edit bio",
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = if (bio.isBlank()) "Add Bio" else "Edit Bio",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = bio.ifBlank { "Write a short description about yourself…" },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (bio.isBlank()) {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    modifier = Modifier.testTag("profile_bio_text")
+                                )
+                            }
+                        }
+
+                        // Followers / Following / Posts / Friends Counts Strip
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("profile_followers_count")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "$followersCount",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "Followers",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("profile_following_count")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "$followingCount",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "Following",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "${myPosts.size}",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "Posts",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "$friendsCount",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "Friends",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        // Points Pill + Change/Remove Photo Buttons
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
-                                ) {
-                                    Text(
-                                        text = "${myPosts.size} Posts",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                    )
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant
-                                ) {
-                                    Text(
-                                        text = "$friendsCount Friends",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                    )
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = SafetyEmerald.copy(alpha = 0.14f),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(999.dp))
-                                        .clickable { selectedTab = 1 }
-                                        .testTag("profile_points_pill")
-                                ) {
-                                    Text(
-                                        text = "${userProfile?.pointsBalance ?: 0L} pts",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = SafetyEmerald,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                    )
-                                }
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = SafetyEmerald.copy(alpha = 0.14f),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .clickable { selectedTab = 1 }
+                                    .testTag("profile_points_pill")
+                            ) {
+                                Text(
+                                    text = "${userProfile?.pointsBalance ?: 0L} pts",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = SafetyEmerald,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                )
                             }
 
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1365,6 +1490,52 @@ fun ProfileScreen(
                 onExternalSharePost(post)
             },
             onDismiss = { activeSharePost = null }
+        )
+    }
+
+    if (showEditBioDialog) {
+        AlertDialog(
+            onDismissRequest = { showEditBioDialog = false },
+            title = { Text("Edit Bio") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = bioDialogDraft,
+                        onValueChange = { bioDialogDraft = it.take(200) },
+                        label = { Text("Short Bio") },
+                        placeholder = { Text("Tell everyone a little about yourself…") },
+                        minLines = 3,
+                        maxLines = 5,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("profile_edit_bio_dialog_input")
+                    )
+                    Text(
+                        text = "${bioDialogDraft.length} / 200",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = bioDialogDraft.trim()
+                        bio = trimmed
+                        onSaveBio(trimmed) {
+                            showEditBioDialog = false
+                        }
+                    },
+                    modifier = Modifier.testTag("profile_save_bio_dialog_button")
+                ) {
+                    Text("Save Bio")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditBioDialog = false }) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 

@@ -54,6 +54,7 @@ object DirectMessageNotificationPrefs {
     private const val KEY_QUICK_REPLY_POPUP_ENABLED = "dm_quick_reply_popup_enabled"
     private const val KEY_FRIEND_ATTENTION_ALERTS_ENABLED = "dm_friend_attention_alerts_enabled"
     private const val KEY_READ_RECEIPTS_ENABLED = "dm_read_receipts_enabled"
+    private const val KEY_VOLUME_DOWN_PTT_ENABLED = "ptt_volume_down_enabled"
     private const val KEY_SEEDED_PREFIX = "dm_seeded_"
     private const val KEY_LAST_NOTIFIED_PREFIX = "dm_last_"
     private const val KEY_LAST_FRIEND_ALERT_PREFIX = "dm_last_alert_"
@@ -90,6 +91,13 @@ object DirectMessageNotificationPrefs {
 
     fun setReadReceiptsEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_READ_RECEIPTS_ENABLED, enabled).apply()
+    }
+
+    fun isVolumeDownPttEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_VOLUME_DOWN_PTT_ENABLED, true)
+
+    fun setVolumeDownPttEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_VOLUME_DOWN_PTT_ENABLED, enabled).apply()
     }
 
     fun getLastFriendAlertMillis(context: Context, uid: String, threadId: String): Long =

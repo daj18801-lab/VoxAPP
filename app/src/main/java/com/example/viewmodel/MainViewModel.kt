@@ -30,6 +30,7 @@ import com.example.data.SupportTicketCategory
 import com.example.data.SupportTicketStatus
 import com.example.data.UiState
 import com.example.data.UserAlert
+import com.example.data.UserFollow
 import com.example.data.UserProfile
 import com.example.data.VoxStageRepository
 import com.example.data.unwrapFirestoreError
@@ -290,6 +291,30 @@ class MainViewModel(
             started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
             initialValue = emptyList()
         )
+
+    val myFollowersState: StateFlow<List<UserFollow>> =
+        repository.observeFollowers(currentUserId)
+            .catch { error ->
+                Log.w(TAG, "Error observing my followers", unwrapFirestoreError(error))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val myFollowingState: StateFlow<List<UserFollow>> =
+        repository.observeFollowing(currentUserId)
+            .catch { error ->
+                Log.w(TAG, "Error observing my following", unwrapFirestoreError(error))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
 
     val unreadAlertsState: StateFlow<List<UserAlert>> =
         repository.observeMyUnreadAlerts(currentUserId)
@@ -1600,6 +1625,22 @@ class MainViewModel(
             repository.closeMySupportTicket(ticketId)
                 .onSuccess { _snackbarEvents.tryEmit("Support ticket marked as resolved") }
                 .onFailure { err -> _snackbarEvents.tryEmit(err.message ?: "Could not close ticket") }
+        }
+    }
+
+    fun updateBio(newBio: String, onSaved: () -> Unit = {}) {
+        viewModelScope.launch {
+            val profile = effectiveMyProfile()
+            repository.updateUserBio(
+                bio = newBio,
+                currentProfile = profile,
+                currentStaffTier = staffCapabilities.value.tier
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Bio updated")
+                onSaved()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update bio")
+            }
         }
     }
 

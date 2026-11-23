@@ -515,6 +515,17 @@
         "status", "assignedStaffId", "assignedStaffName", "staffResponse",
         "createdAt", "updatedAt"
       ]
+    },
+    "UserFollow": {
+      "title": "UserFollow",
+      "description": "Directed follow edge (followerId -> followingId) powering live Followers and Following counts on user profiles.",
+      "type": "object",
+      "properties": {
+        "followerId": { "type": "string", "description": "UID of the user who follows." },
+        "followingId": { "type": "string", "description": "UID of the user being followed." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["followerId", "followingId", "createdAt"]
     }
   },
   "firestore": {
@@ -601,6 +612,10 @@
     "/supportTickets/{ticketId}": {
       "schema": { "$ref": "#/entities/SupportTicket" },
       "description": "User support tickets managed by Admin and Support staff."
+    },
+    "/userFollows/{followId}": {
+      "schema": { "$ref": "#/entities/UserFollow" },
+      "description": "Directed follower -> following edges keyed by {followerId}__{followingId}."
     }
   }
 }

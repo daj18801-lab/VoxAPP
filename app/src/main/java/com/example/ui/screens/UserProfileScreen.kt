@@ -129,6 +129,9 @@ fun UserProfileScreen(
 
     val entryState by viewModel.directoryEntryState.collectAsStateWithLifecycle()
     val postsState by viewModel.postsState.collectAsStateWithLifecycle()
+    val followers by viewModel.followersState.collectAsStateWithLifecycle()
+    val following by viewModel.followingState.collectAsStateWithLifecycle()
+    val isUpdatingFollow by viewModel.isUpdatingFollow.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedProfileTab by remember { mutableIntStateOf(0) } // 0 = Posts, 1 = Photos
     var showFullAvatar by remember { mutableStateOf(false) }
@@ -149,6 +152,9 @@ fun UserProfileScreen(
     val posts = (postsState as? UiState.Success)?.data.orEmpty()
     val photoPosts = remember(posts) { posts.filter { it.imageBase64.isNotBlank() } }
     val isSelf = viewModel.currentUserId == viewModel.targetUserId
+    val isFollowing = remember(followers, viewModel.currentUserId) {
+        followers.any { it.followerId == viewModel.currentUserId }
+    }
     val tier = entry?.tierEnum() ?: StaffTier.USER
     val isSubscribed = activeSubscription?.isCurrentlyActive() == true
     val subscribedCreatorIds = remember(isSubscribed, viewModel.targetUserId) {
@@ -301,12 +307,88 @@ fun UserProfileScreen(
                                             )
                                         }
 
-                                        if (user.bio.isNotBlank()) {
-                                            Text(
-                                                text = user.bio,
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
+                                        // Dedicated Bio Section
+                                        Surface(
+                                            shape = RoundedCornerShape(14.dp),
+                                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("user_profile_bio_section")
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "Bio",
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                                Text(
+                                                    text = user.bio.ifBlank { "No bio added yet." },
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = if (user.bio.isBlank()) {
+                                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurface
+                                                    },
+                                                    modifier = Modifier.testTag("user_profile_bio_text")
+                                                )
+                                            }
+                                        }
+
+                                        // Followers & Following Counts Row
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(14.dp),
+                                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("user_profile_followers_count")
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 8.dp),
+                                                    horizontalAlignment = Alignment.CenterHorizontally
+                                                ) {
+                                                    Text(
+                                                        text = "${followers.size}",
+                                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    )
+                                                    Text(
+                                                        text = "Followers",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            }
+                                            Surface(
+                                                shape = RoundedCornerShape(14.dp),
+                                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("user_profile_following_count")
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 8.dp),
+                                                    horizontalAlignment = Alignment.CenterHorizontally
+                                                ) {
+                                                    Text(
+                                                        text = "${following.size}",
+                                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    )
+                                                    Text(
+                                                        text = "Following",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            }
                                         }
 
                                         // Quick Stats & Pictures Button Row
@@ -382,6 +464,48 @@ fun UserProfileScreen(
                                         // Action Buttons (for other users)
                                         if (!isSelf) {
                                             Spacer(modifier = Modifier.height(2.dp))
+                                            // Follow / Following Toggle Button
+                                            if (isFollowing) {
+                                                OutlinedButton(
+                                                    onClick = { viewModel.toggleFollow(currentlyFollowing = true) },
+                                                    enabled = !isUpdatingFollow,
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(48.dp)
+                                                        .testTag("user_profile_follow_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Check,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text("Following")
+                                                }
+                                            } else {
+                                                Button(
+                                                    onClick = { viewModel.toggleFollow(currentlyFollowing = false) },
+                                                    enabled = !isUpdatingFollow,
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = MaterialTheme.colorScheme.primary,
+                                                        contentColor = Color.White
+                                                    ),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(48.dp)
+                                                        .testTag("user_profile_follow_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.PersonAdd,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text("Follow")
+                                                }
+                                            }
                                             Row(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.spacedBy(10.dp)

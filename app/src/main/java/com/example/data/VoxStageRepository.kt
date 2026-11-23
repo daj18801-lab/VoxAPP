@@ -4385,12 +4385,14 @@ class VoxStageRepository(
     }
 
     /**
-     * Toggles the signed-in user's own UID in `directThreads/{threadId}.pttEnabledUserIds`.
-     * When both users enable Push-to-Talk on the thread, live walkie-talkie audio streaming activates.
+     * Toggles Push-to-Talk in `directThreads/{threadId}.pttEnabledUserIds`.
+     * Regular users toggle only their own UID; when an Admin enables PTT (`autoEnableAllParticipants = true`),
+     * PTT is automatically enabled for all participants in the chat right away.
      */
     suspend fun setDirectThreadPttEnabled(
         thread: DirectThread,
-        enabled: Boolean
+        enabled: Boolean,
+        autoEnableAllParticipants: Boolean = false
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -4399,12 +4401,26 @@ class VoxStageRepository(
             require(!thread.hasAnyBlock()) { "Push-to-Talk is unavailable in a blocked chat." }
             require(!thread.isUserKicked(uid)) { "You can no longer use Push-to-Talk in this chat." }
             val currentList = thread.pttEnabledUserIds
-            val updatedList = if (enabled) {
-                if (currentList.contains(uid)) return Result.success(Unit)
-                currentList + uid
-            } else {
-                if (!currentList.contains(uid)) return Result.success(Unit)
-                currentList.filter { it != uid }
+            val updatedList = when {
+                enabled && autoEnableAllParticipants -> {
+                    val allParticipants = thread.participantIds.filter { it.isNotBlank() }.distinct()
+                    if (allParticipants.isNotEmpty() && currentList.containsAll(allParticipants)) {
+                        return Result.success(Unit)
+                    }
+                    allParticipants.ifEmpty { listOf(uid) }
+                }
+                !enabled && autoEnableAllParticipants -> {
+                    if (currentList.isEmpty()) return Result.success(Unit)
+                    emptyList()
+                }
+                enabled -> {
+                    if (currentList.contains(uid)) return Result.success(Unit)
+                    currentList + uid
+                }
+                else -> {
+                    if (!currentList.contains(uid)) return Result.success(Unit)
+                    currentList.filter { it != uid }
+                }
             }
             db.collection("directThreads").document(thread.id).update(
                 mapOf(
@@ -4638,6 +4654,129 @@ class VoxStageRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- PROFILE BIO QUICK UPDATE & FOLLOWERS / FOLLOWING ---
+
+    suspend fun updateUserBio(
+        bio: String,
+        currentProfile: UserProfile,
+        currentStaffTier: StaffTier
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val safeBio = bio.trim().take(200)
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "bio" to safeBio,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            syncUserDirectoryEntry(
+                userId = uid,
+                displayName = currentProfile.displayName.ifBlank { "Member" },
+                handle = currentProfile.handle.ifBlank { "member" },
+                bio = safeBio,
+                avatarColorHex = currentProfile.avatarColorHex.ifBlank { "#0088FF" },
+                photoBase64 = currentProfile.photoBase64,
+                staffTier = currentStaffTier,
+                dmPolicy = currentProfile.dmPolicyEnum()
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeFollowers(userId: String): Flow<List<UserFollow>> = flow {
+        if (userId.isBlank()) {
+            emit(emptyList())
+            return@flow
+        }
+        val query = db.collection("userFollows").whereEqualTo("followingId", userId)
+        emitAll(
+            query.snapshots()
+                .map { snapshot ->
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(UserFollow::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    }
+                }
+                .catch { error ->
+                    val root = unwrapFirestoreError(error)
+                    handleFirestoreError(root, OperationType.LIST, "userFollows")
+                    throw error
+                }
+        )
+    }
+
+    fun observeFollowing(userId: String): Flow<List<UserFollow>> = flow {
+        if (userId.isBlank()) {
+            emit(emptyList())
+            return@flow
+        }
+        val query = db.collection("userFollows").whereEqualTo("followerId", userId)
+        emitAll(
+            query.snapshots()
+                .map { snapshot ->
+                    snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(UserFollow::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    }
+                }
+                .catch { error ->
+                    val root = unwrapFirestoreError(error)
+                    handleFirestoreError(root, OperationType.LIST, "userFollows")
+                    throw error
+                }
+        )
+    }
+
+    suspend fun followUser(targetUserId: String): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (targetUserId.isBlank() || targetUserId == uid) {
+            return Result.failure(IllegalArgumentException("Cannot follow this account."))
+        }
+        val followId = "${uid}__${targetUserId}"
+        val path = "userFollows/$followId"
+        return try {
+            db.collection("userFollows").document(followId).set(
+                mapOf(
+                    "followerId" to uid,
+                    "followingId" to targetUserId,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun unfollowUser(targetUserId: String): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (targetUserId.isBlank()) {
+            return Result.failure(IllegalArgumentException("Invalid user."))
+        }
+        val followId = "${uid}__${targetUserId}"
+        val path = "userFollows/$followId"
+        return try {
+            db.collection("userFollows").document(followId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
             Result.failure(e)
         }
     }

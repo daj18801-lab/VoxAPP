@@ -242,17 +242,23 @@ class DirectChatViewModel(
         }
     }
 
-    fun setPttEnabled(enabled: Boolean) {
+    fun setPttEnabled(enabled: Boolean, isAdmin: Boolean = false) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
         val peerName = thread.displayTitle(currentUserId).ifBlank { "this chat" }
         viewModelScope.launch {
-            repository.setDirectThreadPttEnabled(thread, enabled)
+            repository.setDirectThreadPttEnabled(
+                thread = thread,
+                enabled = enabled,
+                autoEnableAllParticipants = isAdmin
+            )
                 .onSuccess {
                     if (!enabled && LivePttSessionManager.activeThreadId.value == threadId) {
                         LivePttSessionManager.disconnect(appContext)
                     }
                     val otherAlreadyEnabled = thread.isOtherPttEnabled(currentUserId)
                     val msg = when {
+                        enabled && isAdmin ->
+                            "Live Push-to-Talk CONNECTED! Automatically enabled for $peerName too."
                         enabled && otherAlreadyEnabled ->
                             "Live Push-to-Talk CONNECTED with $peerName! Hold the button to stream live audio."
                         enabled ->

@@ -3,8 +3,13 @@ package com.example.media
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.example.notifications.DirectMessageNotificationPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -57,8 +62,102 @@ object LivePttSessionManager {
     private val _isAppInBackground = MutableStateFlow(false)
     val isAppInBackground: StateFlow<Boolean> = _isAppInBackground.asStateFlow()
 
+    /**
+     * Optional foreground hardware-key PTT target (e.g., an active Voice Room in Hold-to-Talk
+     * mode, or a Private Call with mutual PTT enabled).
+     */
+    data class ForegroundPttTarget(
+        val id: String,
+        val canTransmit: () -> Boolean,
+        val onSetTransmitting: (Boolean) -> Unit
+    )
+
+    @Volatile
+    private var foregroundPttTarget: ForegroundPttTarget? = null
+
+    @Volatile
+    private var activeHardwareTargetId: String? = null
+
     private var cachedMyUserId: String = ""
     private var cachedMyDisplayName: String = "Member"
+
+    fun registerForegroundPttTarget(target: ForegroundPttTarget) {
+        foregroundPttTarget = target
+    }
+
+    fun clearForegroundPttTarget(targetId: String) {
+        if (foregroundPttTarget?.id == targetId) {
+            foregroundPttTarget = null
+        }
+        if (activeHardwareTargetId == targetId) {
+            activeHardwareTargetId = null
+        }
+    }
+
+    /**
+     * Handles the hardware Volume Down key as a Push-to-Talk trigger while the app is open.
+     *
+     * Returns true if the event was consumed by an active PTT session (preventing volume change),
+     * or false to let Android handle Volume Down normally.
+     */
+    fun handleHardwarePttKey(context: Context, pressed: Boolean): Boolean {
+        val appContext = context.applicationContext
+        if (pressed && !DirectMessageNotificationPrefs.isVolumeDownPttEnabled(appContext)) {
+            return false
+        }
+
+        val target = foregroundPttTarget
+        if (pressed) {
+            if (target != null && target.canTransmit()) {
+                activeHardwareTargetId = target.id
+                target.onSetTransmitting(true)
+                return true
+            }
+            if (!_activeThreadId.value.isNullOrBlank()) {
+                val hasMic = ContextCompat.checkSelfPermission(
+                    appContext,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!hasMic) return false
+                activeHardwareTargetId = "live_dm_ptt"
+                setTransmitting(appContext, true)
+                return true
+            }
+            return false
+        } else {
+            val activeId = activeHardwareTargetId ?: return false
+            activeHardwareTargetId = null
+            if (activeId == "live_dm_ptt") {
+                setTransmitting(appContext, false)
+            } else if (target != null && target.id == activeId) {
+                target.onSetTransmitting(false)
+            } else {
+                // Safety fallback in case the screen changed while the key was held
+                setTransmitting(appContext, false)
+            }
+            return true
+        }
+    }
+
+    fun triggerPttHaptic(context: Context) {
+        runCatching {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                manager?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+            if (vibrator?.hasVibrator() == true) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(24L, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(24L)
+                }
+            }
+        }
+    }
 
     fun onAppForegrounded(context: Context) {
         _isAppInBackground.value = false
@@ -157,7 +256,7 @@ object LivePttSessionManager {
         _activePeerName.value = peerName
         _isConnecting.value = true
 
-        val manager = LiveKitRoomManager(appContext)
+        val manager = LiveKitRoomManager(appContext, forceLoudspeaker = true)
         liveKitManager = manager
 
         speakerCollectorJob?.cancel()

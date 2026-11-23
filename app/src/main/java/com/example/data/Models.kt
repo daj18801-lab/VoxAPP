@@ -876,6 +876,15 @@ data class SupportTicket(
     fun statusEnum(): SupportTicketStatus = SupportTicketStatus.fromRaw(status)
 }
 
+@Keep
+@IgnoreExtraProperties
+data class UserFollow(
+    @DocumentId val id: String = "",
+    val followerId: String = "",
+    val followingId: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+)
+
 fun formatUsdCents(cents: Long): String {
     val safe = cents.coerceAtLeast(0L)
     val dollars = safe / 100L

@@ -720,7 +720,7 @@ fun DirectChatScreen(
                                                 micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                             }
                                         }
-                                        viewModel.setPttEnabled(next)
+                                        viewModel.setPttEnabled(next, isAdmin = myStaffTier == StaffTier.ADMIN)
                                     },
                                     modifier = Modifier
                                         .size(40.dp)
@@ -1018,7 +1018,7 @@ fun DirectChatScreen(
                                             pendingMicAction = "PTT"
                                             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                         }
-                                        viewModel.setPttEnabled(true)
+                                        viewModel.setPttEnabled(true, isAdmin = myStaffTier == StaffTier.ADMIN)
                                     },
                                     shape = RoundedCornerShape(999.dp),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),

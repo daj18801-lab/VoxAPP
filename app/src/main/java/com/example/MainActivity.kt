@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -154,6 +155,7 @@ private val topDestinations = listOf(
 class MainActivity : ComponentActivity() {
     private val _pendingDmThreadId = MutableStateFlow<String?>(null)
     private val pendingDmThreadId = _pendingDmThreadId.asStateFlow()
+    private var isVolumeDownPttHeld = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -168,12 +170,58 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (event.repeatCount == 0) {
+                        if (LivePttSessionManager.handleHardwarePttKey(this, pressed = true)) {
+                            isVolumeDownPttHeld = true
+                            LivePttSessionManager.triggerPttHaptic(this)
+                            return true
+                        }
+                    } else if (isVolumeDownPttHeld) {
+                        return true
+                    }
+                }
+                KeyEvent.ACTION_UP -> {
+                    if (isVolumeDownPttHeld) {
+                        isVolumeDownPttHeld = false
+                        LivePttSessionManager.handleHardwarePttKey(this, pressed = false)
+                        return true
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun releaseVolumeDownPttIfHeld() {
+        if (isVolumeDownPttHeld) {
+            isVolumeDownPttHeld = false
+            LivePttSessionManager.handleHardwarePttKey(this, pressed = false)
+        }
+    }
+
     override fun onStart() {
         super.onStart()
         LivePttSessionManager.onAppForegrounded(this)
     }
 
+    override fun onPause() {
+        releaseVolumeDownPttIfHeld()
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) {
+            releaseVolumeDownPttIfHeld()
+        }
+    }
+
     override fun onStop() {
+        releaseVolumeDownPttIfHeld()
         super.onStop()
         LivePttSessionManager.onAppBackgrounded(this)
     }
@@ -320,6 +368,8 @@ private fun AuthenticatedVoxStageApp(
     val allUsers by mainViewModel.allUsersState.collectAsStateWithLifecycle()
     val allAlerts by mainViewModel.allAlertsState.collectAsStateWithLifecycle()
     val supportTickets by mainViewModel.supportTicketsState.collectAsStateWithLifecycle()
+    val myFollowers by mainViewModel.myFollowersState.collectAsStateWithLifecycle()
+    val myFollowing by mainViewModel.myFollowingState.collectAsStateWithLifecycle()
     val appConfig by mainViewModel.appConfigState.collectAsStateWithLifecycle()
     val pendingRoomTransfer by mainViewModel.pendingRoomTransferState.collectAsStateWithLifecycle()
     val searchQuery by mainViewModel.searchQuery.collectAsStateWithLifecycle()
@@ -873,6 +923,8 @@ private fun AuthenticatedVoxStageApp(
                                     userEmail = initialEmail,
                                     staffCapabilities = staffCapabilities,
                                     friendsCount = acceptedFriendsCount,
+                                    followersCount = myFollowers.size,
+                                    followingCount = myFollowing.size,
                                     myPostsState = myPostsState,
                                     mySubscriptions = mySubscriptions,
                                     myTransactions = myTransactions,
@@ -908,6 +960,7 @@ private fun AuthenticatedVoxStageApp(
                                     onKickPaidDmMember = mainViewModel::kickPaidDmMember,
                                     onRequestAgeVerification = { showAgeVerificationDialog = true },
                                     onSaveProfile = mainViewModel::updateProfile,
+                                    onSaveBio = mainViewModel::updateBio,
                                     onSignOut = {
                                         scope.launch {
                                             mainViewModel.setOnlinePresenceNow(false)

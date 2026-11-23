@@ -2772,6 +2772,106 @@ test("Users can sync acceptedFriendIds on their own userDirectory document for f
   );
 });
 
+// 29. USER FOLLOWS (Followers & Following counts)
+test("Users can follow and unfollow others via userFollows; cannot spoof or self-follow", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(3000);
+  const followId = `${ALICE_UID}__${BOB_UID}`;
+
+  // Alice follows Bob
+  await assertSucceeds(
+    aliceDb.collection("userFollows").doc(followId).set({
+      followerId: ALICE_UID,
+      followingId: BOB_UID,
+      createdAt: ts,
+    })
+  );
+
+  // Anyone can read followers/following counts
+  await assertSucceeds(
+    bobDb.collection("userFollows").where("followingId", "==", BOB_UID).get()
+  );
+  await assertSucceeds(
+    aliceDb.collection("userFollows").where("followerId", "==", ALICE_UID).get()
+  );
+
+  // Alice CANNOT follow herself
+  await assertFails(
+    aliceDb.collection("userFollows").doc(`${ALICE_UID}__${ALICE_UID}`).set({
+      followerId: ALICE_UID,
+      followingId: ALICE_UID,
+      createdAt: ts,
+    })
+  );
+
+  // Bob CANNOT spoof a follow on Alice's behalf or delete Alice's follow
+  await assertFails(
+    bobDb.collection("userFollows").doc(`${ALICE_UID}__charlie_999`).set({
+      followerId: ALICE_UID,
+      followingId: "charlie_999",
+      createdAt: ts,
+    })
+  );
+  await assertFails(bobDb.collection("userFollows").doc(followId).delete());
+
+  // Alice can unfollow Bob
+  await assertSucceeds(aliceDb.collection("userFollows").doc(followId).delete());
+});
+
+// 30. ADMIN AUTO-ENABLES PTT FOR USER IN PRIVATE CHAT
+test("Admin enabling PTT in a private chat automatically enables it for the other participant too", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const ts = pastDate(5000);
+  const threadId = `${ADMIN_UID}_${ALICE_UID}`;
+
+  await assertSucceeds(
+    adminDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ADMIN_UID, ALICE_UID],
+      userAId: ADMIN_UID,
+      userAName: "VoxStage Admin",
+      userAColorHex: "#D31B2E",
+      userATier: "ADMIN",
+      userBId: ALICE_UID,
+      userBName: "Alice",
+      userBColorHex: "#1877F2",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Regular user Alice CANNOT auto-enable PTT for both participants
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [ADMIN_UID, ALICE_UID],
+      updatedAt: pastDate(3000),
+    })
+  );
+
+  // Admin CAN enable PTT for both Admin and Alice automatically
+  await assertSucceeds(
+    adminDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [ADMIN_UID, ALICE_UID],
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Admin CAN turn off PTT for the chat
+  await assertSucceeds(
+    adminDb.collection("directThreads").doc(threadId).update({
+      pttEnabledUserIds: [],
+      updatedAt: pastDate(1000),
+    })
+  );
+});
+
 
 
 

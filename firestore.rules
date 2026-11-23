@@ -678,6 +678,19 @@ service cloud.firestore {
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
+    function isValidUserFollow(data) {
+      return data.keys().hasAll([
+               'followerId', 'followingId', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'followerId', 'followingId', 'createdAt'
+             ]) &&
+             data.followerId is string && isValidId(data.followerId) &&
+             data.followingId is string && isValidId(data.followingId) &&
+             data.followerId != data.followingId &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
     function isValidDmAccessPass(data) {
       return data.keys().hasAll([
                'senderId', 'senderName', 'recipientId', 'recipientName',
@@ -1033,11 +1046,16 @@ service cloud.firestore {
           oldData.lastAlertSenderId != request.auth.uid ||
           (request.time.toMillis() - oldData.lastAlertAtMillis) >= 300000)) ||
         // Action 6: Participant toggles their own UID in pttEnabledUserIds for live walkie-talkie PTT
+        // (Admins automatically enable/disable PTT for all participants in the private chat)
         (newData.participantIds == oldData.participantIds &&
          !hasAnyThreadBlock(oldData) &&
          !isKickedFromThread(oldData, request.auth.uid) &&
          diffKeys.hasOnly(['pttEnabledUserIds', 'updatedAt']) &&
          (
+           (isAdmin() &&
+            ((newData.pttEnabledUserIds.size() == oldData.participantIds.size() &&
+              newData.pttEnabledUserIds.hasAll(oldData.participantIds)) ||
+             newData.pttEnabledUserIds.size() == 0)) ||
            (request.auth.uid in newData.pttEnabledUserIds &&
             (!('pttEnabledUserIds' in oldData)
               ? newData.pttEnabledUserIds.size() == 1
@@ -1889,6 +1907,22 @@ service cloud.firestore {
                        );
 
       allow delete: if isSignedIn() && isValidId(ticketId) && isAdmin();
+    }
+
+    // --- 13. USER FOLLOWS (Followers & Following Relationships) ---
+    match /userFollows/{followId} {
+      allow get, list: if true;
+
+      allow create: if isSignedIn() &&
+                       followId.size() >= 4 && followId.size() <= 260 &&
+                       followId == request.auth.uid + '__' + incoming().followingId &&
+                       incoming().followerId == request.auth.uid &&
+                       isValidUserFollow(incoming());
+
+      allow update: if false;
+
+      allow delete: if isSignedIn() &&
+                       (existing().followerId == request.auth.uid || isAdmin());
     }
   }
 }
