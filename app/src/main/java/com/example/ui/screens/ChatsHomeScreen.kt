@@ -265,29 +265,11 @@ fun ChatsHomeScreen(
                             StaffTierBadge(tier = staffCapabilities.tier)
                         }
 
-                        // Right: Quick + Post, Add Friends + Live Rooms quick jump
+                        // Right: Add Friends + Live Rooms quick jump
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Surface(
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(44.dp)
-                            ) {
-                                IconButton(
-                                    onClick = { showQuickCreateSheet = true },
-                                    modifier = Modifier.testTag("chats_quick_create_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Add,
-                                        contentDescription = "Quick post, snap, or picture to profile",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                            }
-
                             Box {
                                 Surface(
                                     shape = CircleShape,
@@ -605,22 +587,42 @@ fun ChatsHomeScreen(
             }
         }
 
-        // Snapchat-style Floating New Chat FAB
+        // Snapchat-style Bottom-Center Quick Create (+) Button
         FloatingActionButton(
-            onClick = { showNewChatSheet = true },
+            onClick = { showQuickCreateSheet = true },
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = Color.White,
             shape = CircleShape,
             modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp)
+                .size(62.dp)
+                .border(3.dp, MaterialTheme.colorScheme.surface, CircleShape)
+                .testTag("chats_quick_create_button")
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Add,
+                contentDescription = "Quick post, snap, or picture to profile",
+                modifier = Modifier.size(30.dp)
+            )
+        }
+
+        // Snapchat-style Floating New Chat FAB
+        FloatingActionButton(
+            onClick = { showNewChatSheet = true },
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.primary,
+            shape = CircleShape,
+            modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 18.dp, bottom = 18.dp)
-                .size(58.dp)
+                .size(54.dp)
                 .testTag("fab_new_private_chat")
         ) {
             Icon(
                 imageVector = Icons.Rounded.ChatBubble,
                 contentDescription = "Start new private chat",
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(23.dp)
             )
         }
     }
