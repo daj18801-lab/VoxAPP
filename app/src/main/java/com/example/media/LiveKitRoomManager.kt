@@ -57,3 +57,96 @@ class LiveKitRoomManager(private val appContext: Context) {
                     is RoomEvent.TrackSubscribed -> {
                         val videoTrack = event.track as? RemoteVideoTrack
                         val identity = event.participant.identity?.value
+                                                if (videoTrack != null && identity != null) {
+                            _remoteVideoTracks.update { it + (identity to videoTrack) }
+                        }
+                    }
+                    is RoomEvent.TrackUnsubscribed -> {
+                        val identity = event.participant.identity?.value
+                        if (event.track is RemoteVideoTrack && identity != null) {
+                            _remoteVideoTracks.update { it - identity }
+                        }
+                    }
+                    is RoomEvent.ParticipantDisconnected -> {
+                        val identity = event.participant.identity?.value
+                        if (identity != null) {
+                            _remoteVideoTracks.update { it - identity }
+                        }
+                    }
+                    is RoomEvent.Disconnected -> {
+                        _isConnected.value = false
+                        _localVideoTrack.value = null
+                        _remoteVideoTracks.value = emptyMap()
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    suspend fun setMicEnabled(enabled: Boolean) {
+        runCatching {
+            room.localParticipant.setMicrophoneEnabled(enabled)
+        }.onFailure {
+            Log.w(TAG, "Failed to toggle mic: ${it.message}")
+        }
+    }
+
+    suspend fun setCameraEnabled(enabled: Boolean) {
+        runCatching {
+            room.localParticipant.setCameraEnabled(enabled)
+            val pub = room.localParticipant.getTrackPublication(Track.Source.CAMERA)
+            _localVideoTrack.value = if (enabled) pub?.track as? LocalVideoTrack else null
+        }.onFailure {
+            Log.w(TAG, "Failed to toggle camera: ${it.message}")
+        }
+    }
+
+    fun disconnect() {
+        eventJob?.cancel()
+        eventJob = null
+        runCatching { room.disconnect() }
+        _isConnected.value = false
+        _localVideoTrack.value = null
+        _remoteVideoTracks.value = emptyMap()
+    }
+
+    private suspend fun fetchTokenFromBackend(
+        roomName: String,
+        identity: String,
+        name: String
+    ): String = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val url = URL(TOKEN_ENDPOINT_URL)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("X-Sandbox-ID", SANDBOX_ID)
+            doOutput = true
+            connectTimeout = 10_000
+            readTimeout = 10_000
+        }
+        val payload = JSONObject().apply {
+            put("room_name", roomName)
+            put("participant_name", name)
+            put("participant_identity", identity)
+        }.toString()
+        conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            val errBody = conn.errorStream?.bufferedReader()?.readText().orEmpty()
+            throw IllegalStateException("Token server returned HTTP $code: $errBody")
+        }
+        val body = conn.inputStream.bufferedReader().readText()
+        val json = JSONObject(body)
+        if (json.has("participantToken")) json.getString("participantToken") else json.getString("token")
+    }
+
+    companion object {
+        private const val TAG = "LiveKitRoomManager"
+        private const val LIVEKIT_URL = "wss://vox-r29t0v8w.livekit.cloud"
+        private const val SANDBOX_ID = "vox-2qnude"
+        private const val TOKEN_ENDPOINT_URL = "https://vox-2qnude.sandbox.livekit.io/api/token"
+    }
+}
+
