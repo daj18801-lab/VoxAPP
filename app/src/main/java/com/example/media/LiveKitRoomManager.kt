@@ -2,6 +2,7 @@ package com.example.media
 
 import android.content.Context
 import android.util.Log
+import io.livekit.android.ConnectOptions
 import io.livekit.android.LiveKit
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
@@ -37,15 +38,15 @@ class LiveKitRoomManager(private val appContext: Context) {
     private val _remoteVideoTracks = MutableStateFlow(emptyMap<String, RemoteVideoTrack>())
     val remoteVideoTracks = _remoteVideoTracks.asStateFlow()
 
-        suspend fun connectToRoom(
+    suspend fun connectToRoom(
         roomName: String,
         participantIdentity: String,
         participantName: String
     ): Result<Unit> = runCatching {
         if (_isConnected.value) return@runCatching
-        val token = fetchTokenFromBackend(roomName, participantIdentity, participantName)
+        val (serverUrl, token) = fetchConnectionDetails(roomName, participantIdentity, participantName)
         startObservingRoomEvents()
-        room.connect(LIVEKIT_URL, token)
+        room.connect(serverUrl, token, ConnectOptions(autoSubscribe = true))
         _isConnected.value = true
     }
 
@@ -111,11 +112,11 @@ class LiveKitRoomManager(private val appContext: Context) {
         _remoteVideoTracks.value = emptyMap()
     }
 
-    private suspend fun fetchTokenFromBackend(
+    private suspend fun fetchConnectionDetails(
         roomName: String,
         identity: String,
         name: String
-    ): String = kotlinx.coroutines.withContext(Dispatchers.IO) {
+    ): Pair<String, String> = kotlinx.coroutines.withContext(Dispatchers.IO) {
         val url = URL(TOKEN_ENDPOINT_URL)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -139,7 +140,13 @@ class LiveKitRoomManager(private val appContext: Context) {
         }
         val body = conn.inputStream.bufferedReader().readText()
         val json = JSONObject(body)
-        if (json.has("participantToken")) json.getString("participantToken") else json.getString("token")
+        val serverUrl = json.optString("serverUrl").ifBlank { LIVEKIT_URL }
+        val token = if (json.has("participantToken")) {
+            json.getString("participantToken")
+        } else {
+            json.getString("token")
+        }
+        serverUrl to token
     }
 
     companion object {
@@ -149,4 +156,3 @@ class LiveKitRoomManager(private val appContext: Context) {
         private const val TOKEN_ENDPOINT_URL = "https://cloud-api.livekit.io/api/sandbox/connection-details"
     }
 }
-
