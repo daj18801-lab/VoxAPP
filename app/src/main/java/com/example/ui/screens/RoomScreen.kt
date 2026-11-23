@@ -303,7 +303,7 @@ fun RoomScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                                        .padding(horizontaLIVE =10.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
@@ -315,7 +315,7 @@ fun RoomScreen(
                                             imageVector = Icons.Rounded.VisibilityOff,
                                             contentDescription = "Invisible mode active",
                                             tint = usernameColor(staffCapabilities.tier),
-                                            modifier = Modifier.size(18.dp)
+                                            modifier = Modifier.size(16.dp)
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Text(
@@ -349,7 +349,7 @@ fun RoomScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
@@ -357,7 +357,7 @@ fun RoomScreen(
                                         imageVector = Icons.Rounded.Mic,
                                         contentDescription = "Admin mic priority",
                                         tint = adminRed,
-                                        modifier = Modifier.size(18.dp)
+                                        modifier = Modifier.size(13.dp)
                                     )
                                     Text(
                                         text = if (staffCapabilities.isAdmin) {
@@ -774,7 +774,7 @@ private fun RoomTopBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 8.dp),
+                .padding(horizontaLIVE=6.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
@@ -915,7 +915,7 @@ private fun StageSection(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = modifier
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
