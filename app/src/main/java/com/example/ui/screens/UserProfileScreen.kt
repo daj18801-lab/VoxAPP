@@ -23,11 +23,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.CardMembership
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -40,6 +42,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,8 +59,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.CreatorSubscription
 import com.example.data.DirectoryEntry
 import com.example.data.Friendship
+import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
@@ -68,6 +73,7 @@ import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.showTopMessage
 import com.example.ui.components.usernameColor
+import com.example.ui.theme.SafetyEmerald
 import com.example.viewmodel.UserProfileViewModel
 
 @Composable
@@ -75,11 +81,17 @@ fun UserProfileScreen(
     viewModel: UserProfileViewModel,
     staffCapabilities: StaffCapabilities,
     friendship: Friendship?,
+    myPointsBalance: Long,
+    activeSubscription: CreatorSubscription?,
+    isProcessingWallet: Boolean,
     onBack: () -> Unit,
     onMessageUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
     onSendFriendRequest: (DirectoryEntry) -> Unit,
     onAcceptFriendRequest: (Friendship) -> Unit,
-    onRemoveOrDeclineFriendship: (Friendship) -> Unit
+    onRemoveOrDeclineFriendship: (Friendship) -> Unit,
+    onUnlockPost: (ProfilePost, onInsufficientPoints: () -> Unit) -> Unit,
+    onSubscribeCreator: (creatorId: String, creatorName: String) -> Unit,
+    onOpenBuyPoints: () -> Unit
 ) {
     BackHandler(onBack = onBack)
 
@@ -87,6 +99,7 @@ fun UserProfileScreen(
     val postsState by viewModel.postsState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var showFullAvatar by remember { mutableStateOf(false) }
+    var showBuyPointsDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         viewModel.snackbarEvents.collect { msg ->
@@ -98,6 +111,10 @@ fun UserProfileScreen(
     val posts = (postsState as? UiState.Success)?.data.orEmpty()
     val isSelf = viewModel.currentUserId == viewModel.targetUserId
     val tier = entry?.tierEnum() ?: StaffTier.USER
+    val isSubscribed = activeSubscription?.isCurrentlyActive() == true
+    val subscribedCreatorIds = remember(isSubscribed, viewModel.targetUserId) {
+        if (isSubscribed) setOf(viewModel.targetUserId) else emptySet()
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -388,6 +405,62 @@ fun UserProfileScreen(
                                                     }
                                                 }
                                             }
+
+                                            // $15/mo Creator Subscription CTA (unlocks all locked photos)
+                                            if (isSubscribed) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    color = SafetyEmerald.copy(alpha = 0.14f),
+                                                    border = BorderStroke(1.dp, SafetyEmerald.copy(alpha = 0.45f)),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .testTag("user_profile_subscribed_badge")
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                                        horizontalArrangement = Arrangement.Center,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.CardMembership,
+                                                            contentDescription = null,
+                                                            tint = SafetyEmerald,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Text(
+                                                            text = "Subscribed · All Locked Photos Unlocked (${activeSubscription?.daysRemaining() ?: 30}d left)",
+                                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                                            color = SafetyEmerald
+                                                        )
+                                                    }
+                                                }
+                                            } else {
+                                                Button(
+                                                    onClick = { onSubscribeCreator(user.userId, user.displayName) },
+                                                    enabled = !isProcessingWallet,
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = MaterialTheme.colorScheme.secondary,
+                                                        contentColor = Color.White
+                                                    ),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(48.dp)
+                                                        .testTag("user_profile_subscribe_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.CardMembership,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = "Subscribe \$15/mo · Unlock All Locked Photos",
+                                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -462,12 +535,24 @@ fun UserProfileScreen(
                             }
                         } else {
                             items(posts, key = { it.id }) { post ->
+                                val unlocked = post.isUnlockedFor(
+                                    uid = viewModel.currentUserId,
+                                    subscribedCreatorIds = subscribedCreatorIds
+                                )
                                 ProfilePostCard(
                                     post = post,
                                     currentUserId = viewModel.currentUserId,
                                     canDelete = post.authorId == viewModel.currentUserId || staffCapabilities.isStaff,
                                     latestAuthorPhotoBase64 = entry?.photoBase64,
+                                    isUnlocked = unlocked,
+                                    isProcessingUnlock = isProcessingWallet,
                                     onAuthorClick = null,
+                                    onUnlockPost = {
+                                        onUnlockPost(post) { showBuyPointsDialog = true }
+                                    },
+                                    onSubscribeCreator = {
+                                        onSubscribeCreator(post.authorId, post.authorName)
+                                    },
                                     onToggleLike = { viewModel.toggleLikePost(post) },
                                     onDelete = { viewModel.deletePost(post) }
                                 )
@@ -494,6 +579,34 @@ fun UserProfileScreen(
             photoBase64 = entry?.photoBase64.orEmpty(),
             contentDescription = "${entry?.displayName.orEmpty()} profile picture",
             onDismiss = { showFullAvatar = false }
+        )
+    }
+
+    if (showBuyPointsDialog) {
+        AlertDialog(
+            onDismissRequest = { showBuyPointsDialog = false },
+            title = { Text("Need More Points") },
+            text = {
+                Text(
+                    "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). You can buy points in Profile Settings or subscribe for \$15/month to unlock all photos."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBuyPointsDialog = false
+                        onOpenBuyPoints()
+                    },
+                    modifier = Modifier.testTag("dialog_go_buy_points")
+                ) {
+                    Text("Buy Points")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBuyPointsDialog = false }) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 }

@@ -159,6 +159,12 @@ class RoomViewModel(
                     stopHardwareCapture()
                     liveKitManager.disconnect()
                     _roomExitSignal.tryEmit("You have been banned from this room.")
+                } else if (room.isBouncedOut(currentUserId) && !caps.isAdmin) {
+                    isLeavingVoluntarily = true
+                    stopHardwareCapture()
+                    liveKitManager.disconnect()
+                    val left = room.remainingBounceLabel(currentUserId)
+                    _roomExitSignal.tryEmit("You were bounced from this room and cannot enter for $left.")
                 } else if (room.status == "CLOSED") {
                     isLeavingVoluntarily = true
                     stopHardwareCapture()
@@ -674,7 +680,12 @@ class RoomViewModel(
                 actorTier = _staffCapabilities.value.tier,
                 reason = reason
             ).onSuccess {
-                _events.tryEmit("Bounced $targetName from the room")
+                val msg = if (_staffCapabilities.value.isStaff) {
+                    "Bounced $targetName from the room (locked out for 24 hours)"
+                } else {
+                    "Bounced $targetName from the room"
+                }
+                _events.tryEmit(msg)
             }.onFailure { err ->
                 _events.tryEmit(err.message ?: "Could not bounce user")
             }

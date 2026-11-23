@@ -1,6 +1,13 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -27,6 +35,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.CallEnd
+import androidx.compose.material.icons.rounded.Cameraswitch
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -44,33 +61,44 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.DirectMessage
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
+import com.example.media.LiveKitVideoView
+import com.example.notifications.DirectMessageNotificationHelper
+import com.example.notifications.VoxStageNotificationState
+import com.example.ui.components.FullScreenPhotoDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopSnackbarOverlay
+import com.example.ui.components.encodeBitmapToBase64Jpeg
+import com.example.ui.components.encodeImageUriToBase64Jpeg
 import com.example.ui.components.formatTimestampShort
+import com.example.ui.components.rememberBase64ImageBitmap
 import com.example.ui.components.showTopMessage
 import com.example.ui.components.usernameColor
-import com.example.notifications.DirectMessageNotificationHelper
-import com.example.notifications.VoxStageNotificationState
+import com.example.ui.theme.LiveCoral
+import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SnapBlue
 import com.example.viewmodel.DirectChatViewModel
+import kotlinx.coroutines.launch
 
 @Composable
 fun DirectChatScreen(
@@ -84,13 +112,129 @@ fun DirectChatScreen(
     BackHandler(onBack = onBack)
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val threadState by viewModel.threadState.collectAsStateWithLifecycle()
     val messagesState by viewModel.messagesState.collectAsStateWithLifecycle()
     val isSending by viewModel.isSending.collectAsStateWithLifecycle()
+    val isInCall by viewModel.isInCall.collectAsStateWithLifecycle()
+    val isConnectingCall by viewModel.isConnectingCall.collectAsStateWithLifecycle()
+    val isMicActive by viewModel.isMicActive.collectAsStateWithLifecycle()
+    val isCamActive by viewModel.isCamActive.collectAsStateWithLifecycle()
+    val useFrontCamera by viewModel.useFrontCamera.collectAsStateWithLifecycle()
+    val localVideoTrack by viewModel.liveKitManager.localVideoTrack.collectAsStateWithLifecycle()
+    val remoteVideoTracks by viewModel.liveKitManager.remoteVideoTracks.collectAsStateWithLifecycle()
+
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
 
     var composerText by remember { mutableStateOf("") }
+    var draftSnapBase64 by remember { mutableStateOf("") }
+    var isEncodingSnap by remember { mutableStateOf(false) }
+    var fullScreenPhotoBase64 by remember { mutableStateOf<String?>(null) }
+    var pendingCameraAction by remember { mutableStateOf<String?>(null) } // "VIDEO_CALL" or "SNAP_PHOTO"
+
+    val cameraSnapLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bitmap ->
+        if (bitmap != null) {
+            scope.launch {
+                isEncodingSnap = true
+                val encoded = encodeBitmapToBase64Jpeg(bitmap)
+                isEncodingSnap = false
+                if (!encoded.isNullOrBlank()) {
+                    draftSnapBase64 = encoded
+                } else {
+                    snackbarHostState.showTopMessage("Could not prepare snapped photo.")
+                }
+            }
+        }
+    }
+
+    val galleryPhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                isEncodingSnap = true
+                val encoded = encodeImageUriToBase64Jpeg(
+                    context = context,
+                    uri = uri,
+                    maxDimensionPx = 720,
+                    squareCrop = false,
+                    maxBase64Chars = 360_000
+                )
+                isEncodingSnap = false
+                if (!encoded.isNullOrBlank()) {
+                    draftSnapBase64 = encoded
+                }
+            }
+        }
+    }
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.toggleCallMic(userProfile.displayName)
+        } else {
+            scope.launch { snackbarHostState.showTopMessage("Microphone permission is needed for private voice calls.") }
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val action = pendingCameraAction
+        pendingCameraAction = null
+        if (granted) {
+            when (action) {
+                "VIDEO_CALL" -> viewModel.toggleCallVideo(userProfile.displayName)
+                "SNAP_PHOTO" -> cameraSnapLauncher.launch(null)
+            }
+        } else {
+            scope.launch { snackbarHostState.showTopMessage("Camera permission is required for video calls and snaps.") }
+        }
+    }
+
+    fun requestMicCallToggle() {
+        if (!myStaffTier.isAdmin() && userProfile.disableMic) {
+            scope.launch { snackbarHostState.showTopMessage("Microphone access is disabled on your account.") }
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            viewModel.toggleCallMic(userProfile.displayName)
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun requestVideoCallToggle() {
+        if (!myStaffTier.isAdmin() && userProfile.disableVideo) {
+            scope.launch { snackbarHostState.showTopMessage("Video calling is disabled on your account.") }
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            viewModel.toggleCallVideo(userProfile.displayName)
+        } else {
+            pendingCameraAction = "VIDEO_CALL"
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    fun requestCameraSnap() {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            cameraSnapLauncher.launch(null)
+        } else {
+            pendingCameraAction = "SNAP_PHOTO"
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
 
     DisposableEffect(viewModel.threadId) {
         VoxStageNotificationState.activeDmThreadId = viewModel.threadId
@@ -124,229 +268,616 @@ fun DirectChatScreen(
     val otherName = thread?.otherName(viewModel.currentUserId) ?: "Private Chat"
     val otherColorHex = thread?.otherColorHex(viewModel.currentUserId) ?: "#0088FF"
     val otherTier = thread?.otherTier(viewModel.currentUserId) ?: StaffTier.USER
+    val remoteVideoTrack = remoteVideoTracks.values.firstOrNull()
+    val canSend = (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.surface,
-        topBar = {
-            Surface(
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 2.dp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-            ) {
-                Column {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("dm_back_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                                contentDescription = "Back to Chats",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        val otherUid = thread?.otherUserId(viewModel.currentUserId).orEmpty()
+            topBar = {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 2.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                ) {
+                    Column {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .weight(1f)
-                                .clickable(enabled = otherUid.isNotBlank()) {
-                                    onOpenUserProfile(otherUid)
-                                }
-                                .testTag("dm_header_profile_link")
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            SpeakingAvatarCircle(
-                                displayName = otherName,
-                                colorHex = otherColorHex,
-                                speakingLevel = 0f,
-                                micActive = false,
-                                size = 42.dp,
-                                photoBase64 = otherPhotoBase64
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
+                            IconButton(
+                                onClick = onBack,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("dm_back_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                    contentDescription = "Back to Chats",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            val otherUid = thread?.otherUserId(viewModel.currentUserId).orEmpty()
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable(enabled = otherUid.isNotBlank()) {
+                                        onOpenUserProfile(otherUid)
+                                    }
+                                    .testTag("dm_header_profile_link")
+                            ) {
+                                SpeakingAvatarCircle(
+                                    displayName = otherName,
+                                    colorHex = otherColorHex,
+                                    speakingLevel = 0f,
+                                    micActive = isInCall && isMicActive,
+                                    size = 40.dp,
+                                    photoBase64 = otherPhotoBase64
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Text(
+                                            text = otherName,
+                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = usernameColor(otherTier),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        StaffTierBadge(tier = otherTier)
+                                    }
                                     Text(
-                                        text = otherName,
-                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = usernameColor(otherTier),
+                                        text = if (isInCall) "Live Call Active" else "Private Chat · Tap profile",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isInCall) SafetyEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                    StaffTierBadge(tier = otherTier)
                                 }
-                                Text(
-                                    text = "Private Message · Tap to view profile",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
                             }
-                        }
-                    }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                }
-            }
-        },
-        bottomBar = {
-            Surface(
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 4.dp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .imePadding()
-            ) {
-                Column {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = composerText,
-                            onValueChange = { composerText = it.take(500) },
-                            placeholder = { Text(stringResource(R.string.hint_send_dm)) },
-                            singleLine = false,
-                            maxLines = 3,
-                            shape = RoundedCornerShape(999.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                unfocusedBorderColor = Color.Transparent
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("dm_message_input")
-                        )
 
-                        Surface(
-                            shape = CircleShape,
-                            color = if (composerText.isNotBlank() && !isSending) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.primaryContainer
-                            },
-                            modifier = Modifier.size(48.dp)
-                        ) {
+                            // Private Chat Voice Mic Call Button
                             IconButton(
-                                onClick = {
-                                    val toSend = composerText.trim()
-                                    if (toSend.isNotEmpty()) {
-                                        composerText = ""
-                                        viewModel.sendMessage(
-                                            senderName = userProfile.displayName,
-                                            senderTier = myStaffTier,
-                                            text = toSend
+                                onClick = ::requestMicCallToggle,
+                                enabled = !isConnectingCall,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("dm_mic_call_button")
+                            ) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = if (isMicActive) SafetyEmerald else MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = if (isMicActive) Icons.Rounded.Mic else Icons.Rounded.MicOff,
+                                            contentDescription = if (isMicActive) "Mute private call mic" else "Start private voice mic",
+                                            tint = if (isMicActive) Color.White else MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(19.dp)
                                         )
                                     }
+                                }
+                            }
+
+                            // Private Chat Live Video Call Button
+                            IconButton(
+                                onClick = ::requestVideoCallToggle,
+                                enabled = !isConnectingCall,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("dm_video_call_button")
+                            ) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = if (isCamActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = if (isCamActive) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
+                                            contentDescription = if (isCamActive) "Turn off private video" else "Start private video call",
+                                            tint = if (isCamActive) Color.White else MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(19.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
+            },
+            bottomBar = {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 4.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .imePadding()
+                ) {
+                    Column {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                        // Draft Snap Picture Preview Strip
+                        if (isEncodingSnap || draftSnapBase64.isNotBlank()) {
+                            val draftBmp = rememberBase64ImageBitmap(draftSnapBase64)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                if (isEncodingSnap) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(22.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "Preparing snap picture…",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else if (draftBmp != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(64.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    ) {
+                                        Image(
+                                            bitmap = draftBmp,
+                                            contentDescription = "Draft snap preview",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Snap ready to send",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "Add a caption or tap Send",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { draftSnapBase64 = "" },
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("dm_remove_draft_snap")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Close,
+                                            contentDescription = "Remove snapped photo",
+                                            tint = LiveCoral
+                                        )
+                                    }
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            // Snap Picture with Camera
+                            IconButton(
+                                onClick = ::requestCameraSnap,
+                                enabled = !isSending && !isEncodingSnap,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("dm_snap_camera_button")
+                            ) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.size(38.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PhotoCamera,
+                                            contentDescription = "Snap picture with camera",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Pick Photo from Gallery
+                            IconButton(
+                                onClick = {
+                                    galleryPhotoLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
                                 },
-                                enabled = composerText.isNotBlank() && !isSending,
-                                modifier = Modifier.testTag("dm_send_button")
+                                enabled = !isSending && !isEncodingSnap,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("dm_snap_gallery_button")
                             ) {
                                 Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.Send,
-                                    contentDescription = "Send private message",
-                                    tint = if (composerText.isNotBlank() && !isSending) Color.White else MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
+                                    imageVector = Icons.Rounded.AddPhotoAlternate,
+                                    contentDescription = "Send photo from gallery",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
                                 )
+                            }
+
+                            OutlinedTextField(
+                                value = composerText,
+                                onValueChange = { composerText = it.take(500) },
+                                placeholder = {
+                                    Text(
+                                        if (draftSnapBase64.isNotBlank()) "Add a caption…"
+                                        else stringResource(R.string.hint_send_dm)
+                                    )
+                                },
+                                singleLine = false,
+                                maxLines = 3,
+                                shape = RoundedCornerShape(999.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = Color.Transparent
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("dm_message_input")
+                            )
+
+                            Surface(
+                                shape = CircleShape,
+                                color = if (canSend) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                },
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        val toSend = composerText.trim()
+                                        val snapToSend = draftSnapBase64
+                                        if (toSend.isNotEmpty() || snapToSend.isNotBlank()) {
+                                            composerText = ""
+                                            draftSnapBase64 = ""
+                                            viewModel.sendMessage(
+                                                senderName = userProfile.displayName,
+                                                senderTier = myStaffTier,
+                                                text = toSend,
+                                                imageBase64 = snapToSend
+                                            )
+                                        }
+                                    },
+                                    enabled = canSend,
+                                    modifier = Modifier.testTag("dm_send_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Rounded.Send,
+                                        contentDescription = "Send private message",
+                                        tint = if (canSend) Color.White else MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .background(MaterialTheme.colorScheme.surface),
-            contentAlignment = Alignment.TopCenter
-        ) {
-            when (messagesState) {
-                is UiState.Loading -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                    }
-                }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .background(MaterialTheme.colorScheme.surface),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // LIVE PRIVATE VOICE & VIDEO CALL STAGE
+                if (isInCall || isConnectingCall) {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = Color(0xFF0C182E),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 760.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("dm_live_call_stage")
+                    ) {
+                        Column {
+                            val hasAnyVideo = remoteVideoTrack != null || localVideoTrack != null
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(if (hasAnyVideo) 220.dp else 112.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                when {
+                                    remoteVideoTrack != null -> {
+                                        LiveKitVideoView(
+                                            room = viewModel.liveKitManager.room,
+                                            videoTrack = remoteVideoTrack,
+                                            mirror = false,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                        if (localVideoTrack != null) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomEnd)
+                                                    .padding(10.dp)
+                                                    .size(width = 88.dp, height = 118.dp)
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(Color.Black)
+                                            ) {
+                                                LiveKitVideoView(
+                                                    room = viewModel.liveKitManager.room,
+                                                    videoTrack = localVideoTrack,
+                                                    mirror = useFrontCamera,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            }
+                                        }
+                                    }
 
-                is UiState.Error -> {
-                    Box(modifier = Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = (messagesState as UiState.Error).message,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
+                                    localVideoTrack != null -> {
+                                        LiveKitVideoView(
+                                            room = viewModel.liveKitManager.room,
+                                            videoTrack = localVideoTrack,
+                                            mirror = useFrontCamera,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = Color.Black.copy(alpha = 0.55f),
+                                            modifier = Modifier
+                                                .align(Alignment.TopStart)
+                                                .padding(10.dp)
+                                        ) {
+                                            Text(
+                                                text = "Your Camera · Waiting for $otherName",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color.White,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
 
-                is UiState.Success -> {
-                    if (messages.isEmpty()) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(32.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            SpeakingAvatarCircle(
-                                displayName = otherName,
-                                colorHex = otherColorHex,
-                                speakingLevel = 0f,
-                                micActive = false,
-                                size = 72.dp,
-                                photoBase64 = otherPhotoBase64
-                            )
-                            Spacer(modifier = Modifier.height(14.dp))
-                            Text(
-                                text = otherName,
-                                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                                color = usernameColor(otherTier)
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Send your first message to start a private conversation.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                                    else -> {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                            modifier = Modifier.padding(16.dp)
+                                        ) {
+                                            SpeakingAvatarCircle(
+                                                displayName = otherName,
+                                                colorHex = otherColorHex,
+                                                speakingLevel = if (isMicActive) 0.7f else 0.1f,
+                                                micActive = isMicActive,
+                                                size = 54.dp,
+                                                photoBase64 = otherPhotoBase64
+                                            )
+                                            Column {
+                                                Text(
+                                                    text = if (isConnectingCall) "Connecting private call…" else "Private Call with $otherName",
+                                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = Color.White
+                                                )
+                                                Text(
+                                                    text = if (isMicActive) "Microphone LIVE" else "Mic muted · Tap mic or camera below",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color.White.copy(alpha = 0.8f)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Call Controls Row
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFF091224))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = ::requestMicCallToggle,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("dm_stage_mic_toggle")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isMicActive) SafetyEmerald else Color.White.copy(alpha = 0.16f),
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isMicActive) Icons.Rounded.Mic else Icons.Rounded.MicOff,
+                                                contentDescription = "Toggle mic",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = ::requestVideoCallToggle,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("dm_stage_cam_toggle")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isCamActive) SnapBlue else Color.White.copy(alpha = 0.16f),
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isCamActive) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
+                                                contentDescription = "Toggle video",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (isCamActive) {
+                                    IconButton(
+                                        onClick = { viewModel.flipCamera() },
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("dm_stage_flip_cam")
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = Color.White.copy(alpha = 0.16f),
+                                            modifier = Modifier.size(40.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Cameraswitch,
+                                                    contentDescription = "Flip camera",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = { viewModel.endCall() },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("dm_stage_end_call")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = LiveCoral,
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.CallEnd,
+                                                contentDescription = "End private call",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    } else {
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .widthIn(max = 760.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            items(messages, key = { it.id }) { msg ->
-                                SnapChatMessageBlock(
-                                    message = msg,
-                                    isMe = msg.senderId == viewModel.currentUserId
+                    }
+                }
+
+                // MESSAGES LIST
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.TopCenter
+                ) {
+                    when (messagesState) {
+                        is UiState.Loading -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+
+                        is UiState.Error -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(20.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = (messagesState as UiState.Error).message,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodyMedium
                                 )
+                            }
+                        }
+
+                        is UiState.Success -> {
+                            if (messages.isEmpty()) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(32.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    SpeakingAvatarCircle(
+                                        displayName = otherName,
+                                        colorHex = otherColorHex,
+                                        speakingLevel = 0f,
+                                        micActive = false,
+                                        size = 72.dp,
+                                        photoBase64 = otherPhotoBase64
+                                    )
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                    Text(
+                                        text = otherName,
+                                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                                        color = usernameColor(otherTier)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Send a message, snap a picture, or start a live mic/video call.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else {
+                                LazyColumn(
+                                    state = listState,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .widthIn(max = 760.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    items(messages, key = { it.id }) { msg ->
+                                        SnapChatMessageBlock(
+                                            message = msg,
+                                            isMe = msg.senderId == viewModel.currentUserId,
+                                            onOpenPhoto = { photo -> fullScreenPhotoBase64 = photo }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-        }
         }
 
         TopSnackbarOverlay(
@@ -354,20 +885,28 @@ fun DirectChatScreen(
             modifier = Modifier.align(Alignment.TopCenter)
         )
     }
+
+    fullScreenPhotoBase64?.let { photo ->
+        FullScreenPhotoDialog(
+            photoBase64 = photo,
+            contentDescription = "Snapped photo",
+            onDismiss = { fullScreenPhotoBase64 = null }
+        )
+    }
 }
 
 /**
- * Snapchat-signature vertical bar chat block:
- * - Sender's uppercase name above
- * - Crisp 3.dp vertical color bar on the left (Royal Blue for ME, role-coded color for them)
+ * Snapchat-signature vertical bar chat block supporting both text messages and snapped pictures.
  */
 @Composable
 private fun SnapChatMessageBlock(
     message: DirectMessage,
-    isMe: Boolean
+    isMe: Boolean,
+    onOpenPhoto: (String) -> Unit
 ) {
     val tier = message.senderTierEnum()
     val accentBarColor = if (isMe) SnapBlue else usernameColor(tier)
+    val snapBitmap = rememberBase64ImageBitmap(message.imageBase64)
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -394,27 +933,60 @@ private fun SnapChatMessageBlock(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.Top
         ) {
             Box(
                 modifier = Modifier
+                    .padding(top = 4.dp)
                     .width(3.5.dp)
-                    .height(26.dp)
+                    .height(if (snapBitmap != null) 56.dp else 26.dp)
                     .clip(RoundedCornerShape(999.dp))
                     .background(accentBarColor)
             )
             Spacer(modifier = Modifier.width(10.dp))
             Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = if (isMe) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                shape = RoundedCornerShape(14.dp),
+                color = if (isMe) {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                },
                 modifier = Modifier.weight(1f, fill = false)
             ) {
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                )
+                Column(
+                    modifier = Modifier.padding(
+                        horizontal = if (snapBitmap != null) 8.dp else 12.dp,
+                        vertical = 8.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (snapBitmap != null) {
+                        Box(
+                            modifier = Modifier
+                                .widthIn(max = 260.dp)
+                                .heightIn(min = 120.dp, max = 280.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onOpenPhoto(message.imageBase64) }
+                                .testTag("dm_snap_image_${message.id}")
+                        ) {
+                            Image(
+                                bitmap = snapBitmap,
+                                contentDescription = "Snapped photo from ${message.senderName}",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                    if (message.text.isNotBlank()) {
+                        Text(
+                            text = message.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = if (snapBitmap != null) Modifier.padding(horizontal = 4.dp) else Modifier
+                        )
+                    }
+                }
             }
         }
     }

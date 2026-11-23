@@ -137,6 +137,18 @@ service cloud.firestore {
     }
 
     // --- ENTITY VALIDATION BLUEPRINTS ---
+    function existingInt(doc, field) {
+      return (field in doc && doc[field] is int) ? doc[field] : 0;
+    }
+
+    function isBouncedFromRoom(roomData, uid) {
+      return ('bouncedUntilByUserId' in roomData) &&
+             (roomData.bouncedUntilByUserId is map) &&
+             (uid in roomData.bouncedUntilByUserId) &&
+             (roomData.bouncedUntilByUserId[uid] is int) &&
+             (roomData.bouncedUntilByUserId[uid] > request.time.toMillis());
+    }
+
     function isValidUserProfile(data) {
       return data.keys().hasAll([
                'userId', 'displayName', 'handle', 'bio', 'avatarColorHex',
@@ -148,6 +160,7 @@ service cloud.firestore {
                'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled', 'invisibleModePreferred',
                'globallyBanned', 'disableCreateRoom', 'disableEnterRoom',
                'disableMic', 'disableVideo', 'suspendedUntilMillis', 'suspensionReason',
+               'pointsBalance', 'creatorEarningsCents', 'totalSpentCents',
                'blockedUserIds', 'createdAt', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
@@ -167,6 +180,9 @@ service cloud.firestore {
              (!('disableVideo' in data) || data.disableVideo is bool) &&
              (!('suspendedUntilMillis' in data) || (data.suspendedUntilMillis is int && data.suspendedUntilMillis >= 0)) &&
              (!('suspensionReason' in data) || (data.suspensionReason is string && data.suspensionReason.size() <= 200)) &&
+             (!('pointsBalance' in data) || (data.pointsBalance is int && data.pointsBalance >= 0 && data.pointsBalance <= 1000000)) &&
+             (!('creatorEarningsCents' in data) || (data.creatorEarningsCents is int && data.creatorEarningsCents >= 0 && data.creatorEarningsCents <= 1000000000)) &&
+             (!('totalSpentCents' in data) || (data.totalSpentCents is int && data.totalSpentCents >= 0 && data.totalSpentCents <= 1000000000)) &&
              isBoundedStringList(data.blockedUserIds, 100) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
@@ -179,7 +195,10 @@ service cloud.firestore {
              (!('disableMic' in data) || data.disableMic == false) &&
              (!('disableVideo' in data) || data.disableVideo == false) &&
              (!('suspendedUntilMillis' in data) || data.suspendedUntilMillis == 0) &&
-             (!('suspensionReason' in data) || data.suspensionReason == '');
+             (!('suspensionReason' in data) || data.suspensionReason == '') &&
+             (!('pointsBalance' in data) || data.pointsBalance == 0) &&
+             (!('creatorEarningsCents' in data) || data.creatorEarningsCents == 0) &&
+             (!('totalSpentCents' in data) || data.totalSpentCents == 0);
     }
 
     function isValidStaffRole(data) {
@@ -259,7 +278,7 @@ service cloud.firestore {
                'visibility', 'status', 'videoEnabled', 'autoModEnabled',
                'autoModBlockMode', 'linksBlocked', 'roomLocked', 'stageMicLocked',
                'adminMicPriorityActive', 'slowModeSeconds', 'maxSpeakers', 'participantCount',
-               'moderatorIds', 'bannedUserIds', 'mutedUserIds', 'blockedWords',
+               'moderatorIds', 'bannedUserIds', 'bouncedUntilByUserId', 'mutedUserIds', 'blockedWords',
                'createdAt', 'updatedAt'
              ]) &&
              data.hostId is string && data.hostId.size() >= 1 && data.hostId.size() <= 128 &&
@@ -284,6 +303,7 @@ service cloud.firestore {
              isBoundedStringList(data.moderatorIds, 20) &&
              data.hostId in data.moderatorIds &&
              isBoundedStringList(data.bannedUserIds, 100) &&
+             (!('bouncedUntilByUserId' in data) || (data.bouncedUntilByUserId is map && data.bouncedUntilByUserId.size() <= 100)) &&
              isBoundedStringList(data.mutedUserIds, 100) &&
              isBoundedStringList(data.blockedWords, 50) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
@@ -417,7 +437,8 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'authorId', 'authorName', 'authorHandle', 'authorColorHex', 'authorPhotoBase64',
-               'authorTier', 'text', 'imageBase64', 'likedByUserIds', 'createdAt', 'updatedAt'
+               'authorTier', 'text', 'imageBase64', 'locked', 'unlockPricePoints', 'unlockedByUserIds',
+               'likedByUserIds', 'createdAt', 'updatedAt'
              ]) &&
              data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 40 &&
@@ -428,6 +449,10 @@ service cloud.firestore {
              data.text is string && data.text.size() <= 1000 &&
              data.imageBase64 is string && data.imageBase64.size() <= 460000 &&
              (data.text.size() >= 1 || data.imageBase64.size() >= 1) &&
+             (!('locked' in data) || data.locked is bool) &&
+             (!('locked' in data) || !data.locked || data.imageBase64.size() >= 1) &&
+             (!('unlockPricePoints' in data) || (data.unlockPricePoints is int && data.unlockPricePoints == 2)) &&
+             (!('unlockedByUserIds' in data) || isBoundedStringList(data.unlockedByUserIds, 500)) &&
              isBoundedStringList(data.likedByUserIds, 500) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
@@ -498,7 +523,7 @@ service cloud.firestore {
                'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier', 'text', 'createdAt'
              ]) &&
              data.keys().hasOnly([
-               'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier', 'text', 'createdAt'
+               'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier', 'text', 'imageBase64', 'createdAt'
              ]) &&
              data.threadId is string && data.threadId.size() >= 1 && data.threadId.size() <= 260 &&
              data.participantIds is list && data.participantIds.size() == 2 &&
@@ -506,8 +531,100 @@ service cloud.firestore {
              data.senderId in data.participantIds &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 40 &&
              data.senderTier in ['USER', 'SUPPORT', 'ADMIN'] &&
-             data.text is string && data.text.size() >= 1 && data.text.size() <= 500 &&
+             data.text is string && data.text.size() <= 500 &&
+             (!('imageBase64' in data) || (data.imageBase64 is string && data.imageBase64.size() <= 460000)) &&
+             (data.text.size() >= 1 || ('imageBase64' in data && data.imageBase64.size() >= 1)) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidCreatorSubscription(data) {
+      return data.keys().hasAll([
+               'subscriberId', 'creatorId', 'creatorName', 'priceCents',
+               'creatorShareCents', 'platformShareCents', 'active', 'expiresAtMillis',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'subscriberId', 'creatorId', 'creatorName', 'priceCents',
+               'creatorShareCents', 'platformShareCents', 'active', 'expiresAtMillis',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.subscriberId is string && data.subscriberId.size() >= 1 && data.subscriberId.size() <= 128 &&
+             data.creatorId is string && data.creatorId.size() >= 1 && data.creatorId.size() <= 128 &&
+             data.subscriberId != data.creatorId &&
+             data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 40 &&
+             data.priceCents is int && data.priceCents == 1500 &&
+             data.creatorShareCents is int && data.creatorShareCents == 750 &&
+             data.platformShareCents is int && data.platformShareCents == 750 &&
+             data.active is bool &&
+             data.expiresAtMillis is int && data.expiresAtMillis > request.time.toMillis() &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidPointTransaction(data) {
+      return data.keys().hasAll([
+               'type', 'buyerId', 'buyerName', 'creatorId', 'creatorName', 'postId',
+               'pointsDelta', 'grossCents', 'creatorShareCents', 'platformShareCents', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'type', 'buyerId', 'buyerName', 'creatorId', 'creatorName', 'postId',
+               'pointsDelta', 'grossCents', 'creatorShareCents', 'platformShareCents', 'createdAt'
+             ]) &&
+             data.type in ['BUY_POINTS', 'UNLOCK_PHOTO', 'SUBSCRIBE_CREATOR'] &&
+             data.buyerId is string && data.buyerId.size() >= 1 && data.buyerId.size() <= 128 &&
+             data.buyerName is string && data.buyerName.size() >= 1 && data.buyerName.size() <= 40 &&
+             data.creatorId is string && data.creatorId.size() <= 128 &&
+             data.creatorName is string && data.creatorName.size() <= 40 &&
+             data.postId is string && data.postId.size() <= 128 &&
+             data.pointsDelta is int &&
+             data.grossCents is int &&
+             data.creatorShareCents is int &&
+             data.platformShareCents is int &&
+             data.createdAt is timestamp && data.createdAt <= request.time && (
+               (data.type == 'BUY_POINTS' &&
+                data.pointsDelta >= 2 && data.pointsDelta <= 500 &&
+                data.grossCents == data.pointsDelta * 100 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 0 &&
+                data.creatorId == '' &&
+                data.postId == '') ||
+               (data.type == 'UNLOCK_PHOTO' &&
+                data.pointsDelta == -2 &&
+                data.grossCents == 200 &&
+                data.creatorShareCents == 100 &&
+                data.platformShareCents == 100 &&
+                data.creatorId.size() >= 1 &&
+                data.creatorId != data.buyerId &&
+                data.postId.size() >= 1) ||
+               (data.type == 'SUBSCRIBE_CREATOR' &&
+                data.pointsDelta == 0 &&
+                data.grossCents == 1500 &&
+                data.creatorShareCents == 750 &&
+                data.platformShareCents == 750 &&
+                data.creatorId.size() >= 1 &&
+                data.creatorId != data.buyerId &&
+                data.postId == '')
+             );
+    }
+
+    function isValidOwnerWalletUpdate(newData, oldData) {
+      let oldPts = existingInt(oldData, 'pointsBalance');
+      let newPts = existingInt(newData, 'pointsBalance');
+      let oldSpent = existingInt(oldData, 'totalSpentCents');
+      let newSpent = existingInt(newData, 'totalSpentCents');
+      let ptsDelta = newPts - oldPts;
+      return newData.diff(oldData).affectedKeys().hasOnly(['pointsBalance', 'totalSpentCents', 'updatedAt']) && (
+        (ptsDelta >= 2 && ptsDelta <= 500 && newSpent == oldSpent + (ptsDelta * 100)) ||
+        (ptsDelta == -2 && newSpent == oldSpent) ||
+        (ptsDelta == 0 && newSpent == oldSpent + 1500)
+      );
+    }
+
+    function isValidCreatorEarningsCredit(newData, oldData) {
+      let oldEarn = existingInt(oldData, 'creatorEarningsCents');
+      let newEarn = existingInt(newData, 'creatorEarningsCents');
+      return newData.diff(oldData).affectedKeys().hasOnly(['creatorEarningsCents', 'updatedAt']) &&
+             (newEarn == oldEarn + 100 || newEarn == oldEarn + 750);
     }
 
     // --- 1. USERS COLLECTION ---
@@ -539,6 +656,9 @@ service cloud.firestore {
                             'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled',
                             'invisibleModePreferred', 'blockedUserIds', 'updatedAt'
                           ])) ||
+                         // Action 1b: Owner buys points (2..500 pts at $1/pt), spends 2 pts to unlock photo, or pays $15/mo subscription
+                         (request.auth.uid == userId &&
+                          isValidOwnerWalletUpdate(incoming(), existing())) ||
                          // Action 2: Admin edits any user's profile, restrictions, global ban, or suspension
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -553,7 +673,10 @@ service cloud.firestore {
                           !isTargetAdmin(userId) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'suspendedUntilMillis', 'suspensionReason', 'updatedAt'
-                          ]))
+                          ])) ||
+                         // Action 4: Buyer credits creator's earnings share ($1.00 = 100c for 2-pt photo unlock, or $7.50 = 750c for $15 subscription)
+                         (request.auth.uid != userId &&
+                          isValidCreatorEarningsCredit(incoming(), existing()))
                        );
 
       allow delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
@@ -717,7 +840,7 @@ service cloud.firestore {
                        existing().status == 'LIVE' &&
                        incoming().hostId == existing().hostId &&
                        incoming().createdAt == existing().createdAt && (
-                         // Action 1a: Global App Owner Admin full control (including exclusive adminMicPriorityActive)
+                          // Action 1a: Global App Owner Admin full control (including exclusive adminMicPriorityActive & 24h bounces)
                          (isAdmin() &&
                           incoming().status == 'LIVE' &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -725,7 +848,7 @@ service cloud.firestore {
                             'videoEnabled', 'autoModEnabled', 'autoModBlockMode',
                             'linksBlocked', 'roomLocked', 'stageMicLocked',
                             'adminMicPriorityActive', 'slowModeSeconds', 'maxSpeakers',
-                            'moderatorIds', 'bannedUserIds', 'mutedUserIds', 'blockedWords', 'updatedAt'
+                            'moderatorIds', 'bannedUserIds', 'bouncedUntilByUserId', 'mutedUserIds', 'blockedWords', 'updatedAt'
                           ])) ||
                          // Action 1b: Room Administrator (Creator) — change/delete room name, add co-admins, ban, kick, mute
                          (existing().hostId == request.auth.uid &&
@@ -735,16 +858,16 @@ service cloud.firestore {
                             'videoEnabled', 'autoModEnabled', 'autoModBlockMode',
                             'linksBlocked', 'roomLocked', 'stageMicLocked',
                             'slowModeSeconds', 'maxSpeakers', 'moderatorIds',
-                            'bannedUserIds', 'mutedUserIds', 'blockedWords', 'updatedAt'
+                            'bannedUserIds', 'bouncedUntilByUserId', 'mutedUserIds', 'blockedWords', 'updatedAt'
                           ])) ||
-                         // Action 2: Room Co-Admin or Global Support — mute, kick/bounce, safety toggles (NO ban, NO rename, NO close)
+                         // Action 2: Room Co-Admin or Global Support — mute, kick/24h bounce, safety toggles (NO ban, NO rename, NO close)
                          ((request.auth.uid in existing().moderatorIds || isSupport()) &&
                           existing().hostId != request.auth.uid &&
                           incoming().status == 'LIVE' &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'topic', 'videoEnabled', 'autoModEnabled', 'autoModBlockMode',
                             'linksBlocked', 'roomLocked', 'stageMicLocked',
-                            'slowModeSeconds', 'mutedUserIds',
+                            'slowModeSeconds', 'bouncedUntilByUserId', 'mutedUserIds',
                             'blockedWords', 'updatedAt'
                           ])) ||
                          // Action 3: Room Admin or Global App Admin closes room (terminal transition)
@@ -785,6 +908,7 @@ service cloud.firestore {
                  (adminCaller || !callerProfileExists() || isProfileAllowed(callerProfile(), false, true, data.micActive, data.camActive)) &&
                  room.status == 'LIVE' &&
                  (!(request.auth.uid in room.bannedUserIds) || adminCaller) &&
+                 (!isBouncedFromRoom(room, request.auth.uid) || adminCaller) &&
                  (!room.roomLocked || isRoomStaff) &&
                  (
                    (data.role == 'HOST' && room.hostId == request.auth.uid) ||
@@ -866,6 +990,7 @@ service cloud.firestore {
                          roomExists(roomId) &&
                          roomDoc(roomId).data.status == 'LIVE' &&
                          (!(request.auth.uid in roomDoc(roomId).data.bannedUserIds) || isAdmin()) &&
+                         (!isBouncedFromRoom(roomDoc(roomId).data, request.auth.uid) || isAdmin()) &&
                          (!(request.auth.uid in roomDoc(roomId).data.mutedUserIds) || isAdmin());
 
         allow update: if isSignedIn() &&
@@ -1069,6 +1194,7 @@ service cloud.firestore {
                        isValidId(postId) &&
                        incoming().authorId == request.auth.uid &&
                        incoming().likedByUserIds.size() == 0 &&
+                       (!('unlockedByUserIds' in incoming()) || incoming().unlockedByUserIds.size() == 0) &&
                        isAllowedStaffTierClaim(incoming().authorTier) &&
                        callerPassesProfileChecks(false, false, false, false) &&
                        isValidProfilePost(incoming());
@@ -1078,10 +1204,10 @@ service cloud.firestore {
                        isValidProfilePost(incoming()) &&
                        incoming().authorId == existing().authorId &&
                        incoming().createdAt == existing().createdAt && (
-                         // Action 1: Author updates their own post caption/image/profile metadata
+                         // Action 1: Author updates their own post caption/image/lock/profile metadata
                          (existing().authorId == request.auth.uid &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'text', 'imageBase64', 'authorName', 'authorHandle',
+                            'text', 'imageBase64', 'locked', 'authorName', 'authorHandle',
                             'authorColorHex', 'authorPhotoBase64', 'updatedAt'
                           ])) ||
                          // Action 2: Any signed-in user toggles ONLY their own UID in likedByUserIds
@@ -1097,12 +1223,77 @@ service cloud.firestore {
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'authorName', 'authorHandle', 'updatedAt'
-                          ]))
+                          ])) ||
+                         // Action 4: Buyer unlocks a locked photo by adding ONLY their own UID to unlockedByUserIds
+                         (existing().authorId != request.auth.uid &&
+                          ('locked' in existing()) && existing().locked == true &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['unlockedByUserIds', 'updatedAt']) &&
+                          request.auth.uid in incoming().unlockedByUserIds &&
+                          (!('unlockedByUserIds' in existing())
+                            ? incoming().unlockedByUserIds.size() == 1
+                            : (!(request.auth.uid in existing().unlockedByUserIds) &&
+                               incoming().unlockedByUserIds.size() == existing().unlockedByUserIds.size() + 1)))
                        );
 
       allow delete: if isSignedIn() &&
                        isValidId(postId) &&
                        (existing().authorId == request.auth.uid || isAdminOrSupport());
+    }
+
+    // --- 8. CREATOR SUBSCRIPTIONS ($15/month unlocks all locked photos by creator) ---
+    match /creatorSubscriptions/{subId} {
+      allow get: if isSignedIn() &&
+                    (resource == null ||
+                     existing().subscriberId == request.auth.uid ||
+                     existing().creatorId == request.auth.uid ||
+                     isAdmin());
+
+      allow list: if isSignedIn() &&
+                     (resource.data.subscriberId == request.auth.uid ||
+                      resource.data.creatorId == request.auth.uid ||
+                      isAdmin());
+
+      allow create: if isSignedIn() &&
+                       incoming().subscriberId == request.auth.uid &&
+                       incoming().subscriberId != incoming().creatorId &&
+                       subId == incoming().subscriberId + '_' + incoming().creatorId &&
+                       incoming().active == true &&
+                       isValidCreatorSubscription(incoming());
+
+      allow update: if isSignedIn() &&
+                       existing().subscriberId == request.auth.uid &&
+                       incoming().subscriberId == existing().subscriberId &&
+                       incoming().creatorId == existing().creatorId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidCreatorSubscription(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'creatorName', 'active', 'expiresAtMillis', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() &&
+                       (existing().subscriberId == request.auth.uid || isAdmin());
+    }
+
+    // --- 9. POINT TRANSACTIONS & REVENUE SPLIT LEDGER (Append-Only) ---
+    match /pointTransactions/{txId} {
+      allow get: if isSignedIn() &&
+                    isValidId(txId) &&
+                    (resource == null ||
+                     existing().buyerId == request.auth.uid ||
+                     existing().creatorId == request.auth.uid ||
+                     isAdmin());
+
+      allow list: if isSignedIn() &&
+                     (resource.data.buyerId == request.auth.uid ||
+                      resource.data.creatorId == request.auth.uid ||
+                      isAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(txId) &&
+                       incoming().buyerId == request.auth.uid &&
+                       isValidPointTransaction(incoming());
+
+      allow update, delete: if false;
     }
   }
 }

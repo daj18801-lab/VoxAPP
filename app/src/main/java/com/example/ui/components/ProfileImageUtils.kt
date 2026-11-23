@@ -143,6 +143,66 @@ suspend fun encodeImageUriToBase64Jpeg(
     }
 }
 
+/**
+ * Produces a heavily obscured low-res blurred preview bitmap so locked photos
+ * remain genuinely hidden across all Android API levels (API 24+).
+ */
+@Composable
+fun rememberBlurredBase64ImageBitmap(base64: String): ImageBitmap? {
+    return remember(base64) {
+        if (base64.isBlank()) {
+            null
+        } else {
+            runCatching {
+                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
+                val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return@runCatching null
+                val tiny = Bitmap.createScaledBitmap(raw, 12, 12, true)
+                val blurred = Bitmap.createScaledBitmap(tiny, 160, 160, true)
+                if (raw !== tiny) raw.recycle()
+                if (tiny !== blurred) tiny.recycle()
+                blurred.asImageBitmap()
+            }.getOrNull()
+        }
+    }
+}
+
+/**
+ * Compresses an in-memory Bitmap (e.g., from camera snap) into a Firestore-safe Base64 JPEG.
+ */
+suspend fun encodeBitmapToBase64Jpeg(
+    bitmap: Bitmap,
+    maxDimensionPx: Int = 640,
+    maxBase64Chars: Int = 360_000
+): String? = withContext(Dispatchers.IO) {
+    try {
+        val longest = max(bitmap.width, bitmap.height)
+        val scaled = if (longest > maxDimensionPx) {
+            val ratio = maxDimensionPx.toFloat() / longest.toFloat()
+            val targetW = (bitmap.width * ratio).toInt().coerceAtLeast(1)
+            val targetH = (bitmap.height * ratio).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+        } else {
+            bitmap
+        }
+        val qualities = intArrayOf(80, 68, 54, 42, 32)
+        var encoded: String? = null
+        for (q in qualities) {
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, q, out)
+            val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            if (b64.length <= maxBase64Chars) {
+                encoded = b64
+                break
+            }
+        }
+        if (scaled !== bitmap) scaled.recycle()
+        encoded
+    } catch (_: Exception) {
+        null
+    }
+}
+
 @Composable
 fun FullScreenPhotoDialog(
     photoBase64: String,

@@ -847,7 +847,11 @@ fun UserModerationActionSheet(
 
             SheetActionRow(
                 icon = Icons.Rounded.Eject,
-                label = "Bounce from Room (Can Rejoin)",
+                label = if (staffCapabilities.isStaff) {
+                    "Bounce from Room (24h Lockout)"
+                } else {
+                    "Bounce from Room"
+                },
                 tint = ModAmber,
                 onClick = { onBounce(); onDismiss() }
             )

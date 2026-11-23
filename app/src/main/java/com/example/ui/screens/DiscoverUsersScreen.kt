@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,6 +45,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -78,16 +80,23 @@ fun DiscoverUsersScreen(
     directoryEntries: List<DirectoryEntry>,
     friendships: List<Friendship>,
     recentPostsState: UiState<List<ProfilePost>>,
+    myPointsBalance: Long,
+    subscribedCreatorIds: Set<String>,
+    isProcessingWallet: Boolean,
     onOpenUserProfile: (String) -> Unit,
     onSendFriendRequest: (DirectoryEntry) -> Unit,
     onAcceptFriendRequest: (Friendship) -> Unit,
     onRemoveOrDeclineFriendship: (Friendship) -> Unit,
     onMessageUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
     onToggleLikePost: (ProfilePost) -> Unit,
-    onDeletePost: (ProfilePost) -> Unit
+    onDeletePost: (ProfilePost) -> Unit,
+    onUnlockPost: (ProfilePost, onInsufficientPoints: () -> Unit) -> Unit,
+    onSubscribeCreator: (creatorId: String, creatorName: String) -> Unit,
+    onOpenBuyPoints: () -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Browse People, 1 = Posts Feed, 2 = Friends
+    var showBuyPointsDialog by remember { mutableStateOf(false) }
 
     val directoryByUid = remember(directoryEntries) {
         directoryEntries.associateBy { it.userId }
@@ -359,12 +368,24 @@ fun DiscoverUsersScreen(
                                 }
                             } else {
                                 items(filteredPosts, key = { "feed_${it.id}" }) { post ->
+                                    val unlocked = post.isUnlockedFor(
+                                        uid = currentUserId,
+                                        subscribedCreatorIds = subscribedCreatorIds
+                                    )
                                     ProfilePostCard(
                                         post = post,
                                         currentUserId = currentUserId,
                                         canDelete = post.authorId == currentUserId || staffCapabilities.isStaff,
                                         latestAuthorPhotoBase64 = directoryByUid[post.authorId]?.photoBase64,
+                                        isUnlocked = unlocked,
+                                        isProcessingUnlock = isProcessingWallet,
                                         onAuthorClick = { onOpenUserProfile(post.authorId) },
+                                        onUnlockPost = {
+                                            onUnlockPost(post) { showBuyPointsDialog = true }
+                                        },
+                                        onSubscribeCreator = {
+                                            onSubscribeCreator(post.authorId, post.authorName)
+                                        },
                                         onToggleLike = { onToggleLikePost(post) },
                                         onDelete = { onDeletePost(post) }
                                     )
@@ -611,6 +632,34 @@ fun DiscoverUsersScreen(
                 Spacer(modifier = Modifier.height(72.dp))
             }
         }
+    }
+
+    if (showBuyPointsDialog) {
+        AlertDialog(
+            onDismissRequest = { showBuyPointsDialog = false },
+            title = { Text("Need More Points") },
+            text = {
+                Text(
+                    "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). Buy points in Profile Settings or subscribe for \$15/month."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBuyPointsDialog = false
+                        onOpenBuyPoints()
+                    },
+                    modifier = Modifier.testTag("discover_dialog_buy_points")
+                ) {
+                    Text("Buy Points")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBuyPointsDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

@@ -41,8 +41,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -216,6 +218,10 @@ private fun AuthenticatedVoxStageApp(
     val recentPostsState by mainViewModel.recentPostsState.collectAsStateWithLifecycle()
     val isPublishingPost by mainViewModel.isPublishingPost.collectAsStateWithLifecycle()
     val isUpdatingPhoto by mainViewModel.isUpdatingPhoto.collectAsStateWithLifecycle()
+    val isProcessingWallet by mainViewModel.isProcessingWallet.collectAsStateWithLifecycle()
+    val mySubscriptions by mainViewModel.mySubscriptionsState.collectAsStateWithLifecycle()
+    val myTransactions by mainViewModel.myTransactionsState.collectAsStateWithLifecycle()
+    val allTransactions by mainViewModel.allTransactionsState.collectAsStateWithLifecycle()
     val publicRoomsState by mainViewModel.publicRoomsState.collectAsStateWithLifecycle()
     val myRoomsState by mainViewModel.myRoomsState.collectAsStateWithLifecycle()
     val safetyReportsState by mainViewModel.safetyReportsState.collectAsStateWithLifecycle()
@@ -231,6 +237,11 @@ private fun AuthenticatedVoxStageApp(
 
     val userProfile = (userProfileState as? UiState.Success)?.data
     val nightModeEnabled = userProfile?.nightModeEnabled ?: false
+    val myPointsBalance = userProfile?.pointsBalance ?: 0L
+    val subscribedCreatorIds = remember(mySubscriptions) {
+        mySubscriptions.filter { it.isCurrentlyActive() }.map { it.creatorId }.toSet()
+    }
+    var profileInitialTab by remember { mutableIntStateOf(0) }
 
     val unreadChatsCount = remember(directThreadsState, currentUserId) {
         (directThreadsState as? UiState.Success)?.data?.count { it.isUnreadFor(currentUserId) } ?: 0
@@ -273,10 +284,16 @@ private fun AuthenticatedVoxStageApp(
 
     fun openUserProfile(targetUid: String) {
         if (targetUid == currentUserId) {
+            profileInitialTab = 0
             navigateToTopTab(ROUTE_PROFILE)
         } else if (targetUid.isNotBlank()) {
             navController.navigate("user/$targetUid")
         }
+    }
+
+    fun openProfileBuyPoints() {
+        profileInitialTab = 1
+        navigateToTopTab(ROUTE_PROFILE)
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -469,6 +486,9 @@ private fun AuthenticatedVoxStageApp(
                                     directoryEntries = directoryEntries,
                                     friendships = friendships,
                                     recentPostsState = recentPostsState,
+                                    myPointsBalance = myPointsBalance,
+                                    subscribedCreatorIds = subscribedCreatorIds,
+                                    isProcessingWallet = isProcessingWallet,
                                     onOpenUserProfile = ::openUserProfile,
                                     onSendFriendRequest = mainViewModel::sendFriendRequest,
                                     onAcceptFriendRequest = mainViewModel::acceptFriendRequest,
@@ -485,7 +505,10 @@ private fun AuthenticatedVoxStageApp(
                                         )
                                     },
                                     onToggleLikePost = mainViewModel::toggleLikePost,
-                                    onDeletePost = mainViewModel::deleteProfilePost
+                                    onDeletePost = mainViewModel::deleteProfilePost,
+                                    onUnlockPost = mainViewModel::unlockProfilePost,
+                                    onSubscribeCreator = mainViewModel::subscribeToCreator,
+                                    onOpenBuyPoints = ::openProfileBuyPoints
                                 )
                             }
 
@@ -527,9 +550,9 @@ private fun AuthenticatedVoxStageApp(
                                     onCategorySelected = mainViewModel::selectCategory,
                                     onToggleMyRooms = mainViewModel::setShowOnlyMyRooms,
                                     onToggleInvisiblePreference = mainViewModel::toggleInvisiblePreference,
-                                    onOpenRoom = { roomId ->
-                                        if (mainViewModel.canEnterRoomOrNotify()) {
-                                            navController.navigate("room/$roomId")
+                                    onOpenRoom = { room ->
+                                        if (mainViewModel.canEnterRoomOrNotify(room)) {
+                                            navController.navigate("room/${room.id}")
                                         }
                                     },
                                     onEditRoom = mainViewModel::editRoomDetails,
@@ -588,12 +611,18 @@ private fun AuthenticatedVoxStageApp(
                                     staffCapabilities = staffCapabilities,
                                     friendsCount = acceptedFriendsCount,
                                     myPostsState = myPostsState,
+                                    mySubscriptions = mySubscriptions,
+                                    myTransactions = myTransactions,
+                                    allTransactionsForAdmin = allTransactions,
                                     isPublishingPost = isPublishingPost,
                                     isUpdatingPhoto = isUpdatingPhoto,
+                                    isProcessingWallet = isProcessingWallet,
+                                    initialTabIndex = profileInitialTab,
                                     onUpdateProfilePhoto = mainViewModel::updateProfilePhoto,
                                     onCreatePost = mainViewModel::createProfilePost,
                                     onToggleLikePost = mainViewModel::toggleLikePost,
                                     onDeletePost = mainViewModel::deleteProfilePost,
+                                    onBuyPoints = mainViewModel::buyPoints,
                                     onSaveProfile = mainViewModel::updateProfile,
                                     onSignOut = {
                                         signOutFromVoxStage(
@@ -625,10 +654,18 @@ private fun AuthenticatedVoxStageApp(
                                 val existingFriendship = remember(friendships, targetUserId, currentUserId) {
                                     friendships.firstOrNull { it.otherUserId(currentUserId) == targetUserId }
                                 }
+                                val activeSubForCreator = remember(mySubscriptions, targetUserId) {
+                                    mySubscriptions.firstOrNull {
+                                        it.creatorId == targetUserId && it.isCurrentlyActive()
+                                    }
+                                }
                                 UserProfileScreen(
                                     viewModel = profileViewModel,
                                     staffCapabilities = staffCapabilities,
                                     friendship = existingFriendship,
+                                    myPointsBalance = myPointsBalance,
+                                    activeSubscription = activeSubForCreator,
+                                    isProcessingWallet = isProcessingWallet,
                                     onBack = { navController.popBackStack() },
                                     onMessageUser = { otherUid, otherName, otherColor, otherTier ->
                                         mainViewModel.startPrivateChat(
@@ -643,7 +680,10 @@ private fun AuthenticatedVoxStageApp(
                                     },
                                     onSendFriendRequest = mainViewModel::sendFriendRequest,
                                     onAcceptFriendRequest = mainViewModel::acceptFriendRequest,
-                                    onRemoveOrDeclineFriendship = mainViewModel::removeOrDeclineFriendship
+                                    onRemoveOrDeclineFriendship = mainViewModel::removeOrDeclineFriendship,
+                                    onUnlockPost = mainViewModel::unlockProfilePost,
+                                    onSubscribeCreator = mainViewModel::subscribeToCreator,
+                                    onOpenBuyPoints = ::openProfileBuyPoints
                                 )
                             }
 
@@ -658,6 +698,7 @@ private fun AuthenticatedVoxStageApp(
                                         initializer {
                                             val db = FirebaseFirestore.getInstance()
                                             DirectChatViewModel(
+                                                context = context,
                                                 repository = VoxStageRepository(db),
                                                 currentUserId = currentUserId,
                                                 threadId = threadId

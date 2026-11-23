@@ -22,6 +22,9 @@
         "disableVideo": { "type": "boolean", "description": "Admin-controlled restriction disabling camera video broadcast." },
         "suspendedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which the user is suspended by Admin or Support (0 = not suspended)." },
         "suspensionReason": { "type": "string", "description": "Optional reason shown to suspended user (0-200 chars)." },
+        "pointsBalance": { "type": "integer", "description": "Available points balance (1 point = $1; 2 points = $2)." },
+        "creatorEarningsCents": { "type": "integer", "description": "Accumulated creator earnings in USD cents ($1 per 2-pt photo unlock, $7.50 per $15/mo subscription)." },
+        "totalSpentCents": { "type": "integer", "description": "Total USD cents spent on points and creator subscriptions." },
         "blockedUserIds": { "type": "array", "description": "Bounded list of up to 100 blocked UIDs." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
@@ -114,6 +117,7 @@
         "participantCount": { "type": "integer" },
         "moderatorIds": { "type": "array" },
         "bannedUserIds": { "type": "array" },
+        "bouncedUntilByUserId": { "type": "object", "description": "Map of userId -> epoch millis until which a bounced user is locked out of entering the room (24h)." },
         "mutedUserIds": { "type": "array" },
         "blockedWords": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -298,7 +302,7 @@
     },
     "DirectMessage": {
       "title": "DirectMessage",
-      "description": "Immutable 1-on-1 private message inside a DirectThread.",
+      "description": "Immutable 1-on-1 private message (text and/or camera snap photo) inside a DirectThread.",
       "type": "object",
       "properties": {
         "threadId": { "type": "string" },
@@ -307,13 +311,14 @@
         "senderName": { "type": "string" },
         "senderTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
         "text": { "type": "string" },
+        "imageBase64": { "type": "string", "description": "Optional compressed JPEG snap picture." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["threadId", "participantIds", "senderId", "senderName", "senderTier", "text", "createdAt"]
     },
     "ProfilePost": {
       "title": "ProfilePost",
-      "description": "User-authored profile update containing text, an optional compressed JPEG photo, and community likes.",
+      "description": "User-authored profile update containing text, an optional compressed JPEG photo (optionally locked for 2 points / $2), and community likes.",
       "type": "object",
       "properties": {
         "authorId": { "type": "string" },
@@ -324,6 +329,9 @@
         "authorTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
         "text": { "type": "string" },
         "imageBase64": { "type": "string" },
+        "locked": { "type": "boolean", "description": "Whether the attached photo is locked (requires 2 points / $2 or $15/mo creator subscription)." },
+        "unlockPricePoints": { "type": "integer", "description": "Points required to unlock this locked photo (fixed at 2)." },
+        "unlockedByUserIds": { "type": "array", "description": "UIDs that unlocked this photo individually." },
         "likedByUserIds": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -331,6 +339,50 @@
       "required": [
         "authorId", "authorName", "authorHandle", "authorColorHex", "authorTier",
         "text", "imageBase64", "likedByUserIds", "createdAt", "updatedAt"
+      ]
+    },
+    "CreatorSubscription": {
+      "title": "CreatorSubscription",
+      "description": "Monthly $15 creator subscription unlocking all locked photos from a specific creator for 30 days.",
+      "type": "object",
+      "properties": {
+        "subscriberId": { "type": "string" },
+        "creatorId": { "type": "string" },
+        "creatorName": { "type": "string" },
+        "priceCents": { "type": "integer" },
+        "creatorShareCents": { "type": "integer" },
+        "platformShareCents": { "type": "integer" },
+        "active": { "type": "boolean" },
+        "expiresAtMillis": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "subscriberId", "creatorId", "creatorName", "priceCents",
+        "creatorShareCents", "platformShareCents", "active", "expiresAtMillis",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "PointTransaction": {
+      "title": "PointTransaction",
+      "description": "Immutable ledger entry recording point purchases, 2-point ($2) photo unlocks ($1 creator / $1 app owner), and $15/mo creator subscriptions.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["BUY_POINTS", "UNLOCK_PHOTO", "SUBSCRIBE_CREATOR"] },
+        "buyerId": { "type": "string" },
+        "buyerName": { "type": "string" },
+        "creatorId": { "type": "string" },
+        "creatorName": { "type": "string" },
+        "postId": { "type": "string" },
+        "pointsDelta": { "type": "integer" },
+        "grossCents": { "type": "integer" },
+        "creatorShareCents": { "type": "integer" },
+        "platformShareCents": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "type", "buyerId", "buyerName", "creatorId", "creatorName", "postId",
+        "pointsDelta", "grossCents", "creatorShareCents", "platformShareCents", "createdAt"
       ]
     }
   },
@@ -389,7 +441,15 @@
     },
     "/profilePosts/{postId}": {
       "schema": { "$ref": "#/entities/ProfilePost" },
-      "description": "Public profile posts (text and/or photos) authored by users and viewable on their profile and Discovery feed."
+      "description": "Public profile posts (text and/or photos, including 2-point locked photos) authored by users."
+    },
+    "/creatorSubscriptions/{subId}": {
+      "schema": { "$ref": "#/entities/CreatorSubscription" },
+      "description": "Active $15/month creator subscriptions unlocking all locked photos for a creator."
+    },
+    "/pointTransactions/{txId}": {
+      "schema": { "$ref": "#/entities/PointTransaction" },
+      "description": "Append-only ledger tracking point purchases, 2-pt photo unlocks ($1 creator / $1 app owner), and $15/mo subscriptions."
     }
   }
 }

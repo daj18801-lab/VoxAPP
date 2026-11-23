@@ -665,6 +665,9 @@ class VoxStageRepository(
                     "disableVideo" to false,
                     "suspendedUntilMillis" to 0L,
                     "suspensionReason" to "",
+                    "pointsBalance" to 0L,
+                    "creatorEarningsCents" to 0L,
+                    "totalSpentCents" to 0L,
                     "blockedUserIds" to emptyList<String>(),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -1409,6 +1412,12 @@ class VoxStageRepository(
                 if (room.bannedUserIds.contains(uid)) {
                     return Result.failure(IllegalStateException("You are banned from this room."))
                 }
+                if (room.isBouncedOut(uid)) {
+                    val left = room.remainingBounceLabel(uid)
+                    return Result.failure(
+                        IllegalStateException("You were bounced from this room and cannot enter for $left.")
+                    )
+                }
             }
             if (room.roomLocked && !room.hasModPrivileges(uid, staffCapabilities.tier)) {
                 return Result.failure(IllegalStateException("This room is currently locked by moderators."))
@@ -1784,6 +1793,27 @@ class VoxStageRepository(
                 }
             }
 
+            // Admin & Support bounce imposes a 24-hour lockout on re-entering this room
+            val is24hBounce = actorTier.isStaff()
+            if (is24hBounce) {
+                val nowMs = System.currentTimeMillis()
+                val bounceUntilMs = nowMs + 24L * 60L * 60L * 1000L
+                val updatedBounces = room.bouncedUntilByUserId
+                    .filterValues { it > nowMs }
+                    .toMutableMap()
+                    .apply { put(targetUserId, bounceUntilMs) }
+                    .entries
+                    .sortedByDescending { it.value }
+                    .take(100)
+                    .associate { it.key to it.value }
+                db.collection("rooms").document(room.id).update(
+                    mapOf(
+                        "bouncedUntilByUserId" to updatedBounces,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+
             writeModLog(
                 roomId = room.id,
                 actorId = uid,
@@ -1791,23 +1821,33 @@ class VoxStageRepository(
                 targetUserId = targetUserId,
                 targetName = targetName,
                 actionType = ModActionType.BOUNCE,
-                reason = reason.ifBlank { "Bounced from room by $actorName" }
+                reason = if (is24hBounce) {
+                    reason.ifBlank { "Bounced for 24 hours by $actorName" }
+                } else {
+                    reason.ifBlank { "Bounced from room by $actorName" }
+                }
             )
             sendModNotice(
                 roomId = room.id,
                 actorName = actorName,
                 actorTier = actorTier,
-                text = "$targetName was bounced from the room"
+                text = if (is24hBounce) {
+                    "$targetName was bounced from the room for 24 hours"
+                } else {
+                    "$targetName was bounced from the room"
+                }
             )
-            if (actorTier.isStaff()) {
+            if (is24hBounce) {
                 sendUserAlert(
                     targetUserId = targetUserId,
                     targetName = targetName,
                     senderName = actorName,
                     senderTier = actorTier,
                     roomId = room.id,
-                    title = "Bounced from ${room.displayTitle().take(36)}",
-                    message = reason.ifBlank { "You were bounced from the room by $actorName. You may rejoin when ready." },
+                    title = "Bounced for 24 Hours",
+                    message = reason.ifBlank {
+                        "You were bounced from ${room.displayTitle().take(36)} by $actorName. You cannot enter this room for 24 hours."
+                    },
                     severity = AlertSeverity.WARNING
                 )
             }
@@ -2566,33 +2606,44 @@ class VoxStageRepository(
         thread: DirectThread,
         senderName: String,
         senderTier: StaffTier,
-        text: String
+        text: String,
+        imageBase64: String = ""
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
         val cleanText = text.trim().take(500)
-        if (cleanText.isEmpty()) return Result.success(Unit)
+        val cleanImage = imageBase64.trim()
+        if (cleanText.isEmpty() && cleanImage.isEmpty()) return Result.success(Unit)
         val msgRef = db.collection("directThreads").document(thread.id)
             .collection("messages").document()
         val path = msgRef.path
         return try {
+            require(cleanImage.length <= 460_000) { "Picture is too large to send. Please try again." }
             val otherUid = thread.otherUserId(uid)
             val safeName = senderName.trim().ifBlank { "Member" }.take(40)
-            msgRef.set(
-                mapOf(
-                    "threadId" to thread.id,
-                    "participantIds" to thread.participantIds,
-                    "senderId" to uid,
-                    "senderName" to safeName,
-                    "senderTier" to senderTier.name,
-                    "text" to cleanText,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val payload = mutableMapOf<String, Any>(
+                "threadId" to thread.id,
+                "participantIds" to thread.participantIds,
+                "senderId" to uid,
+                "senderName" to safeName,
+                "senderTier" to senderTier.name,
+                "text" to cleanText,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            if (cleanImage.isNotEmpty()) {
+                payload["imageBase64"] = cleanImage
+            }
+            msgRef.set(payload).await()
+
+            val previewText = when {
+                cleanImage.isNotEmpty() && cleanText.isNotEmpty() -> "📷 $cleanText"
+                cleanImage.isNotEmpty() -> "📷 Sent a snap"
+                else -> cleanText
+            }.take(300)
 
             db.collection("directThreads").document(thread.id).update(
                 mapOf(
-                    "lastMessageText" to cleanText.take(300),
+                    "lastMessageText" to previewText,
                     "lastMessageSenderId" to uid,
                     "unreadByUserIds" to listOf(otherUid),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -2704,7 +2755,8 @@ class VoxStageRepository(
         myProfile: UserProfile,
         myTier: StaffTier,
         text: String,
-        imageBase64: String
+        imageBase64: String,
+        locked: Boolean = false
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -2719,6 +2771,7 @@ class VoxStageRepository(
             require(cleanImage.length <= 460_000) {
                 "Image is too large to post. Try selecting another photo."
             }
+            val effectiveLocked = locked && cleanImage.isNotEmpty()
             val safeName = myProfile.displayName.trim().ifBlank { "Member" }.take(40)
             val safeHandle = myProfile.handle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
             val safeColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(myProfile.avatarColorHex)) myProfile.avatarColorHex else "#0088FF"
@@ -2734,6 +2787,9 @@ class VoxStageRepository(
                     "authorTier" to myTier.name,
                     "text" to cleanText,
                     "imageBase64" to cleanImage,
+                    "locked" to effectiveLocked,
+                    "unlockPricePoints" to 2L,
+                    "unlockedByUserIds" to emptyList<String>(),
                     "likedByUserIds" to emptyList<String>(),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -2812,6 +2868,334 @@ class VoxStageRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- POINTS WALLET, LOCKED PHOTO UNLOCKS ($1 CREATOR / $1 APP OWNER) & $15/MO SUBSCRIPTIONS ---
+
+    fun observeMySubscriptions(userId: String): Flow<List<CreatorSubscription>> = flow {
+        val uid = requireUserId()
+        require(uid == userId) { "Cross-user subscription observation denied." }
+        val path = "creatorSubscriptions"
+        emitAll(
+            db.collection("creatorSubscriptions")
+                .whereEqualTo("subscriberId", userId)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(
+                        CreatorSubscription::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    ).sortedByDescending { it.expiresAtMillis }
+                }
+                .catch { error ->
+                    val unwrapped = unwrapFirestoreError(error)
+                    if (auth.currentUser?.uid == uid) {
+                        handleFirestoreError(unwrapped, OperationType.LIST, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    fun observeMyTransactions(userId: String): Flow<List<PointTransaction>> = flow {
+        val uid = requireUserId()
+        require(uid == userId) { "Cross-user transaction observation denied." }
+        val buyerFlow = db.collection("pointTransactions")
+            .whereEqualTo("buyerId", userId)
+            .snapshots()
+            .map { snap ->
+                snap.toObjects(
+                    PointTransaction::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                )
+            }
+            .catch { error ->
+                val unwrapped = unwrapFirestoreError(error)
+                if (auth.currentUser?.uid == uid) {
+                    handleFirestoreError(unwrapped, OperationType.LIST, "pointTransactions(buyer)")
+                }
+                throw error
+            }
+        val creatorFlow = db.collection("pointTransactions")
+            .whereEqualTo("creatorId", userId)
+            .snapshots()
+            .map { snap ->
+                snap.toObjects(
+                    PointTransaction::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                )
+            }
+            .catch { error ->
+                val unwrapped = unwrapFirestoreError(error)
+                if (auth.currentUser?.uid == uid) {
+                    handleFirestoreError(unwrapped, OperationType.LIST, "pointTransactions(creator)")
+                }
+                throw error
+            }
+        emitAll(
+            combine(buyerFlow, creatorFlow) { bought, earned ->
+                (bought + earned)
+                    .distinctBy { it.id }
+                    .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    .take(60)
+            }
+        )
+    }
+
+    fun observeAllTransactionsForAdmin(): Flow<List<PointTransaction>> = flow {
+        val uid = requireUserId()
+        val path = "pointTransactions"
+        emitAll(
+            db.collection("pointTransactions")
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(
+                        PointTransaction::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    ).sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                        .take(150)
+                }
+                .catch { error ->
+                    val unwrapped = unwrapFirestoreError(error)
+                    if (auth.currentUser?.uid == uid) {
+                        handleFirestoreError(unwrapped, OperationType.LIST, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    /**
+     * Buys points at $1 per point (2 points = $2). Atomically increments user's pointsBalance
+     * and totalSpentCents, and logs an immutable BUY_POINTS ledger entry.
+     */
+    suspend fun buyPoints(
+        pointsToBuy: Long,
+        buyerName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            require(pointsToBuy in 2L..500L) { "Select between 2 and 500 points." }
+            val costCents = pointsToBuy * 100L
+            val userRef = db.collection("users").document(uid)
+            val txRef = db.collection("pointTransactions").document()
+            val safeName = buyerName.trim().ifBlank { "Member" }.take(40)
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(pointsToBuy),
+                    "totalSpentCents" to FieldValue.increment(costCents),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.BUY_POINTS.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeName,
+                    "creatorId" to "",
+                    "creatorName" to "",
+                    "postId" to "",
+                    "pointsDelta" to pointsToBuy,
+                    "grossCents" to costCents,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 0L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Unlocks a locked profile photo for 2 points ($2):
+     * - Deducts 2 points from buyer
+     * - Adds buyer to post's unlockedByUserIds
+     * - Credits $1.00 (100c) to the photo owner (creator)
+     * - Logs $1.00 (100c) platform share to app owner in pointTransactions
+     */
+    suspend fun unlockProfilePost(
+        post: ProfilePost,
+        buyerName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "profilePosts/${post.id}"
+        return try {
+            require(post.locked) { "This photo is already public." }
+            require(post.authorId != uid) { "You own this photo." }
+            if (post.unlockedByUserIds.contains(uid)) return Result.success(Unit)
+
+            val buyerRef = db.collection("users").document(uid)
+            val buyerSnap = buyerRef.get().await()
+            val currentPoints = (buyerSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            require(currentPoints >= 2L) {
+                "Not enough points. You need 2 points ($2) to unlock this photo — buy points in Profile Settings."
+            }
+
+            val postRef = db.collection("profilePosts").document(post.id)
+            val creatorRef = db.collection("users").document(post.authorId)
+            val txRef = db.collection("pointTransactions").document()
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val safeCreatorName = post.authorName.trim().ifBlank { "Creator" }.take(40)
+            val updatedUnlocked = (post.unlockedByUserIds + uid).distinct().take(500)
+
+            val batch = db.batch()
+            batch.update(
+                buyerRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-2L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                postRef,
+                mapOf(
+                    "unlockedByUserIds" to updatedUnlocked,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                creatorRef,
+                mapOf(
+                    "creatorEarningsCents" to FieldValue.increment(100L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.UNLOCK_PHOTO.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to post.authorId,
+                    "creatorName" to safeCreatorName,
+                    "postId" to post.id,
+                    "pointsDelta" to -2L,
+                    "grossCents" to 200L,
+                    "creatorShareCents" to 100L,
+                    "platformShareCents" to 100L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Subscribes the signed-in user to a creator for $15/month (30 days),
+     * unlocking ALL of that creator's locked photos. Credits $7.50 to creator and logs $7.50 to app owner.
+     */
+    suspend fun subscribeToCreator(
+        creatorId: String,
+        creatorName: String,
+        buyerName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val subId = "${uid}_$creatorId"
+        val path = "creatorSubscriptions/$subId"
+        return try {
+            require(creatorId.isNotBlank() && creatorId != uid) { "Cannot subscribe to yourself." }
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val safeCreatorName = creatorName.trim().ifBlank { "Creator" }.take(40)
+            val subRef = db.collection("creatorSubscriptions").document(subId)
+            val existingSub = subRef.get().await()
+            val nowMs = System.currentTimeMillis()
+            val baseExpiry = if (existingSub.exists()) {
+                val prev = (existingSub.get("expiresAtMillis") as? Number)?.toLong() ?: 0L
+                maxOf(prev, nowMs)
+            } else {
+                nowMs
+            }
+            val newExpiryMs = baseExpiry + 30L * 24L * 60L * 60L * 1000L
+
+            val buyerRef = db.collection("users").document(uid)
+            val creatorRef = db.collection("users").document(creatorId)
+            val txRef = db.collection("pointTransactions").document()
+
+            val batch = db.batch()
+            if (existingSub.exists()) {
+                batch.update(
+                    subRef,
+                    mapOf(
+                        "creatorName" to safeCreatorName,
+                        "active" to true,
+                        "expiresAtMillis" to newExpiryMs,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            } else {
+                batch.set(
+                    subRef,
+                    mapOf(
+                        "subscriberId" to uid,
+                        "creatorId" to creatorId,
+                        "creatorName" to safeCreatorName,
+                        "priceCents" to 1500L,
+                        "creatorShareCents" to 750L,
+                        "platformShareCents" to 750L,
+                        "active" to true,
+                        "expiresAtMillis" to newExpiryMs,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.update(
+                buyerRef,
+                mapOf(
+                    "totalSpentCents" to FieldValue.increment(1500L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                creatorRef,
+                mapOf(
+                    "creatorEarningsCents" to FieldValue.increment(750L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.SUBSCRIBE_CREATOR.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to creatorId,
+                    "creatorName" to safeCreatorName,
+                    "postId" to "",
+                    "pointsDelta" to 0L,
+                    "grossCents" to 1500L,
+                    "creatorShareCents" to 750L,
+                    "platformShareCents" to 750L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
             Result.failure(e)
         }
     }

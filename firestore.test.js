@@ -1012,6 +1012,321 @@ test("Users can upload profile pictures, publish text/photo posts, browse profil
   await assertSucceeds(adminDb.collection("profilePosts").doc("post_alice_1").delete());
 });
 
+// 11. 24-HOUR ROOM BOUNCE LOCKOUT (Admin & Support bounce blocks re-entry for 24 hours)
+test("Admin or Support bouncing a user locks them out of entering the room for 24 hours", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const supportDb = testEnv
+    .authenticatedContext(SUPPORT_UID, { email: SUPPORT_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(4000);
+
+  await assertSucceeds(
+    adminDb.collection("staffRoles").doc(SUPPORT_UID).set({
+      userId: SUPPORT_UID,
+      email: SUPPORT_EMAIL,
+      displayName: "Sam Support",
+      staffTier: "SUPPORT",
+      canEnterInvisible: false,
+      addedByUid: ADMIN_UID,
+      addedByName: "Admin",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  await assertSucceeds(aliceDb.collection("rooms").doc("room_bounce").set(validRoomPayload(ALICE_UID)));
+  await assertSucceeds(
+    bobDb.collection("rooms").doc("room_bounce").collection("participants").doc(BOB_UID).set(
+      validParticipantPayload(BOB_UID, "room_bounce")
+    )
+  );
+
+  // Support bounces Bob for 24 hours (deletes participant + writes bouncedUntilByUserId[BOB_UID])
+  const lockoutUntilMs = Date.now() + 24 * 60 * 60 * 1000;
+  await assertSucceeds(
+    supportDb.collection("rooms").doc("room_bounce").collection("participants").doc(BOB_UID).delete()
+  );
+  await assertSucceeds(
+    supportDb.collection("rooms").doc("room_bounce").update({
+      bouncedUntilByUserId: { [BOB_UID]: lockoutUntilMs },
+      updatedAt: pastDate(1000),
+    })
+  );
+
+  // Bob CANNOT re-enter the room or send messages during the 24-hour bounce window!
+  await assertFails(
+    bobDb.collection("rooms").doc("room_bounce").collection("participants").doc(BOB_UID).set(
+      validParticipantPayload(BOB_UID, "room_bounce")
+    )
+  );
+  await assertFails(
+    bobDb.collection("rooms").doc("room_bounce").collection("messages").doc("msg_bounced").set(
+      validMessagePayload("room_bounce", BOB_UID)
+    )
+  );
+
+  // Once the 24-hour lockout has expired (timestamp in past), Bob CAN re-enter!
+  await assertSucceeds(
+    adminDb.collection("rooms").doc("room_bounce").update({
+      bouncedUntilByUserId: { [BOB_UID]: Date.now() - 60_000 },
+      updatedAt: pastDate(500),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("rooms").doc("room_bounce").collection("participants").doc(BOB_UID).set(
+      validParticipantPayload(BOB_UID, "room_bounce")
+    )
+  );
+});
+
+// 12. PRIVATE CHAT SNAP PICTURES (imageBase64 allowed with or without caption)
+test("Private chat supports sending snap pictures with or without text", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const ts = pastDate(3000);
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+  const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Photo-only snap message (empty text, non-empty imageBase64) succeeds
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_snap_1").set({
+      threadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: ALICE_UID,
+      senderName: "Alice",
+      senderTier: "USER",
+      text: "",
+      imageBase64: sampleBase64,
+      createdAt: pastDate(1500),
+    })
+  );
+
+  // Empty text AND empty imageBase64 is rejected
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_empty").set({
+      threadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: ALICE_UID,
+      senderName: "Alice",
+      senderTier: "USER",
+      text: "",
+      imageBase64: "",
+      createdAt: pastDate(1200),
+    })
+  );
+});
+
+// 13. LOCKED PROFILE PHOTOS, POINTS WALLET, $1/$1 REVENUE SPLIT & $15/MO CREATOR SUBSCRIPTION
+test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator subscriptions enforce strict ledger math", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext("charlie_999").firestore();
+  const ts = pastDate(4000);
+  const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+
+  // Alice posts a locked photo (2 points)
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_locked_1").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "VIP backstage photo",
+      imageBase64: sampleBase64,
+      locked: true,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      likedByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Locking a text-only post (no photo) is rejected
+  await assertFails(
+    aliceDb.collection("profilePosts").doc("post_locked_no_img").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorTier: "USER",
+      text: "Text only",
+      imageBase64: "",
+      locked: true,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      likedByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Bob buys 2 points for $2 (pointsBalance 0 -> 2, totalSpentCents 0 -> 200)
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).update({
+      pointsBalance: 2,
+      totalSpentCents: 200,
+      updatedAt: pastDate(3000),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("pointTransactions").doc("tx_buy_1").set({
+      type: "BUY_POINTS",
+      buyerId: BOB_UID,
+      buyerName: "Bob",
+      creatorId: "",
+      creatorName: "",
+      postId: "",
+      pointsDelta: 2,
+      grossCents: 200,
+      creatorShareCents: 0,
+      platformShareCents: 0,
+      createdAt: pastDate(2900),
+    })
+  );
+
+  // Bob CANNOT give himself free points without matching totalSpentCents or self-credit creatorEarningsCents
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).update({
+      pointsBalance: 100,
+      totalSpentCents: 200,
+      updatedAt: pastDate(2800),
+    })
+  );
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).update({
+      creatorEarningsCents: 5000,
+      updatedAt: pastDate(2800),
+    })
+  );
+
+  // Bob unlocks Alice's locked photo: spends 2 pts, adds self to unlockedByUserIds, credits Alice $1 (100c), logs $1/$1 split!
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).update({
+      pointsBalance: 0,
+      updatedAt: pastDate(2500),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("profilePosts").doc("post_locked_1").update({
+      unlockedByUserIds: [BOB_UID],
+      updatedAt: pastDate(2400),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("users").doc(ALICE_UID).update({
+      creatorEarningsCents: 100,
+      updatedAt: pastDate(2300),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("pointTransactions").doc("tx_unlock_1").set({
+      type: "UNLOCK_PHOTO",
+      buyerId: BOB_UID,
+      buyerName: "Bob",
+      creatorId: ALICE_UID,
+      creatorName: "Alice",
+      postId: "post_locked_1",
+      pointsDelta: -2,
+      grossCents: 200,
+      creatorShareCents: 100,
+      platformShareCents: 100,
+      createdAt: pastDate(2200),
+    })
+  );
+
+  // Forged split (e.g., $2 creator / $0 app owner) is REJECTED by rules!
+  await assertFails(
+    bobDb.collection("pointTransactions").doc("tx_unlock_forged").set({
+      type: "UNLOCK_PHOTO",
+      buyerId: BOB_UID,
+      buyerName: "Bob",
+      creatorId: ALICE_UID,
+      creatorName: "Alice",
+      postId: "post_locked_1",
+      pointsDelta: -2,
+      grossCents: 200,
+      creatorShareCents: 200,
+      platformShareCents: 0,
+      createdAt: pastDate(2100),
+    })
+  );
+
+  // Bob subscribes to Alice for $15/month (30 days)
+  const subId = `${BOB_UID}_${ALICE_UID}`;
+  await assertSucceeds(
+    bobDb.collection("creatorSubscriptions").doc(subId).set({
+      subscriberId: BOB_UID,
+      creatorId: ALICE_UID,
+      creatorName: "Alice",
+      priceCents: 1500,
+      creatorShareCents: 750,
+      platformShareCents: 750,
+      active: true,
+      expiresAtMillis: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      createdAt: pastDate(1800),
+      updatedAt: pastDate(1800),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("users").doc(ALICE_UID).update({
+      creatorEarningsCents: 850,
+      updatedAt: pastDate(1700),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("pointTransactions").doc("tx_sub_1").set({
+      type: "SUBSCRIBE_CREATOR",
+      buyerId: BOB_UID,
+      buyerName: "Bob",
+      creatorId: ALICE_UID,
+      creatorName: "Alice",
+      postId: "",
+      pointsDelta: 0,
+      grossCents: 1500,
+      creatorShareCents: 750,
+      platformShareCents: 750,
+      createdAt: pastDate(1600),
+    })
+  );
+
+  // Charlie cannot read Bob's subscription or transaction; Admin CAN read all ledger entries
+  await assertFails(charlieDb.collection("creatorSubscriptions").doc(subId).get());
+  await assertFails(charlieDb.collection("pointTransactions").doc("tx_unlock_1").get());
+  await assertSucceeds(adminDb.collection("pointTransactions").get());
+});
+
+
 
 
 

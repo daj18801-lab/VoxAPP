@@ -5,15 +5,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AlertSeverity
 import com.example.data.ChatRoom
+import com.example.data.CreatorSubscription
 import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
 import com.example.data.Friendship
+import com.example.data.PointTransaction
 import com.example.data.ProfilePost
 import com.example.data.ReportStatus
 import com.example.data.RoomCategory
 import com.example.data.RoomCoverKey
 import com.example.data.RoomVisibility
 import com.example.data.SafetyReport
+import com.example.data.formatUsdCents
 import com.example.data.StaffCapabilities
 import com.example.data.StaffInvite
 import com.example.data.StaffRole
@@ -68,6 +71,9 @@ class MainViewModel(
 
     private val _isUpdatingPhoto = MutableStateFlow(false)
     val isUpdatingPhoto: StateFlow<Boolean> = _isUpdatingPhoto.asStateFlow()
+
+    private val _isProcessingWallet = MutableStateFlow(false)
+    val isProcessingWallet: StateFlow<Boolean> = _isProcessingWallet.asStateFlow()
 
     private val _snackbarEvents = MutableSharedFlow<String>(extraBufferCapacity = 12)
     val snackbarEvents: SharedFlow<String> = _snackbarEvents.asSharedFlow()
@@ -287,6 +293,48 @@ class MainViewModel(
             initialValue = emptyList()
         )
 
+    // --- POINTS WALLET, CREATOR SUBSCRIPTIONS & REVENUE LEDGER ---
+
+    val mySubscriptionsState: StateFlow<List<CreatorSubscription>> =
+        repository.observeMySubscriptions(currentUserId)
+            .catch { error ->
+                Log.w(TAG, "Error observing subscriptions", unwrapFirestoreError(error))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val myTransactionsState: StateFlow<List<PointTransaction>> =
+        repository.observeMyTransactions(currentUserId)
+            .catch { error ->
+                Log.w(TAG, "Error observing point transactions", unwrapFirestoreError(error))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val allTransactionsState: StateFlow<List<PointTransaction>> =
+        isAdminFlow.flatMapLatest { isAdminNow ->
+            if (isAdminNow) {
+                repository.observeAllTransactionsForAdmin().catch { error ->
+                    Log.w(TAG, "Error observing platform transactions", unwrapFirestoreError(error))
+                    emit(emptyList())
+                }
+            } else {
+                flowOf(emptyList())
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
     init {
         viewModelScope.launch {
             val safeName = initialDisplayName.ifBlank { "Studio Host" }
@@ -419,25 +467,38 @@ class MainViewModel(
 
     // --- LIVE ROOMS ACTIONS ---
 
-    fun canEnterRoomOrNotify(): Boolean {
+    fun canEnterRoomOrNotify(room: ChatRoom? = null): Boolean {
         if (staffCapabilities.value.isAdmin) return true
-        val profile = (userProfileState.value as? UiState.Success)?.data ?: return true
-        return when {
-            profile.globallyBanned -> {
-                _snackbarEvents.tryEmit("Your account is banned from entering rooms.")
-                false
+        val profile = (userProfileState.value as? UiState.Success)?.data
+        if (profile != null) {
+            when {
+                profile.globallyBanned -> {
+                    _snackbarEvents.tryEmit("Your account is banned from entering rooms.")
+                    return false
+                }
+                profile.currentlySuspended() -> {
+                    val left = profile.remainingSuspensionLabel()
+                    _snackbarEvents.tryEmit("Suspended for $left. ${profile.suspensionReason}".trim())
+                    return false
+                }
+                profile.disableEnterRoom -> {
+                    _snackbarEvents.tryEmit("Entering rooms has been disabled on your account by an Administrator.")
+                    return false
+                }
             }
-            profile.currentlySuspended() -> {
-                val left = profile.remainingSuspensionLabel()
-                _snackbarEvents.tryEmit("Suspended for $left. ${profile.suspensionReason}".trim())
-                false
-            }
-            profile.disableEnterRoom -> {
-                _snackbarEvents.tryEmit("Entering rooms has been disabled on your account by an Administrator.")
-                false
-            }
-            else -> true
         }
+        if (room != null) {
+            if (room.bannedUserIds.contains(currentUserId)) {
+                _snackbarEvents.tryEmit("You are banned from this room.")
+                return false
+            }
+            if (room.isBouncedOut(currentUserId)) {
+                val left = room.remainingBounceLabel(currentUserId)
+                _snackbarEvents.tryEmit("You were bounced from this room and cannot enter for $left.")
+                return false
+            }
+        }
+        return true
     }
 
     fun createRoom(
@@ -583,6 +644,7 @@ class MainViewModel(
     fun createProfilePost(
         text: String,
         imageBase64: String,
+        locked: Boolean = false,
         onPosted: () -> Unit = {}
     ) {
         if (_isPublishingPost.value) return
@@ -604,14 +666,79 @@ class MainViewModel(
                 myProfile = effectiveMyProfile(),
                 myTier = caps.tier,
                 text = text,
-                imageBase64 = imageBase64
+                imageBase64 = imageBase64,
+                locked = locked
             ).onSuccess {
                 _isPublishingPost.value = false
-                _snackbarEvents.tryEmit("Post shared to your profile!")
+                _snackbarEvents.tryEmit(
+                    if (locked && imageBase64.isNotBlank()) "Locked photo posted (2 pts / \$2 to unlock)"
+                    else "Post shared to your profile!"
+                )
                 onPosted()
             }.onFailure { err ->
                 _isPublishingPost.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not publish post")
+            }
+        }
+    }
+
+    fun buyPoints(pointsToBuy: Long) {
+        if (_isProcessingWallet.value) return
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.buyPoints(
+                pointsToBuy = pointsToBuy,
+                buyerName = effectiveMyProfile().displayName
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit("Added $pointsToBuy points (${formatUsdCents(pointsToBuy * 100L)}) to your wallet!")
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not complete points purchase")
+            }
+        }
+    }
+
+    fun unlockProfilePost(
+        post: ProfilePost,
+        onInsufficientPoints: () -> Unit = {}
+    ) {
+        if (_isProcessingWallet.value) return
+        val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
+        if (currentPoints < 2L) {
+            _snackbarEvents.tryEmit("You need 2 points (\$2) to unlock this photo. Buy points in Profile Settings.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.unlockProfilePost(
+                post = post,
+                buyerName = effectiveMyProfile().displayName
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit("Photo unlocked for 2 points! (\$1 to ${post.authorName}, \$1 to App Owner)")
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not unlock photo")
+            }
+        }
+    }
+
+    fun subscribeToCreator(creatorId: String, creatorName: String) {
+        if (_isProcessingWallet.value) return
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.subscribeToCreator(
+                creatorId = creatorId,
+                creatorName = creatorName,
+                buyerName = effectiveMyProfile().displayName
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit("Subscribed to $creatorName for \$15/month — all locked photos unlocked!")
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not activate subscription")
             }
         }
     }

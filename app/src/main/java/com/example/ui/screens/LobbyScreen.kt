@@ -26,7 +26,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -115,7 +117,7 @@ fun LobbyScreen(
     onCategorySelected: (RoomCategory?) -> Unit,
     onToggleMyRooms: (Boolean) -> Unit,
     onToggleInvisiblePreference: (Boolean) -> Unit,
-    onOpenRoom: (String) -> Unit,
+    onOpenRoom: (ChatRoom) -> Unit,
     onEditRoom: (room: ChatRoom, newTitle: String, newTopic: String) -> Unit,
     onCloseRoom: (ChatRoom) -> Unit,
     onCreateRoom: (
@@ -167,8 +169,8 @@ fun LobbyScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 840.dp),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item(key = "header") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -331,13 +333,6 @@ fun LobbyScreen(
                 }
             }
 
-            item(key = "hero_banner") {
-                FeaturedLoungeBanner(
-                    liveCount = ((publicRoomsState as? UiState.Success)?.data?.size ?: 0),
-                    onStartRoom = { if (canCreateRooms) showCreateSheet = true }
-                )
-            }
-
             item(key = "search_and_scope") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
@@ -477,7 +472,9 @@ fun LobbyScreen(
                                 room = room,
                                 isHost = room.hostId == currentUserId,
                                 canManageRoom = room.canEditOrCloseRoom(currentUserId, staffCapabilities.tier),
-                                onClick = { onOpenRoom(room.id) },
+                                isBouncedOut = !staffCapabilities.isAdmin && room.isBouncedOut(currentUserId),
+                                bounceRemainingLabel = room.remainingBounceLabel(currentUserId),
+                                onClick = { onOpenRoom(room) },
                                 onEditRoomClick = { roomBeingEdited = room },
                                 onCloseRoomClick = { roomPendingClose = room }
                             )
@@ -560,326 +557,197 @@ fun LobbyScreen(
 }
 
 @Composable
-private fun FeaturedLoungeBanner(
-    liveCount: Int,
-    onStartRoom: () -> Unit
-) {
-    Card(
-        shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(164.dp)
-            .clickable(onClick = onStartRoom)
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            Image(
-                painter = painterResource(id = R.drawable.img_lounge_hero_1795298732457),
-                contentDescription = "Featured live broadcast lounge",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            colors = listOf(
-                                Color(0xE80A0D16),
-                                Color(0xB30A0D16),
-                                Color(0x4D0A0D16)
-                            )
-                        )
-                    )
-            )
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(18.dp),
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    LivePulseBadge(label = "$liveCount LIVE")
-                    SafetyTagChip(
-                        icon = Icons.Rounded.Shield,
-                        text = "MODERATION READY",
-                        tint = SafetyEmerald
-                    )
-                }
-
-                Column {
-                    Text(
-                        text = "Host Your Own Stage",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = Color.White
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Real-time voice, live camera video, Room Admin & Co-Admin controls.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFD2DAF0),
-                        maxLines = 2
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun LiveRoomCard(
     room: ChatRoom,
     isHost: Boolean,
     canManageRoom: Boolean,
+    isBouncedOut: Boolean,
+    bounceRemainingLabel: String,
     onClick: () -> Unit,
     onEditRoomClick: () -> Unit,
     onCloseRoomClick: () -> Unit
 ) {
     val hostTier = room.hostTierEnum()
 
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(
             width = 1.dp,
-            color = if (isHost) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-            else MaterialTheme.colorScheme.outlineVariant
+            color = when {
+                isBouncedOut -> LiveCoral.copy(alpha = 0.55f)
+                isHost -> MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                else -> MaterialTheme.colorScheme.outlineVariant
+            }
         ),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .testTag("room_card_${room.id}")
     ) {
-        Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Subtle Live Dot Indicator (no colored card background)
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(126.dp)
+                    .size(9.dp)
+                    .clip(CircleShape)
+                    .background(if (isBouncedOut) LiveCoral else SafetyEmerald)
+            )
+
+            // Compact Room Info Column
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                Image(
-                    painter = painterResource(id = coverDrawableRes(room.coverEnum())),
-                    contentDescription = "${room.displayTitle()} studio cover",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0x330A0D16),
-                                    Color(0xCC0A0D16)
-                                )
-                            )
-                        )
-                )
-
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        LivePulseBadge()
-                        if (room.videoEnabled) {
-                            Surface(
-                                shape = RoundedCornerShape(999.dp),
-                                color = Color(0xB3121726)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Videocam,
-                                        contentDescription = "Video enabled",
-                                        tint = VoiceCyan,
-                                        modifier = Modifier.size(13.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "VIDEO",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color.White
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = Color(0xCC121726)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Groups,
-                                contentDescription = "Participants",
-                                tint = VoiceCyan,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "${room.participantCount}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Color.White
-                            )
-                        }
-                    }
-                }
-
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                ) {
-                    Text(
-                        text = room.categoryEnum().label.uppercase(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = VoiceCyan
-                    )
                     Text(
                         text = room.displayTitle(),
-                        style = MaterialTheme.typography.titleLarge,
-                        color = Color.White,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                }
-            }
-
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                if (room.topic.isNotBlank()) {
-                    Text(
-                        text = room.topic,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (room.adminMicPriorityActive) {
-                        SafetyTagChip(
-                            icon = Icons.Rounded.Mic,
-                            text = "Admin Mic Active",
-                            tint = usernameColor(StaffTier.ADMIN)
-                        )
-                    }
-                    if (room.autoModEnabled) {
-                        SafetyTagChip(
-                            icon = Icons.Rounded.Shield,
-                            text = if (room.autoModBlockMode) "Auto-Mod Strict" else "Auto-Mod",
-                            tint = SafetyEmerald
-                        )
-                    }
-                    if (room.slowModeSeconds > 0L) {
-                        SafetyTagChip(
-                            icon = Icons.Rounded.Speed,
-                            text = "Slow ${room.slowModeSeconds}s",
-                            tint = ModAmber
+                    if (room.videoEnabled) {
+                        Icon(
+                            imageVector = Icons.Rounded.Videocam,
+                            contentDescription = "Video enabled",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
                         )
                     }
                     if (room.roomLocked) {
-                        SafetyTagChip(
-                            icon = Icons.Rounded.Lock,
-                            text = "Locked",
-                            tint = LiveCoral
+                        Icon(
+                            imageVector = Icons.Rounded.Lock,
+                            contentDescription = "Room locked",
+                            tint = LiveCoral,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                    if (room.adminMicPriorityActive) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = "Admin mic active",
+                            tint = usernameColor(StaffTier.ADMIN),
+                            modifier = Modifier.size(13.dp)
                         )
                     }
                 }
 
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
+                    Text(
+                        text = if (isHost) "You" else room.hostName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = usernameColor(hostTier),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "· ${room.categoryEnum().label}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (room.topic.isNotBlank()) {
+                        Text(
+                            text = "· ${room.topic}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                }
+
+                if (isBouncedOut) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.weight(1f)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(usernameColor(hostTier).copy(alpha = 0.2f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.GraphicEq,
-                                contentDescription = "Room Admin",
-                                tint = usernameColor(hostTier),
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Rounded.Block,
+                            contentDescription = "Bounced lockout",
+                            tint = LiveCoral,
+                            modifier = Modifier.size(12.dp)
+                        )
                         Text(
-                            text = if (isHost) "Room Admin: You" else room.hostName,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = usernameColor(hostTier),
+                            text = "Bounced · Locked out ($bounceRemainingLabel left)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = LiveCoral,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        StaffTierBadge(tier = hostTier)
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (canManageRoom) {
-                            IconButton(
-                                onClick = onEditRoomClick,
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("edit_room_${room.id}")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Edit,
-                                    contentDescription = "Edit or delete room name",
-                                    tint = VoiceCyan,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            IconButton(
-                                onClick = onCloseRoomClick,
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("close_room_${room.id}")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PowerSettingsNew,
-                                    contentDescription = "Close room",
-                                    tint = LiveCoral,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        } else {
-                            Text(
-                                text = "Enter Stage →",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
                     }
                 }
+            }
+
+            // Compact Participant Count
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Groups,
+                    contentDescription = "Participants",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = "${room.participantCount}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            // Room Admin / App Admin compact controls or clean entry arrow
+            if (canManageRoom) {
+                IconButton(
+                    onClick = onEditRoomClick,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("edit_room_${room.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Edit,
+                        contentDescription = "Edit or delete room name",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onCloseRoomClick,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("close_room_${room.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PowerSettingsNew,
+                        contentDescription = "Close room",
+                        tint = LiveCoral,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            } else {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                    contentDescription = "Enter room",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
     }

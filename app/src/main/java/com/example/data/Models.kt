@@ -191,6 +191,9 @@ data class UserProfile(
     val disableVideo: Boolean = false,
     val suspendedUntilMillis: Long = 0L,
     val suspensionReason: String = "",
+    val pointsBalance: Long = 0L,
+    val creatorEarningsCents: Long = 0L,
+    val totalSpentCents: Long = 0L,
     val blockedUserIds: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
@@ -291,6 +294,7 @@ data class ChatRoom(
     val participantCount: Long = 0L,
     val moderatorIds: List<String> = emptyList(),
     val bannedUserIds: List<String> = emptyList(),
+    val bouncedUntilByUserId: Map<String, Long> = emptyMap(),
     val mutedUserIds: List<String> = emptyList(),
     val blockedWords: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
@@ -312,6 +316,23 @@ data class ChatRoom(
         hostId == uid || staffTier == StaffTier.ADMIN
     fun canEditOrCloseRoom(uid: String, staffTier: StaffTier = StaffTier.USER): Boolean =
         hostId == uid || staffTier == StaffTier.ADMIN
+
+    fun isBouncedOut(uid: String, nowMs: Long = System.currentTimeMillis()): Boolean =
+        (bouncedUntilByUserId[uid] ?: 0L) > nowMs
+
+    fun remainingBounceLabel(uid: String, nowMs: Long = System.currentTimeMillis()): String {
+        val untilMs = bouncedUntilByUserId[uid] ?: 0L
+        val diffMs = (untilMs - nowMs).coerceAtLeast(0L)
+        if (diffMs <= 0L) return ""
+        val totalMinutes = ((diffMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+        val hours = totalMinutes / 60L
+        val mins = totalMinutes % 60L
+        return when {
+            hours > 0L && mins > 0L -> "${hours}h ${mins}m"
+            hours > 0L -> "${hours}h"
+            else -> "${mins}m"
+        }
+    }
 }
 
 @Keep
@@ -497,6 +518,7 @@ data class DirectMessage(
     val senderName: String = "",
     val senderTier: String = StaffTier.USER.name,
     val text: String = "",
+    val imageBase64: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     fun senderTierEnum(): StaffTier = StaffTier.fromRaw(senderTier)
@@ -514,10 +536,77 @@ data class ProfilePost(
     val authorTier: String = StaffTier.USER.name,
     val text: String = "",
     val imageBase64: String = "",
+    val locked: Boolean = false,
+    val unlockPricePoints: Long = 2L,
+    val unlockedByUserIds: List<String> = emptyList(),
     val likedByUserIds: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun authorTierEnum(): StaffTier = StaffTier.fromRaw(authorTier)
     fun isLikedBy(uid: String): Boolean = likedByUserIds.contains(uid)
+    fun isUnlockedFor(uid: String, subscribedCreatorIds: Set<String> = emptySet()): Boolean =
+        !locked || authorId == uid || unlockedByUserIds.contains(uid) || subscribedCreatorIds.contains(authorId)
 }
+
+enum class PointTransactionType(val label: String) {
+    BUY_POINTS("Bought Points"),
+    UNLOCK_PHOTO("Unlocked Photo"),
+    SUBSCRIBE_CREATOR("Creator Subscription");
+
+    companion object {
+        fun fromRaw(raw: String?): PointTransactionType =
+            entries.firstOrNull { it.name == raw } ?: BUY_POINTS
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class CreatorSubscription(
+    @DocumentId val id: String = "",
+    val subscriberId: String = "",
+    val creatorId: String = "",
+    val creatorName: String = "",
+    val priceCents: Long = 1500L,
+    val creatorShareCents: Long = 750L,
+    val platformShareCents: Long = 750L,
+    val active: Boolean = true,
+    val expiresAtMillis: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun isCurrentlyActive(nowMs: Long = System.currentTimeMillis()): Boolean =
+        active && expiresAtMillis > nowMs
+
+    fun daysRemaining(nowMs: Long = System.currentTimeMillis()): Int {
+        val diff = (expiresAtMillis - nowMs).coerceAtLeast(0L)
+        return ((diff + 86_399_999L) / 86_400_000L).toInt()
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class PointTransaction(
+    @DocumentId val id: String = "",
+    val type: String = PointTransactionType.BUY_POINTS.name,
+    val buyerId: String = "",
+    val buyerName: String = "",
+    val creatorId: String = "",
+    val creatorName: String = "",
+    val postId: String = "",
+    val pointsDelta: Long = 0L,
+    val grossCents: Long = 0L,
+    val creatorShareCents: Long = 0L,
+    val platformShareCents: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null
+) {
+    fun typeEnum(): PointTransactionType = PointTransactionType.fromRaw(type)
+}
+
+fun formatUsdCents(cents: Long): String {
+    val safe = cents.coerceAtLeast(0L)
+    val dollars = safe / 100L
+    val rem = safe % 100L
+    return if (rem == 0L) "$$dollars" else "$$dollars.${rem.toString().padStart(2, '0')}"
+}
+

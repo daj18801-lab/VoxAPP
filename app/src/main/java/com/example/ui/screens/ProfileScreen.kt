@@ -32,13 +32,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.CameraAlt
+import androidx.compose.material.icons.rounded.CardMembership
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DynamicFeed
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Stars
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -46,6 +50,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -53,6 +58,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -76,11 +82,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.R
+import com.example.data.CreatorSubscription
+import com.example.data.PointTransaction
+import com.example.data.PointTransactionType
 import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
+import com.example.data.formatUsdCents
 import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
@@ -106,12 +116,18 @@ fun ProfileScreen(
     staffCapabilities: StaffCapabilities,
     friendsCount: Int,
     myPostsState: UiState<List<ProfilePost>>,
+    mySubscriptions: List<CreatorSubscription>,
+    myTransactions: List<PointTransaction>,
+    allTransactionsForAdmin: List<PointTransaction>,
     isPublishingPost: Boolean,
     isUpdatingPhoto: Boolean,
+    isProcessingWallet: Boolean,
+    initialTabIndex: Int = 0,
     onUpdateProfilePhoto: (String) -> Unit,
-    onCreatePost: (text: String, imageBase64: String, onPosted: () -> Unit) -> Unit,
+    onCreatePost: (text: String, imageBase64: String, locked: Boolean, onPosted: () -> Unit) -> Unit,
     onToggleLikePost: (ProfilePost) -> Unit,
     onDeletePost: (ProfilePost) -> Unit,
+    onBuyPoints: (Long) -> Unit,
     onSaveProfile: (
         displayName: String,
         handle: String,
@@ -126,7 +142,7 @@ fun ProfileScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = My Posts, 1 = Edit & Studio
+    var selectedTab by remember(initialTabIndex) { mutableIntStateOf(initialTabIndex) } // 0 = My Posts, 1 = Settings & Points
     var showFullAvatar by remember { mutableStateOf(false) }
 
     var dmNotificationsEnabled by remember {
@@ -150,6 +166,7 @@ fun ProfileScreen(
     // Post composer state
     var postText by remember { mutableStateOf("") }
     var draftPostPhotoBase64 by remember { mutableStateOf("") }
+    var lockPostPhoto by remember { mutableStateOf(false) }
     var isEncodingPostPhoto by remember { mutableStateOf(false) }
 
     // Profile editor state
@@ -394,6 +411,21 @@ fun ProfileScreen(
                                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                     )
                                 }
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = SafetyEmerald.copy(alpha = 0.14f),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .clickable { selectedTab = 1 }
+                                        .testTag("profile_points_pill")
+                                ) {
+                                    Text(
+                                        text = "${userProfile?.pointsBalance ?: 0L} pts",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = SafetyEmerald,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    )
+                                }
                             }
 
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -450,7 +482,7 @@ fun ProfileScreen(
                     FilterChip(
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
-                        label = { Text("Edit & Studio") },
+                        label = { Text("Settings & Points") },
                         shape = RoundedCornerShape(999.dp),
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = MaterialTheme.colorScheme.primary,
@@ -538,7 +570,10 @@ fun ProfileScreen(
                                             .size(36.dp)
                                     ) {
                                         IconButton(
-                                            onClick = { draftPostPhotoBase64 = "" },
+                                            onClick = {
+                                                draftPostPhotoBase64 = ""
+                                                lockPostPhoto = false
+                                            },
                                             modifier = Modifier.testTag("remove_draft_post_photo")
                                         ) {
                                             Icon(
@@ -548,6 +583,55 @@ fun ProfileScreen(
                                                 modifier = Modifier.size(18.dp)
                                             )
                                         }
+                                    }
+                                }
+
+                                // Lock Photo Toggle (2 pts / $2 unlock · $1 to creator, $1 to app owner)
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = if (lockPostPhoto) {
+                                        ModAmber.copy(alpha = 0.14f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                    },
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (lockPostPhoto) ModAmber.copy(alpha = 0.55f)
+                                        else MaterialTheme.colorScheme.outlineVariant
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { lockPostPhoto = !lockPostPhoto }
+                                        .testTag("lock_post_photo_toggle_row")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Lock,
+                                            contentDescription = "Lock photo",
+                                            tint = if (lockPostPhoto) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Lock Photo (2 pts / \$2 to unlock)",
+                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                                color = if (lockPostPhoto) ModAmber else MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "You earn \$1 & app owner gets \$1 per unlock, or viewers subscribe \$15/mo",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = lockPostPhoto,
+                                            onCheckedChange = { lockPostPhoto = it },
+                                            modifier = Modifier.testTag("lock_post_photo_switch")
+                                        )
                                     }
                                 }
                             }
@@ -578,9 +662,14 @@ fun ProfileScreen(
 
                                 Button(
                                     onClick = {
-                                        onCreatePost(postText, draftPostPhotoBase64) {
+                                        onCreatePost(
+                                            postText,
+                                            draftPostPhotoBase64,
+                                            lockPostPhoto && draftPostPhotoBase64.isNotBlank()
+                                        ) {
                                             postText = ""
                                             draftPostPhotoBase64 = ""
+                                            lockPostPhoto = false
                                         }
                                     },
                                     enabled = !isPublishingPost && !isEncodingPostPhoto &&
@@ -686,7 +775,21 @@ fun ProfileScreen(
                     }
                 }
             } else {
-                // TAB 1: EDIT PROFILE, RESTRICTIONS, HARDWARE READINESS, PREFERENCES & SIGN OUT
+                // TAB 1: POINTS WALLET (BUY POINTS), CREATOR EARNINGS, SUBSCRIPTIONS & PROFILE SETTINGS
+                item(key = "points_wallet_card") {
+                    PointsWalletSettingsCard(
+                        currentUserId = currentUserId,
+                        userProfile = userProfile,
+                        isAdmin = staffCapabilities.isAdmin,
+                        activeSubscriptions = mySubscriptions.filter { it.isCurrentlyActive() },
+                        recentTransactions = myTransactions.take(6),
+                        appOwnerRevenueCents = allTransactionsForAdmin.sumOf { it.platformShareCents },
+                        isProcessingWallet = isProcessingWallet,
+                        onBuyPoints = onBuyPoints
+                    )
+                }
+
+                // RESTRICTIONS, HARDWARE READINESS, PREFERENCES & SIGN OUT
                 if (!staffCapabilities.isAdmin && userProfile != null) {
                     val activeRestrictions = buildList {
                         if (userProfile.globallyBanned) add("Account Banned")
@@ -1008,6 +1111,304 @@ private fun HardwarePermissionRow(
             OutlinedButton(onClick = onRequest) {
                 Text("Enable")
             }
+        }
+    }
+}
+
+@Composable
+private fun PointsWalletSettingsCard(
+    currentUserId: String,
+    userProfile: UserProfile?,
+    isAdmin: Boolean,
+    activeSubscriptions: List<CreatorSubscription>,
+    recentTransactions: List<PointTransaction>,
+    appOwnerRevenueCents: Long,
+    isProcessingWallet: Boolean,
+    onBuyPoints: (Long) -> Unit
+) {
+    val pointsBalance = userProfile?.pointsBalance ?: 0L
+    val creatorEarningsCents = userProfile?.creatorEarningsCents ?: 0L
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("points_wallet_settings_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.AccountBalanceWallet,
+                    contentDescription = "Points wallet",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp)
+                )
+                Text(
+                    text = "Points & Creator Wallet",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            // Balance + Creator Earnings + (Admin) App Owner Revenue Summary
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Points Balance",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "$pointsBalance pts",
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = SafetyEmerald.copy(alpha = 0.14f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Creator Earnings",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = formatUsdCents(creatorEarningsCents),
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
+                            color = SafetyEmerald
+                        )
+                    }
+                }
+            }
+
+            if (isAdmin) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = ModAmber.copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("admin_app_owner_revenue_card")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "App Owner Revenue Share",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = ModAmber
+                            )
+                            Text(
+                                text = "\$1 per 2-pt photo unlock + \$7.50 per \$15/mo sub",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = formatUsdCents(appOwnerRevenueCents),
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                            color = ModAmber
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = "Buy Points (2 points = \$2). Each locked photo costs 2 points (\$2): \$1 goes to the photo owner and \$1 goes to the app owner. Or subscribe to a creator for \$15/month to unlock all their photos.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // Buy Points Packages (2 pts = $2, 10 pts = $10, 20 pts = $20, 50 pts = $50)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                BuyPointsPackageButton(
+                    points = 2L,
+                    enabled = !isProcessingWallet,
+                    onClick = { onBuyPoints(2L) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("buy_points_2")
+                )
+                BuyPointsPackageButton(
+                    points = 10L,
+                    enabled = !isProcessingWallet,
+                    onClick = { onBuyPoints(10L) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("buy_points_10")
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                BuyPointsPackageButton(
+                    points = 20L,
+                    enabled = !isProcessingWallet,
+                    onClick = { onBuyPoints(20L) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("buy_points_20")
+                )
+                BuyPointsPackageButton(
+                    points = 50L,
+                    enabled = !isProcessingWallet,
+                    onClick = { onBuyPoints(50L) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("buy_points_50")
+                )
+            }
+
+            // Active $15/mo Subscriptions
+            if (activeSubscriptions.isNotEmpty()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Text(
+                    text = "Active Creator Subscriptions (\$15/mo)",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                )
+                activeSubscriptions.forEach { sub ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.CardMembership,
+                                contentDescription = null,
+                                tint = SafetyEmerald,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = sub.creatorName,
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
+                            )
+                        }
+                        Text(
+                            text = "${sub.daysRemaining()}d left",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SafetyEmerald
+                        )
+                    }
+                }
+            }
+
+            // Recent Points & Earnings Activity
+            if (recentTransactions.isNotEmpty()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Text(
+                    text = "Recent Points & Earnings",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                )
+                recentTransactions.forEach { tx ->
+                    val isCreatorCredit = tx.creatorId == currentUserId
+                    val summary = when (tx.typeEnum()) {
+                        PointTransactionType.BUY_POINTS ->
+                            "Bought +${tx.pointsDelta} pts (${formatUsdCents(tx.grossCents)})"
+                        PointTransactionType.UNLOCK_PHOTO ->
+                            if (isCreatorCredit) {
+                                "${tx.buyerName} unlocked your photo (+${formatUsdCents(tx.creatorShareCents)} to you · \$1 app)"
+                            } else {
+                                "Unlocked ${tx.creatorName}'s photo (-2 pts · \$1 owner / \$1 app)"
+                            }
+                        PointTransactionType.SUBSCRIBE_CREATOR ->
+                            if (isCreatorCredit) {
+                                "${tx.buyerName} subscribed \$15/mo (+${formatUsdCents(tx.creatorShareCents)} to you)"
+                            } else {
+                                "Subscribed to ${tx.creatorName} (\$15.00/mo)"
+                            }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Stars,
+                            contentDescription = null,
+                            tint = if (isCreatorCredit || tx.typeEnum() == PointTransactionType.BUY_POINTS) {
+                                SafetyEmerald
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BuyPointsPackageButton(
+    points: Long,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(14.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = Color.White
+        ),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+        modifier = modifier.height(52.dp)
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = "$points Points",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+            )
+            Text(
+                text = formatUsdCents(points * 100L),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White.copy(alpha = 0.9f)
+            )
         }
     }
 }
