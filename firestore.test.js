@@ -1326,6 +1326,568 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
   await assertSucceeds(adminDb.collection("pointTransactions").get());
 });
 
+// 14. 5-POINT ($5) BOOST POST TO TOP OF DISCOVERY (Atomic Wallet Deduction + Ledger Enforcement)
+test("Authors can pay 5 points ($5) to boost their post to the top of Discovery; free or unauthorized boosts are denied", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(4000);
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+
+  // Alice publishes a regular (unboosted) post
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_boost_1").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Check out my live show tonight!",
+      imageBase64: "",
+      boostedAtMillis: 0,
+      boostedUntilMillis: 0,
+      likedByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  const nowMs = Date.now();
+  const boostUntilMs = nowMs + 24 * 60 * 60 * 1000;
+
+  // Alice has 0 points: trying to boost WITHOUT paying 5 points is DENIED
+  await assertFails(
+    aliceDb.collection("profilePosts").doc("post_boost_1").update({
+      boostedAtMillis: nowMs,
+      boostedUntilMillis: boostUntilMs,
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Alice buys 10 points ($10)
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      pointsBalance: 10,
+      totalSpentCents: 1000,
+      updatedAt: pastDate(1900),
+    })
+  );
+
+  // Even with 10 points, Alice CANNOT boost without actually deducting 5 points in the same atomic batch!
+  await assertFails(
+    aliceDb.collection("profilePosts").doc("post_boost_1").update({
+      boostedAtMillis: nowMs,
+      boostedUntilMillis: boostUntilMs,
+      updatedAt: pastDate(1800),
+    })
+  );
+
+  // Alice atomically pays 5 points (10 -> 5), boosts post_boost_1 for 24h, and records BOOST_POST ledger entry
+  const boostBatch = aliceDb.batch();
+  boostBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 5,
+    updatedAt: pastDate(1500),
+  });
+  boostBatch.update(aliceDb.collection("profilePosts").doc("post_boost_1"), {
+    boostedAtMillis: nowMs,
+    boostedUntilMillis: boostUntilMs,
+    updatedAt: pastDate(1500),
+  });
+  boostBatch.set(aliceDb.collection("pointTransactions").doc("tx_boost_1"), {
+    type: "BOOST_POST",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "post_boost_1",
+    pointsDelta: -5,
+    grossCents: 500,
+    creatorShareCents: 0,
+    platformShareCents: 500,
+    createdAt: pastDate(1500),
+  });
+  await assertSucceeds(boostBatch.commit());
+
+  // Alice uses her remaining 5 points (5 -> 0) to publish a NEW post already boosted in one atomic batch
+  const createBoostBatch = aliceDb.batch();
+  createBoostBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 0,
+    updatedAt: pastDate(1200),
+  });
+  createBoostBatch.set(aliceDb.collection("profilePosts").doc("post_boost_2"), {
+    authorId: ALICE_UID,
+    authorName: "Alice",
+    authorHandle: "alice_vox",
+    authorColorHex: "#0088FF",
+    authorPhotoBase64: "",
+    authorTier: "USER",
+    text: "Featured announcement right at the top of Discovery!",
+    imageBase64: "",
+    boostedAtMillis: nowMs + 1000,
+    boostedUntilMillis: boostUntilMs,
+    likedByUserIds: [],
+    createdAt: pastDate(1200),
+    updatedAt: pastDate(1200),
+  });
+  createBoostBatch.set(aliceDb.collection("pointTransactions").doc("tx_boost_2"), {
+    type: "BOOST_POST",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "post_boost_2",
+    pointsDelta: -5,
+    grossCents: 500,
+    creatorShareCents: 0,
+    platformShareCents: 500,
+    createdAt: pastDate(1200),
+  });
+  await assertSucceeds(createBoostBatch.commit());
+
+  // Bob CANNOT boost Alice's post even if Bob buys 5 points and deducts them
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).update({
+      pointsBalance: 5,
+      totalSpentCents: 500,
+      updatedAt: pastDate(1100),
+    })
+  );
+  const bobStealBoost = bobDb.batch();
+  bobStealBoost.update(bobDb.collection("users").doc(BOB_UID), {
+    pointsBalance: 0,
+    updatedAt: pastDate(1000),
+  });
+  bobStealBoost.update(bobDb.collection("profilePosts").doc("post_boost_1"), {
+    boostedAtMillis: nowMs + 2000,
+    boostedUntilMillis: boostUntilMs,
+    updatedAt: pastDate(1000),
+  });
+  await assertFails(bobStealBoost.commit());
+
+  // Forged BOOST_POST transaction (e.g. $0 platform share or -1 pt) is DENIED
+  await assertFails(
+    aliceDb.collection("pointTransactions").doc("tx_boost_forged").set({
+      type: "BOOST_POST",
+      buyerId: ALICE_UID,
+      buyerName: "Alice",
+      creatorId: "",
+      creatorName: "",
+      postId: "post_boost_1",
+      pointsDelta: -1,
+      grossCents: 500,
+      creatorShareCents: 0,
+      platformShareCents: 0,
+      createdAt: pastDate(900),
+    })
+  );
+});
+
+// 15. COMMENTS ON POSTS & SHARING UNLOCKED POSTS (LOCKED PICTURES CANNOT BE SHARED)
+test("Users can comment on posts and share unlocked posts, while locked pictures are strictly non-shareable", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext("charlie_999").firestore();
+  const ts = pastDate(4000);
+  const sampleBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  // Alice creates an unlocked photo post AND a locked photo post
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_public_1").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Open studio sunset!",
+      imageBase64: sampleBase64,
+      locked: false,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      commentCount: 0,
+      shareCount: 0,
+      likedByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_secret_1").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "VIP locked photo",
+      imageBase64: sampleBase64,
+      locked: true,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      commentCount: 0,
+      shareCount: 0,
+      likedByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Bob comments on Alice's public post and increments commentCount
+  const commentBatch = bobDb.batch();
+  commentBatch.set(
+    bobDb.collection("profilePosts").doc("post_public_1").collection("comments").doc("c_bob_1"),
+    {
+      postId: "post_public_1",
+      authorId: BOB_UID,
+      authorName: "Bob",
+      authorHandle: "bob_vox",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Awesome shot Alice!",
+      createdAt: pastDate(2500),
+    }
+  );
+  commentBatch.update(bobDb.collection("profilePosts").doc("post_public_1"), {
+    commentCount: 1,
+    updatedAt: pastDate(2500),
+  });
+  await assertSucceeds(commentBatch.commit());
+
+  // Charlie CANNOT delete Bob's comment; Alice (post owner) CAN delete it
+  await assertFails(
+    charlieDb.collection("profilePosts").doc("post_public_1").collection("comments").doc("c_bob_1").delete()
+  );
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("post_public_1").collection("comments").doc("c_bob_1").delete()
+  );
+
+  // Bob shares Alice's UNLOCKED post to his profile + increments shareCount (SUCCEEDS)
+  const shareBatch = bobDb.batch();
+  shareBatch.set(bobDb.collection("profilePosts").doc("post_shared_ok"), {
+    authorId: BOB_UID,
+    authorName: "Bob",
+    authorHandle: "bob_vox",
+    authorColorHex: "#0088FF",
+    authorPhotoBase64: "",
+    authorTier: "USER",
+    text: "Check out Alice's sunset! Open studio sunset!",
+    imageBase64: sampleBase64,
+    locked: false,
+    unlockPricePoints: 2,
+    unlockedByUserIds: [],
+    sharedFromPostId: "post_public_1",
+    sharedFromAuthorId: ALICE_UID,
+    sharedFromAuthorName: "Alice",
+    sharedFromAuthorHandle: "alice_vox",
+    commentCount: 0,
+    shareCount: 0,
+    likedByUserIds: [],
+    createdAt: pastDate(2000),
+    updatedAt: pastDate(2000),
+  });
+  shareBatch.update(bobDb.collection("profilePosts").doc("post_public_1"), {
+    shareCount: 1,
+    updatedAt: pastDate(2000),
+  });
+  await assertSucceeds(shareBatch.commit());
+
+  // Bob CANNOT share/repost Alice's LOCKED picture or increment shareCount on a locked picture!
+  await assertFails(
+    bobDb.collection("profilePosts").doc("post_shared_locked_fail").set({
+      authorId: BOB_UID,
+      authorName: "Bob",
+      authorHandle: "bob_vox",
+      authorColorHex: "#0088FF",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Trying to leak locked photo",
+      imageBase64: sampleBase64,
+      locked: false,
+      unlockPricePoints: 2,
+      unlockedByUserIds: [],
+      sharedFromPostId: "post_secret_1",
+      sharedFromAuthorId: ALICE_UID,
+      sharedFromAuthorName: "Alice",
+      sharedFromAuthorHandle: "alice_vox",
+      commentCount: 0,
+      shareCount: 0,
+      likedByUserIds: [],
+      createdAt: pastDate(1500),
+      updatedAt: pastDate(1500),
+    })
+  );
+  await assertFails(
+    bobDb.collection("profilePosts").doc("post_secret_1").update({
+      shareCount: 1,
+      updatedAt: pastDate(1500),
+    })
+  );
+});
+
+// 16. GROUP CHATS, DM PRIVACY POLICIES (OPEN/PAID/DISABLED), $10 PAID DM ($5 USER / $5 APP OWNER) & KICK PAID MEMBER
+test("Group chats, DM privacy controls, $10 paid DM ($5/$5 split), and kicking paid members are enforced", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieUid = "charlie_dm_3";
+  const daveUid = "dave_dm_4";
+  const charlieDb = testEnv.authenticatedContext(charlieUid).firestore();
+  const ts = pastDate(5000);
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+  await assertSucceeds(charlieDb.collection("users").doc(charlieUid).set(validProfilePayload(charlieUid)));
+
+  // Publish directory entries
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      bio: "",
+      avatarColorHex: "#0088FF",
+      photoBase64: "",
+      staffTier: "USER",
+      postCount: 0,
+      dmPolicy: "DISABLED",
+      updatedAt: ts,
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("userDirectory").doc(BOB_UID).set({
+      userId: BOB_UID,
+      displayName: "Bob",
+      handle: "bob_vox",
+      bio: "",
+      avatarColorHex: "#0088FF",
+      photoBase64: "",
+      staffTier: "USER",
+      postCount: 0,
+      dmPolicy: "OPEN",
+      updatedAt: ts,
+    })
+  );
+
+  // 1) Alice disabled private messages -> Bob CANNOT open a 1-on-1 DM with Alice
+  const pairId = `${ALICE_UID}_${BOB_UID}`;
+  await assertFails(
+    bobDb.collection("directThreads").doc(pairId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      isGroup: false,
+      groupName: "",
+      participantNamesById: { [ALICE_UID]: "Alice", [BOB_UID]: "Bob" },
+      kickedUserIds: [],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // 2) Alice switches to PAID ($10 locked private messages)
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      dmPolicy: "PAID",
+      updatedAt: pastDate(4500),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).update({
+      dmPolicy: "PAID",
+      updatedAt: pastDate(4500),
+    })
+  );
+
+  // Unpaid Bob STILL CANNOT start a 1-on-1 DM with Alice
+  await assertFails(
+    bobDb.collection("directThreads").doc(pairId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      isGroup: false,
+      groupName: "",
+      participantNamesById: { [ALICE_UID]: "Alice", [BOB_UID]: "Bob" },
+      kickedUserIds: [],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: pastDate(4000),
+      updatedAt: pastDate(4000),
+    })
+  );
+
+  // 3) Bob pays $10 ($5 to Alice / $5 to app owner) -> creates dmAccessPasses/{bob}_{alice} + credits Alice 500c + UNLOCK_DM ledger
+  const passId = `${BOB_UID}_${ALICE_UID}`;
+  const payBatch = bobDb.batch();
+  payBatch.set(bobDb.collection("dmAccessPasses").doc(passId), {
+    senderId: BOB_UID,
+    senderName: "Bob",
+    recipientId: ALICE_UID,
+    recipientName: "Alice",
+    priceCents: 1000,
+    creatorShareCents: 500,
+    platformShareCents: 500,
+    active: true,
+    kicked: false,
+    createdAt: pastDate(3500),
+    updatedAt: pastDate(3500),
+  });
+  payBatch.update(bobDb.collection("users").doc(BOB_UID), {
+    totalSpentCents: 1000,
+    updatedAt: pastDate(3500),
+  });
+  payBatch.update(bobDb.collection("users").doc(ALICE_UID), {
+    creatorEarningsCents: 500,
+    updatedAt: pastDate(3500),
+  });
+  payBatch.set(bobDb.collection("pointTransactions").doc("tx_dm_unlock_1"), {
+    type: "UNLOCK_DM",
+    buyerId: BOB_UID,
+    buyerName: "Bob",
+    creatorId: ALICE_UID,
+    creatorName: "Alice",
+    postId: "",
+    pointsDelta: 0,
+    grossCents: 1000,
+    creatorShareCents: 500,
+    platformShareCents: 500,
+    createdAt: pastDate(3500),
+  });
+  await assertSucceeds(payBatch.commit());
+
+  // Now Bob CAN open the 1-on-1 DM with Alice and send a private message!
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(pairId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      isGroup: false,
+      groupName: "",
+      participantNamesById: { [ALICE_UID]: "Alice", [BOB_UID]: "Bob" },
+      kickedUserIds: [],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: pastDate(3000),
+      updatedAt: pastDate(3000),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(pairId).collection("messages").doc("dm_paid_1").set({
+      threadId: pairId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Hey Alice, thanks for unlocking DMs!",
+      createdAt: pastDate(2800),
+    })
+  );
+
+  // 4) Alice kicks paid member Bob -> Bob is immediately blocked from sending further messages!
+  await assertSucceeds(
+    aliceDb.collection("dmAccessPasses").doc(passId).update({
+      active: false,
+      kicked: true,
+      updatedAt: pastDate(2500),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(pairId).update({
+      kickedUserIds: [BOB_UID],
+      lastMessageText: "Bob was removed from messaging Alice",
+      lastMessageSenderId: ALICE_UID,
+      updatedAt: pastDate(2500),
+    })
+  );
+  await assertFails(
+    bobDb.collection("directThreads").doc(pairId).collection("messages").doc("dm_paid_after_kick").set({
+      threadId: pairId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Can I still message?",
+      createdAt: pastDate(2200),
+    })
+  );
+
+  // 5) Group Chat: Bob creates a group chat with Alice + Charlie, adds Dave, and Charlie sends a message
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc("group_chat_1").set({
+      participantIds: [BOB_UID, ALICE_UID, charlieUid],
+      isGroup: true,
+      groupName: "Bob, Alice & Charlie",
+      participantNamesById: { [BOB_UID]: "Bob", [ALICE_UID]: "Alice", [charlieUid]: "Charlie" },
+      kickedUserIds: [],
+      userAId: BOB_UID,
+      userAName: "Bob",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: ALICE_UID,
+      userBName: "Alice",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Bob created a group chat",
+      lastMessageSenderId: BOB_UID,
+      unreadByUserIds: [ALICE_UID, charlieUid],
+      createdAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
+  await assertSucceeds(
+    charlieDb.collection("directThreads").doc("group_chat_1").update({
+      participantIds: [BOB_UID, ALICE_UID, charlieUid, daveUid],
+      participantNamesById: {
+        [BOB_UID]: "Bob",
+        [ALICE_UID]: "Alice",
+        [charlieUid]: "Charlie",
+        [daveUid]: "Dave",
+      },
+      groupName: "Studio Squad",
+      lastMessageText: "Charlie added Dave to the group",
+      lastMessageSenderId: charlieUid,
+      unreadByUserIds: [BOB_UID, ALICE_UID, daveUid],
+      updatedAt: pastDate(1800),
+    })
+  );
+  await assertSucceeds(
+    charlieDb.collection("directThreads").doc("group_chat_1").collection("messages").doc("grp_msg_1").set({
+      threadId: "group_chat_1",
+      participantIds: [BOB_UID, ALICE_UID, charlieUid, daveUid],
+      senderId: charlieUid,
+      senderName: "Charlie",
+      senderTier: "USER",
+      text: "Welcome to the group chat everyone!",
+      createdAt: pastDate(1500),
+    })
+  );
+});
+
+
 
 
 

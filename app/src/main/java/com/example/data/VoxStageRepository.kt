@@ -640,6 +640,7 @@ class VoxStageRepository(
             val resolvedBio: String
             val resolvedColor: String
             val resolvedPhoto: String
+            val resolvedDmPolicy: DmPolicy
             if (!snapshot.exists()) {
                 val safeName = displayName.trim().ifBlank { "Studio Host" }.take(40)
                 val rawHandle = emailPrefix.lowercase()
@@ -668,6 +669,7 @@ class VoxStageRepository(
                     "pointsBalance" to 0L,
                     "creatorEarningsCents" to 0L,
                     "totalSpentCents" to 0L,
+                    "dmPolicy" to DmPolicy.OPEN.name,
                     "blockedUserIds" to emptyList<String>(),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -678,12 +680,14 @@ class VoxStageRepository(
                 resolvedBio = "Live on VoxStage"
                 resolvedColor = "#0088FF"
                 resolvedPhoto = ""
+                resolvedDmPolicy = DmPolicy.OPEN
             } else {
                 resolvedName = snapshot.getString("displayName").orEmpty().ifBlank { displayName.trim().ifBlank { "Studio Host" } }.take(40)
                 resolvedHandle = snapshot.getString("handle").orEmpty().ifBlank { "vox_user" }.take(30)
                 resolvedBio = snapshot.getString("bio").orEmpty().take(200)
                 resolvedColor = snapshot.getString("avatarColorHex").orEmpty().ifBlank { "#0088FF" }
                 resolvedPhoto = snapshot.getString("photoBase64").orEmpty()
+                resolvedDmPolicy = DmPolicy.fromRaw(snapshot.getString("dmPolicy"))
             }
             syncUserDirectoryEntry(
                 userId = uid,
@@ -692,7 +696,8 @@ class VoxStageRepository(
                 bio = resolvedBio,
                 avatarColorHex = resolvedColor,
                 photoBase64 = resolvedPhoto,
-                staffTier = staffTier
+                staffTier = staffTier,
+                dmPolicy = resolvedDmPolicy
             )
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -710,7 +715,8 @@ class VoxStageRepository(
         bio: String = "",
         avatarColorHex: String,
         photoBase64: String = "",
-        staffTier: StaffTier
+        staffTier: StaffTier,
+        dmPolicy: DmPolicy? = null
     ) {
         val safeName = displayName.trim().ifBlank { "Member" }.take(40)
         val safeHandle = handle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
@@ -721,6 +727,7 @@ class VoxStageRepository(
             val ref = db.collection("userDirectory").document(userId)
             val existing = ref.get().await()
             val existingPostCount = (existing.get("postCount") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            val effectivePolicy = dmPolicy ?: DmPolicy.fromRaw(existing.getString("dmPolicy"))
             ref.set(
                 mapOf(
                     "userId" to userId,
@@ -731,9 +738,44 @@ class VoxStageRepository(
                     "photoBase64" to safePhoto,
                     "staffTier" to staffTier.name,
                     "postCount" to existingPostCount,
+                    "dmPolicy" to effectivePolicy.name,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+        }
+    }
+
+    suspend fun updateDmPolicy(
+        policy: DmPolicy,
+        currentProfile: UserProfile,
+        currentStaffTier: StaffTier
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "dmPolicy" to policy.name,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            syncUserDirectoryEntry(
+                userId = uid,
+                displayName = currentProfile.displayName,
+                handle = currentProfile.handle,
+                bio = currentProfile.bio,
+                avatarColorHex = currentProfile.avatarColorHex,
+                photoBase64 = currentProfile.photoBase64,
+                staffTier = currentStaffTier,
+                dmPolicy = policy
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
         }
     }
 
@@ -746,7 +788,8 @@ class VoxStageRepository(
         nightModeEnabled: Boolean,
         invisibleModePreferred: Boolean? = null,
         currentStaffTier: StaffTier = StaffTier.USER,
-        currentPhotoBase64: String = ""
+        currentPhotoBase64: String = "",
+        currentDmPolicy: DmPolicy = DmPolicy.OPEN
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -780,7 +823,8 @@ class VoxStageRepository(
                 bio = safeBio,
                 avatarColorHex = avatarColorHex,
                 photoBase64 = currentPhotoBase64,
-                staffTier = currentStaffTier
+                staffTier = currentStaffTier,
+                dmPolicy = currentDmPolicy
             )
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -814,7 +858,8 @@ class VoxStageRepository(
                 bio = currentProfile.bio,
                 avatarColorHex = currentProfile.avatarColorHex,
                 photoBase64 = photoBase64,
-                staffTier = currentStaffTier
+                staffTier = currentStaffTier,
+                dmPolicy = currentProfile.dmPolicyEnum()
             )
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -2506,6 +2551,10 @@ class VoxStageRepository(
             if (!snap.exists()) {
                 val payload = mapOf(
                     "participantIds" to if (meFirst) listOf(uid, otherUserId) else listOf(otherUserId, uid),
+                    "isGroup" to false,
+                    "groupName" to "",
+                    "participantNamesById" to mapOf(uid to myName, otherUserId to cleanOtherName),
+                    "kickedUserIds" to emptyList<String>(),
                     "userAId" to if (meFirst) uid else otherUserId,
                     "userAName" to if (meFirst) myName else cleanOtherName,
                     "userAColorHex" to if (meFirst) myColor else cleanOtherColor,
@@ -2550,6 +2599,318 @@ class VoxStageRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Adding another user to a 1-on-1 private message seamlessly creates a Group Chat with all 3 users.
+     * Adding a user to an existing Group Chat appends them in-place (up to 15 members).
+     */
+    suspend fun addUserToDirectChatOrCreateGroup(
+        currentThread: DirectThread,
+        myProfile: UserProfile,
+        myTier: StaffTier,
+        addedUser: DirectoryEntry
+    ): Result<String> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        return try {
+            require(addedUser.userId.isNotBlank() && addedUser.userId != uid) {
+                "Choose another member to add."
+            }
+            require(!currentThread.participantIds.contains(addedUser.userId)) {
+                "${addedUser.displayName} is already in this chat."
+            }
+            val myName = myProfile.displayName.trim().ifBlank { "Member" }.take(40)
+            val myColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(myProfile.avatarColorHex)) myProfile.avatarColorHex else "#0088FF"
+            val addedName = addedUser.displayName.trim().ifBlank { "Member" }.take(40)
+
+            if (!currentThread.isGroup) {
+                val otherUid = currentThread.otherUserId(uid)
+                val otherName = currentThread.otherName(uid).trim().ifBlank { "Member" }.take(40)
+                val otherColor = currentThread.otherColorHex(uid)
+                val otherTier = currentThread.otherTier(uid)
+
+                val members = listOf(uid, otherUid, addedUser.userId).distinct()
+                val namesMap = mapOf(
+                    uid to myName,
+                    otherUid to otherName,
+                    addedUser.userId to addedName
+                )
+                val title = "$myName, $otherName & $addedName".take(60)
+                val groupRef = db.collection("directThreads").document()
+                val introText = "$myName added $addedName · Group chat created"
+                groupRef.set(
+                    mapOf(
+                        "participantIds" to members,
+                        "isGroup" to true,
+                        "groupName" to title,
+                        "participantNamesById" to namesMap,
+                        "kickedUserIds" to emptyList<String>(),
+                        "userAId" to uid,
+                        "userAName" to myName,
+                        "userAColorHex" to myColor,
+                        "userATier" to myTier.name,
+                        "userBId" to otherUid,
+                        "userBName" to otherName,
+                        "userBColorHex" to otherColor,
+                        "userBTier" to otherTier.name,
+                        "lastMessageText" to introText.take(300),
+                        "lastMessageSenderId" to uid,
+                        "unreadByUserIds" to members.filter { it != uid },
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+
+                runCatching {
+                    groupRef.collection("messages").document().set(
+                        mapOf(
+                            "threadId" to groupRef.id,
+                            "participantIds" to members,
+                            "senderId" to uid,
+                            "senderName" to myName,
+                            "senderTier" to myTier.name,
+                            "text" to introText.take(500),
+                            "createdAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                Result.success(groupRef.id)
+            } else {
+                require(currentThread.participantIds.size < 15) {
+                    "Group chats support up to 15 members."
+                }
+                val updatedIds = (currentThread.participantIds + addedUser.userId).distinct()
+                val updatedNames = currentThread.participantNamesById.toMutableMap().apply {
+                    put(uid, myName)
+                    put(addedUser.userId, addedName)
+                }
+                val noticeText = "$myName added $addedName to the group"
+                val threadRef = db.collection("directThreads").document(currentThread.id)
+                threadRef.update(
+                    mapOf(
+                        "participantIds" to updatedIds,
+                        "participantNamesById" to updatedNames,
+                        "lastMessageText" to noticeText.take(300),
+                        "lastMessageSenderId" to uid,
+                        "unreadByUserIds" to updatedIds.filter { it != uid },
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+
+                runCatching {
+                    threadRef.collection("messages").document().set(
+                        mapOf(
+                            "threadId" to currentThread.id,
+                            "participantIds" to updatedIds,
+                            "senderId" to uid,
+                            "senderName" to myName,
+                            "senderTier" to myTier.name,
+                            "text" to noticeText.take(500),
+                            "createdAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                Result.success(currentThread.id)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, "directThreads/${currentThread.id}")
+            Result.failure(e)
+        }
+    }
+
+    fun observeMyDmAccessPasses(userId: String): Flow<List<DmAccessPass>> = flow {
+        val uid = requireUserId()
+        require(uid == userId) { "Cross-user DM pass observation denied." }
+        val path = "dmAccessPasses"
+        emitAll(
+            db.collection("dmAccessPasses")
+                .whereEqualTo("senderId", userId)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(
+                        DmAccessPass::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    )
+                }
+                .catch { error ->
+                    val unwrapped = unwrapFirestoreError(error)
+                    if (auth.currentUser?.uid == uid) {
+                        handleFirestoreError(unwrapped, OperationType.LIST, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    fun observePaidDmMembersForMe(userId: String): Flow<List<DmAccessPass>> = flow {
+        val uid = requireUserId()
+        require(uid == userId) { "Cross-user paid DM members observation denied." }
+        val path = "dmAccessPasses"
+        emitAll(
+            db.collection("dmAccessPasses")
+                .whereEqualTo("recipientId", userId)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(
+                        DmAccessPass::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    ).sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { error ->
+                    val unwrapped = unwrapFirestoreError(error)
+                    if (auth.currentUser?.uid == uid) {
+                        handleFirestoreError(unwrapped, OperationType.LIST, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    /**
+     * Pays $10 to unlock private messaging with a user whose DMs are locked to paid members.
+     * Split: $5 (500c) goes to the recipient user, $5 (500c) goes to the app owner.
+     */
+    suspend fun unlockPaidDirectMessage(
+        recipientId: String,
+        recipientName: String,
+        buyerName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val passId = "${uid}_${recipientId}"
+        val path = "dmAccessPasses/$passId"
+        return try {
+            require(recipientId.isNotBlank() && recipientId != uid) {
+                "Cannot pay to message yourself."
+            }
+            val passRef = db.collection("dmAccessPasses").document(passId)
+            val existing = passRef.get().await()
+            if (existing.exists()) {
+                val kicked = existing.getBoolean("kicked") == true
+                val active = existing.getBoolean("active") == true
+                if (kicked) {
+                    return Result.failure(IllegalStateException("$recipientName removed you from private messaging them."))
+                }
+                if (active) {
+                    return Result.success(Unit)
+                }
+            }
+
+            val buyerRef = db.collection("users").document(uid)
+            val recipientRef = db.collection("users").document(recipientId)
+            val txRef = db.collection("pointTransactions").document()
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val safeRecipientName = recipientName.trim().ifBlank { "Member" }.take(40)
+
+            val batch = db.batch()
+            batch.set(
+                passRef,
+                mapOf(
+                    "senderId" to uid,
+                    "senderName" to safeBuyerName,
+                    "recipientId" to recipientId,
+                    "recipientName" to safeRecipientName,
+                    "priceCents" to 1000L,
+                    "creatorShareCents" to 500L,
+                    "platformShareCents" to 500L,
+                    "active" to true,
+                    "kicked" to false,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                buyerRef,
+                mapOf(
+                    "totalSpentCents" to FieldValue.increment(1000L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                recipientRef,
+                mapOf(
+                    "creatorEarningsCents" to FieldValue.increment(500L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.UNLOCK_DM.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to recipientId,
+                    "creatorName" to safeRecipientName,
+                    "postId" to "",
+                    "pointsDelta" to 0L,
+                    "grossCents" to 1000L,
+                    "creatorShareCents" to 500L,
+                    "platformShareCents" to 500L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Kicks a paid member from private messaging the current user.
+     * Revokes their dmAccessPass (active = false, kicked = true) and adds them to kickedUserIds on their 1-on-1 DM thread.
+     */
+    suspend fun kickPaidDmMember(
+        senderId: String,
+        senderName: String,
+        myName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val passId = "${senderId}_${uid}"
+        val path = "dmAccessPasses/$passId"
+        return try {
+            val passRef = db.collection("dmAccessPasses").document(passId)
+            val passSnap = passRef.get().await()
+            if (passSnap.exists()) {
+                passRef.update(
+                    mapOf(
+                        "active" to false,
+                        "kicked" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            val pairId = canonicalPairId(uid, senderId)
+            val threadRef = db.collection("directThreads").document(pairId)
+            val threadSnap = threadRef.get().await()
+            if (threadSnap.exists()) {
+                val existingKicked = (threadSnap.get("kickedUserIds") as? List<*>)
+                    ?.filterIsInstance<String>()
+                    .orEmpty()
+                val updatedKicked = (existingKicked + senderId).distinct().take(20)
+                threadRef.update(
+                    mapOf(
+                        "kickedUserIds" to updatedKicked,
+                        "lastMessageText" to "${senderName.take(30)} was removed from messaging ${myName.take(30)}",
+                        "lastMessageSenderId" to uid,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
             Result.failure(e)
         }
     }
@@ -2618,8 +2979,8 @@ class VoxStageRepository(
             .collection("messages").document()
         val path = msgRef.path
         return try {
+            require(!thread.isUserKicked(uid)) { "You have been removed from messaging in this chat." }
             require(cleanImage.length <= 460_000) { "Picture is too large to send. Please try again." }
-            val otherUid = thread.otherUserId(uid)
             val safeName = senderName.trim().ifBlank { "Member" }.take(40)
             val payload = mutableMapOf<String, Any>(
                 "threadId" to thread.id,
@@ -2641,11 +3002,12 @@ class VoxStageRepository(
                 else -> cleanText
             }.take(300)
 
+            val unreadRecipients = thread.participantIds.filter { it != uid }
             db.collection("directThreads").document(thread.id).update(
                 mapOf(
                     "lastMessageText" to previewText,
                     "lastMessageSenderId" to uid,
-                    "unreadByUserIds" to listOf(otherUid),
+                    "unreadByUserIds" to unreadRecipients,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
@@ -2735,11 +3097,15 @@ class VoxStageRepository(
             db.collection("profilePosts")
                 .snapshots()
                 .map { snap ->
+                    val nowMs = System.currentTimeMillis()
                     snap.toObjects(
                         ProfilePost::class.java,
                         DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-                    ).sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-                        .take(80)
+                    ).sortedWith(
+                        compareByDescending<ProfilePost> { it.isCurrentlyBoosted(nowMs) }
+                            .thenByDescending { if (it.isCurrentlyBoosted(nowMs)) it.boostedAtMillis else 0L }
+                            .thenByDescending { it.createdAt?.toDate()?.time ?: 0L }
+                    ).take(80)
                 }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
@@ -2756,7 +3122,8 @@ class VoxStageRepository(
         myTier: StaffTier,
         text: String,
         imageBase64: String,
-        locked: Boolean = false
+        locked: Boolean = false,
+        boostToTop: Boolean = false
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -2777,24 +3144,72 @@ class VoxStageRepository(
             val safeColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(myProfile.avatarColorHex)) myProfile.avatarColorHex else "#0088FF"
             val safeAvatarPhoto = if (myProfile.photoBase64.length <= 140_000) myProfile.photoBase64 else ""
 
-            docRef.set(
-                mapOf(
-                    "authorId" to uid,
-                    "authorName" to safeName,
-                    "authorHandle" to safeHandle,
-                    "authorColorHex" to safeColor,
-                    "authorPhotoBase64" to safeAvatarPhoto,
-                    "authorTier" to myTier.name,
-                    "text" to cleanText,
-                    "imageBase64" to cleanImage,
-                    "locked" to effectiveLocked,
-                    "unlockPricePoints" to 2L,
-                    "unlockedByUserIds" to emptyList<String>(),
-                    "likedByUserIds" to emptyList<String>(),
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
+            val nowMs = System.currentTimeMillis()
+            val boostedAt = if (boostToTop) nowMs else 0L
+            val boostedUntil = if (boostToTop) nowMs + 24L * 60L * 60L * 1000L else 0L
+
+            val postPayload = mapOf(
+                "authorId" to uid,
+                "authorName" to safeName,
+                "authorHandle" to safeHandle,
+                "authorColorHex" to safeColor,
+                "authorPhotoBase64" to safeAvatarPhoto,
+                "authorTier" to myTier.name,
+                "text" to cleanText,
+                "imageBase64" to cleanImage,
+                "locked" to effectiveLocked,
+                "unlockPricePoints" to 2L,
+                "unlockedByUserIds" to emptyList<String>(),
+                "boostedAtMillis" to boostedAt,
+                "boostedUntilMillis" to boostedUntil,
+                "likedByUserIds" to emptyList<String>(),
+                "commentCount" to 0L,
+                "shareCount" to 0L,
+                "sharedFromPostId" to "",
+                "sharedFromAuthorId" to "",
+                "sharedFromAuthorName" to "",
+                "sharedFromAuthorHandle" to "",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+
+            if (boostToTop) {
+                val userRef = db.collection("users").document(uid)
+                val userSnap = userRef.get().await()
+                val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+                require(currentPoints >= 5L) {
+                    "Not enough points. Boosting to the top of Discovery costs 5 points (\$5) — buy points in Profile Settings."
+                }
+                val txRef = db.collection("pointTransactions").document()
+                val batch = db.batch()
+                batch.update(
+                    userRef,
+                    mapOf(
+                        "pointsBalance" to FieldValue.increment(-5L),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
                 )
-            ).await()
+                batch.set(docRef, postPayload)
+                batch.set(
+                    txRef,
+                    mapOf(
+                        "type" to PointTransactionType.BOOST_POST.name,
+                        "buyerId" to uid,
+                        "buyerName" to safeName,
+                        "creatorId" to "",
+                        "creatorName" to "",
+                        "postId" to docRef.id,
+                        "pointsDelta" to -5L,
+                        "grossCents" to 500L,
+                        "creatorShareCents" to 0L,
+                        "platformShareCents" to 500L,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                batch.commit().await()
+            } else {
+                docRef.set(postPayload).await()
+            }
 
             runCatching {
                 val dirRef = db.collection("userDirectory").document(uid)
@@ -2812,6 +3227,286 @@ class VoxStageRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Pays 5 points ($5) atomically to boost an existing post to the top of Discovery for 24 hours.
+     */
+    suspend fun boostProfilePost(
+        post: ProfilePost,
+        buyerName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "profilePosts/${post.id}"
+        return try {
+            require(post.authorId == uid) { "You can only boost your own posts." }
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            require(currentPoints >= 5L) {
+                "Not enough points. Boosting a post to the top of Discovery costs 5 points (\$5) — buy points in Profile Settings."
+            }
+
+            val nowMs = System.currentTimeMillis()
+            val boostUntilMs = nowMs + 24L * 60L * 60L * 1000L
+            val postRef = db.collection("profilePosts").document(post.id)
+            val txRef = db.collection("pointTransactions").document()
+            val safeName = buyerName.trim().ifBlank { "Member" }.take(40)
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-5L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                postRef,
+                mapOf(
+                    "boostedAtMillis" to nowMs,
+                    "boostedUntilMillis" to boostUntilMs,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.BOOST_POST.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeName,
+                    "creatorId" to "",
+                    "creatorName" to "",
+                    "postId" to post.id,
+                    "pointsDelta" to -5L,
+                    "grossCents" to 500L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 500L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observePostComments(postId: String): Flow<List<PostComment>> = flow {
+        val uid = requireUserId()
+        val path = "profilePosts/$postId/comments"
+        emitAll(
+            db.collection("profilePosts")
+                .document(postId)
+                .collection("comments")
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(
+                        PostComment::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    ).sortedBy { it.createdAt?.toDate()?.time ?: 0L }
+                }
+                .catch { error ->
+                    val unwrapped = unwrapFirestoreError(error)
+                    if (auth.currentUser?.uid == uid) {
+                        handleFirestoreError(unwrapped, OperationType.LIST, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    suspend fun addPostComment(
+        post: ProfilePost,
+        myProfile: UserProfile,
+        myTier: StaffTier,
+        text: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanText = text.trim().take(500)
+        if (cleanText.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Write a comment before sending."))
+        }
+        val postRef = db.collection("profilePosts").document(post.id)
+        val commentRef = postRef.collection("comments").document()
+        val path = commentRef.path
+        return try {
+            val safeName = myProfile.displayName.trim().ifBlank { "Member" }.take(40)
+            val safeHandle = myProfile.handle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
+            val safeColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(myProfile.avatarColorHex)) myProfile.avatarColorHex else "#0088FF"
+            val safeAvatarPhoto = if (myProfile.photoBase64.length <= 140_000) myProfile.photoBase64 else ""
+
+            val batch = db.batch()
+            batch.set(
+                commentRef,
+                mapOf(
+                    "postId" to post.id,
+                    "authorId" to uid,
+                    "authorName" to safeName,
+                    "authorHandle" to safeHandle,
+                    "authorColorHex" to safeColor,
+                    "authorPhotoBase64" to safeAvatarPhoto,
+                    "authorTier" to myTier.name,
+                    "text" to cleanText,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                postRef,
+                mapOf(
+                    "commentCount" to FieldValue.increment(1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deletePostComment(
+        postId: String,
+        commentId: String
+    ): Result<Unit> {
+        val postRef = db.collection("profilePosts").document(postId)
+        val commentRef = postRef.collection("comments").document(commentId)
+        val path = commentRef.path
+        return try {
+            commentRef.delete().await()
+            runCatching {
+                val snap = postRef.get().await()
+                val current = (snap.get("commentCount") as? Number)?.toLong() ?: 0L
+                if (snap.exists() && current > 0L) {
+                    postRef.update(
+                        mapOf(
+                            "commentCount" to (current - 1L).coerceAtLeast(0L),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Reposts an unlocked post/picture onto the signed-in user's profile & Discovery feed.
+     * Locked pictures are strictly blocked both here and in Firestore Security Rules.
+     */
+    suspend fun shareProfilePostToFeed(
+        originalPost: ProfilePost,
+        myProfile: UserProfile,
+        myTier: StaffTier,
+        note: String = ""
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val newPostRef = db.collection("profilePosts").document()
+        val path = newPostRef.path
+        return try {
+            require(!originalPost.locked) { "Locked pictures cannot be shared." }
+            val safeName = myProfile.displayName.trim().ifBlank { "Member" }.take(40)
+            val safeHandle = myProfile.handle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
+            val safeColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(myProfile.avatarColorHex)) myProfile.avatarColorHex else "#0088FF"
+            val safeAvatarPhoto = if (myProfile.photoBase64.length <= 140_000) myProfile.photoBase64 else ""
+
+            val cleanNote = note.trim().take(280)
+            val combinedText = when {
+                cleanNote.isNotEmpty() && originalPost.text.isNotBlank() ->
+                    "$cleanNote\n\n${originalPost.text}".take(1000)
+                cleanNote.isNotEmpty() -> cleanNote.take(1000)
+                else -> originalPost.text.take(1000)
+            }
+            val origRef = db.collection("profilePosts").document(originalPost.id)
+
+            val batch = db.batch()
+            batch.set(
+                newPostRef,
+                mapOf(
+                    "authorId" to uid,
+                    "authorName" to safeName,
+                    "authorHandle" to safeHandle,
+                    "authorColorHex" to safeColor,
+                    "authorPhotoBase64" to safeAvatarPhoto,
+                    "authorTier" to myTier.name,
+                    "text" to combinedText,
+                    "imageBase64" to originalPost.imageBase64,
+                    "locked" to false,
+                    "unlockPricePoints" to 2L,
+                    "unlockedByUserIds" to emptyList<String>(),
+                    "boostedAtMillis" to 0L,
+                    "boostedUntilMillis" to 0L,
+                    "likedByUserIds" to emptyList<String>(),
+                    "commentCount" to 0L,
+                    "shareCount" to 0L,
+                    "sharedFromPostId" to originalPost.id,
+                    "sharedFromAuthorId" to originalPost.authorId,
+                    "sharedFromAuthorName" to originalPost.authorName.take(40),
+                    "sharedFromAuthorHandle" to originalPost.authorHandle.take(30),
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                origRef,
+                mapOf(
+                    "shareCount" to FieldValue.increment(1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+
+            runCatching {
+                val dirRef = db.collection("userDirectory").document(uid)
+                if (dirRef.get().await().exists()) {
+                    dirRef.update(
+                        mapOf(
+                            "postCount" to FieldValue.increment(1L),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun recordExternalPostShare(post: ProfilePost): Result<Unit> {
+        val path = "profilePosts/${post.id}"
+        return try {
+            require(!post.locked) { "Locked pictures cannot be shared." }
+            db.collection("profilePosts").document(post.id).update(
+                mapOf(
+                    "shareCount" to FieldValue.increment(1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
             Result.failure(e)
         }
     }

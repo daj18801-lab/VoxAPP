@@ -303,7 +303,7 @@ fun RoomScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
@@ -315,7 +315,7 @@ fun RoomScreen(
                                             imageVector = Icons.Rounded.VisibilityOff,
                                             contentDescription = "Invisible mode active",
                                             tint = usernameColor(staffCapabilities.tier),
-                                            modifier = Modifier.size(16.dp)
+                                            modifier = Modifier.size(18.dp)
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Text(
@@ -349,7 +349,7 @@ fun RoomScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
@@ -357,7 +357,7 @@ fun RoomScreen(
                                         imageVector = Icons.Rounded.Mic,
                                         contentDescription = "Admin mic priority",
                                         tint = adminRed,
-                                        modifier = Modifier.size(13.dp)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                     Text(
                                         text = if (staffCapabilities.isAdmin) {
@@ -774,7 +774,7 @@ private fun RoomTopBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal =6.dp, vertical = 8.dp),
+                .padding(horizontal = 6.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
@@ -915,15 +915,17 @@ private fun StageSection(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = modifier
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggleExpand),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
                         text = "LIVE STAGE (${stageParticipants.size})",
@@ -938,26 +940,23 @@ private fun StageSection(
                         )
                     }
                 }
-                IconButton(
-                    onClick = onToggleExpand,
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(
-                        imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                        contentDescription = if (expanded) "Collapse stage" else "Expand stage"
-                    )
-                }
+                Icon(
+                    imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                    contentDescription = if (expanded) "Collapse stage" else "Expand stage",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
             }
 
             if (expanded) {
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(5.dp))
 
                 if (isCamActive) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(172.dp)
-                            .clip(RoundedCornerShape(16.dp))
+                            .height(116.dp)
+                            .clip(RoundedCornerShape(12.dp))
                     ) {
                         LiveCameraPreview(
                             useFrontCamera = useFrontCamera,
@@ -966,7 +965,7 @@ private fun StageSection(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(10.dp),
+                                .padding(8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -975,7 +974,7 @@ private fun StageSection(
                                 shape = CircleShape,
                                 color = Color(0xAA0A0D16),
                                 modifier = Modifier
-                                    .size(38.dp)
+                                    .size(34.dp)
                                     .clickable(onClick = onFlipCamera)
                                     .testTag("flip_camera_button")
                             ) {
@@ -984,7 +983,7 @@ private fun StageSection(
                                         imageVector = Icons.Rounded.Cameraswitch,
                                         contentDescription = "Flip camera",
                                         tint = Color.White,
-                                        modifier = Modifier.size(20.dp)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
@@ -996,10 +995,10 @@ private fun StageSection(
                                 color = Color(0xBB0A0D16),
                                 modifier = Modifier
                                     .align(Alignment.BottomStart)
-                                    .padding(10.dp)
+                                    .padding(8.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     VoiceWaveformBars(amplitude = liveAmplitude, active = true)
@@ -1013,11 +1012,11 @@ private fun StageSection(
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                 }
 
                 LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(vertical = 2.dp)
                 ) {
                     items(stageParticipants, key = { it.userId }) { p ->
@@ -1028,20 +1027,20 @@ private fun StageSection(
                         val tier = p.staffTierEnum()
 
                         Surface(
-                            shape = RoundedCornerShape(16.dp),
+                            shape = RoundedCornerShape(12.dp),
                             color = MaterialTheme.colorScheme.surface,
                             border = BorderStroke(
                                 width = if (effectiveMic) 1.5.dp else 1.dp,
                                 color = if (effectiveMic) VoiceCyan else MaterialTheme.colorScheme.outlineVariant
                             ),
                             modifier = Modifier
-                                .width(120.dp)
                                 .clickable { onSelectParticipant(p) }
+                                .testTag("stage_participant_${p.userId}")
                         ) {
-                            Column(
-                                modifier = Modifier.padding(10.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp)
                             ) {
                                 Box(contentAlignment = Alignment.BottomEnd) {
                                     SpeakingAvatarCircle(
@@ -1049,11 +1048,11 @@ private fun StageSection(
                                         colorHex = p.avatarColorHex,
                                         speakingLevel = effectiveAmp,
                                         micActive = effectiveMic,
-                                        size = 52.dp
+                                        size = 34.dp
                                     )
                                     Box(
                                         modifier = Modifier
-                                            .size(20.dp)
+                                            .size(16.dp)
                                             .clip(CircleShape)
                                             .background(
                                                 when {
@@ -1075,22 +1074,29 @@ private fun StageSection(
                                             contentDescription = "Media status",
                                             tint = if (effectiveMic || effectiveCam || p.mutedByMod) Color.White
                                             else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(12.dp)
+                                            modifier = Modifier.size(10.dp)
                                         )
                                     }
                                 }
 
-                                Text(
-                                    text = if (isSelf) "${p.displayName} (You)" else p.displayName,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = usernameColor(tier),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (tier != StaffTier.USER) {
-                                    StaffTierBadge(tier = tier)
+                                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = if (isSelf) "${p.displayName} (You)" else p.displayName,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = usernameColor(tier),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (tier != StaffTier.USER) {
+                                            StaffTierBadge(tier = tier)
+                                        }
+                                    }
+                                    RolePillBadge(role = p.roleEnum())
                                 }
-                                RolePillBadge(role = p.roleEnum())
                             }
                         }
                     }

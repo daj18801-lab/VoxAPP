@@ -7,6 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,12 +22,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.rounded.CardMembership
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RocketLaunch
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -63,6 +69,7 @@ fun formatPostDateTime(ts: Timestamp?): String {
     return formatter.format(date)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ProfilePostCard(
     post: ProfilePost,
@@ -72,14 +79,19 @@ fun ProfilePostCard(
     isUnlocked: Boolean = true,
     isProcessingUnlock: Boolean = false,
     onAuthorClick: (() -> Unit)? = null,
+    onOriginalAuthorClick: ((String) -> Unit)? = null,
     onUnlockPost: (() -> Unit)? = null,
     onSubscribeCreator: (() -> Unit)? = null,
+    onBoostPost: (() -> Unit)? = null,
+    onOpenComments: (() -> Unit)? = null,
+    onSharePost: (() -> Unit)? = null,
     onToggleLike: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tier = post.authorTierEnum()
     val liked = post.isLikedBy(currentUserId)
+    val isBoosted = post.isCurrentlyBoosted()
     val effectiveAvatarPhoto = latestAuthorPhotoBase64?.ifBlank { post.authorPhotoBase64 } ?: post.authorPhotoBase64
     val showLockedPaywall = post.locked && post.imageBase64.isNotBlank() && !isUnlocked
     val postImageBitmap = if (showLockedPaywall) null else rememberBase64ImageBitmap(post.imageBase64)
@@ -89,7 +101,10 @@ fun ProfilePostCard(
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(
+            width = if (isBoosted) 1.5.dp else 1.dp,
+            color = if (isBoosted) ModAmber.copy(alpha = 0.85f) else MaterialTheme.colorScheme.outlineVariant
+        ),
         modifier = modifier
             .fillMaxWidth()
             .testTag("profile_post_card_${post.id}")
@@ -98,6 +113,65 @@ fun ProfilePostCard(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // Boosted Top-of-Discovery Banner
+            if (isBoosted) {
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = ModAmber.copy(alpha = 0.16f),
+                    border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.45f)),
+                    modifier = Modifier.testTag("boosted_post_badge_${post.id}")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.RocketLaunch,
+                            contentDescription = "Boosted to top of Discovery",
+                            tint = ModAmber,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "Top of Discovery · Boosted (${post.boostRemainingLabel()})",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = ModAmber
+                        )
+                    }
+                }
+            }
+
+            // Shared-From Attribution Pill (for reposted unlocked posts)
+            if (post.sharedFromPostId.isNotBlank() && post.sharedFromAuthorName.isNotBlank()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier
+                        .then(
+                            if (onOriginalAuthorClick != null && post.sharedFromAuthorId.isNotBlank()) {
+                                Modifier.clickable { onOriginalAuthorClick(post.sharedFromAuthorId) }
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .testTag("shared_from_label_${post.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Repeat,
+                        contentDescription = "Shared post",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "Shared from ${post.sharedFromAuthorName} (@${post.sharedFromAuthorHandle})",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
             // Author Header Row
             Row(
                 modifier = Modifier
@@ -326,12 +400,13 @@ fun ProfilePostCard(
                 }
             }
 
-            // Action Footer (Like button + count)
-            Row(
+            // Action Footer: Heart/Like · Comment · Share (unlocked only) · Boost to Top (author only)
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                // Heart / Like Pill
                 Surface(
                     shape = RoundedCornerShape(999.dp),
                     color = if (liked) {
@@ -345,30 +420,146 @@ fun ProfilePostCard(
                         .testTag("like_post_${post.id}")
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Icon(
                             imageVector = if (liked) Icons.Rounded.Favorite else Icons.Outlined.FavoriteBorder,
-                            contentDescription = if (liked) "Unlike post" else "Like post",
+                            contentDescription = if (liked) "Remove heart" else "Heart post",
                             tint = if (liked) LiveCoral else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = if (post.likedByUserIds.isEmpty()) "Like" else "${post.likedByUserIds.size}",
+                            text = if (post.likedByUserIds.isEmpty()) "Heart" else "${post.likedByUserIds.size}",
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                             color = if (liked) LiveCoral else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                if (post.locked && post.authorId == currentUserId) {
-                    Text(
-                        text = "Earns \$1 per 2-pt unlock",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+
+                // Comment Pill
+                if (onOpenComments != null) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable(onClick = onOpenComments)
+                            .testTag("comment_post_${post.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.ChatBubbleOutline,
+                                contentDescription = "Comment on post",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Text(
+                                text = if (post.commentCount <= 0L) "Comment" else "${post.commentCount}",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
+
+                // Share Pill (STRICTLY ONLY FOR UNLOCKED POSTS — LOCKED PICTURES CANNOT BE SHARED)
+                if (post.isShareable() && onSharePost != null) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable(onClick = onSharePost)
+                            .testTag("share_post_${post.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Share,
+                                contentDescription = "Share post",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Text(
+                                text = if (post.shareCount <= 0L) "Share" else "${post.shareCount}",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else if (post.locked) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        modifier = Modifier.testTag("locked_no_share_badge_${post.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Lock,
+                                contentDescription = "Locked photos cannot be shared",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "No Share",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                // Boost to Top of Discovery Pill (Author only · 5 pts / $5)
+                if (post.authorId == currentUserId && onBoostPost != null) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = ModAmber.copy(alpha = 0.16f),
+                        border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.55f)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable(enabled = !isProcessingUnlock, onClick = onBoostPost)
+                            .testTag("boost_post_${post.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.RocketLaunch,
+                                contentDescription = "Boost to top of Discovery for 5 points",
+                                tint = ModAmber,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = if (isBoosted) "Re-boost · 5 pts (\$5)" else "Boost to Top · 5 pts (\$5)",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = ModAmber
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (post.locked && post.authorId == currentUserId) {
+                Text(
+                    text = "Locked photo · Earns \$1 per 2-pt unlock · Sharing disabled",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -381,3 +572,4 @@ fun ProfilePostCard(
         )
     }
 }
+

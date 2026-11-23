@@ -160,7 +160,7 @@ service cloud.firestore {
                'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled', 'invisibleModePreferred',
                'globallyBanned', 'disableCreateRoom', 'disableEnterRoom',
                'disableMic', 'disableVideo', 'suspendedUntilMillis', 'suspensionReason',
-               'pointsBalance', 'creatorEarningsCents', 'totalSpentCents',
+               'pointsBalance', 'creatorEarningsCents', 'totalSpentCents', 'dmPolicy',
                'blockedUserIds', 'createdAt', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
@@ -183,6 +183,7 @@ service cloud.firestore {
              (!('pointsBalance' in data) || (data.pointsBalance is int && data.pointsBalance >= 0 && data.pointsBalance <= 1000000)) &&
              (!('creatorEarningsCents' in data) || (data.creatorEarningsCents is int && data.creatorEarningsCents >= 0 && data.creatorEarningsCents <= 1000000000)) &&
              (!('totalSpentCents' in data) || (data.totalSpentCents is int && data.totalSpentCents >= 0 && data.totalSpentCents <= 1000000000)) &&
+             (!('dmPolicy' in data) || data.dmPolicy in ['OPEN', 'PAID', 'DISABLED']) &&
              isBoundedStringList(data.blockedUserIds, 100) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
@@ -417,7 +418,7 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'userId', 'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
-               'staffTier', 'postCount', 'updatedAt'
+               'staffTier', 'postCount', 'dmPolicy', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 40 &&
@@ -427,6 +428,7 @@ service cloud.firestore {
              (!('photoBase64' in data) || (data.photoBase64 is string && data.photoBase64.size() <= 140000)) &&
              data.staffTier in ['USER', 'SUPPORT', 'ADMIN'] &&
              (!('postCount' in data) || (data.postCount is int && data.postCount >= 0 && data.postCount <= 100000)) &&
+             (!('dmPolicy' in data) || data.dmPolicy in ['OPEN', 'PAID', 'DISABLED']) &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
@@ -438,7 +440,10 @@ service cloud.firestore {
              data.keys().hasOnly([
                'authorId', 'authorName', 'authorHandle', 'authorColorHex', 'authorPhotoBase64',
                'authorTier', 'text', 'imageBase64', 'locked', 'unlockPricePoints', 'unlockedByUserIds',
-               'likedByUserIds', 'createdAt', 'updatedAt'
+               'boostedAtMillis', 'boostedUntilMillis', 'likedByUserIds',
+               'commentCount', 'shareCount',
+               'sharedFromPostId', 'sharedFromAuthorId', 'sharedFromAuthorName', 'sharedFromAuthorHandle',
+               'createdAt', 'updatedAt'
              ]) &&
              data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 40 &&
@@ -453,9 +458,43 @@ service cloud.firestore {
              (!('locked' in data) || !data.locked || data.imageBase64.size() >= 1) &&
              (!('unlockPricePoints' in data) || (data.unlockPricePoints is int && data.unlockPricePoints == 2)) &&
              (!('unlockedByUserIds' in data) || isBoundedStringList(data.unlockedByUserIds, 500)) &&
+             (!('boostedAtMillis' in data) || (data.boostedAtMillis is int && data.boostedAtMillis >= 0)) &&
+             (!('boostedUntilMillis' in data) || (data.boostedUntilMillis is int && data.boostedUntilMillis >= 0)) &&
+             (!('commentCount' in data) || (data.commentCount is int && data.commentCount >= 0 && data.commentCount <= 100000)) &&
+             (!('shareCount' in data) || (data.shareCount is int && data.shareCount >= 0 && data.shareCount <= 100000)) &&
+             (!('sharedFromPostId' in data) || (data.sharedFromPostId is string && data.sharedFromPostId.size() <= 128)) &&
+             (!('sharedFromAuthorId' in data) || (data.sharedFromAuthorId is string && data.sharedFromAuthorId.size() <= 128)) &&
+             (!('sharedFromAuthorName' in data) || (data.sharedFromAuthorName is string && data.sharedFromAuthorName.size() <= 40)) &&
+             (!('sharedFromAuthorHandle' in data) || (data.sharedFromAuthorHandle is string && data.sharedFromAuthorHandle.size() <= 30)) &&
              isBoundedStringList(data.likedByUserIds, 500) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidPostComment(data) {
+      return data.keys().hasAll([
+               'postId', 'authorId', 'authorName', 'authorHandle', 'authorColorHex',
+               'authorTier', 'text', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'postId', 'authorId', 'authorName', 'authorHandle', 'authorColorHex',
+               'authorPhotoBase64', 'authorTier', 'text', 'createdAt'
+             ]) &&
+             data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 40 &&
+             data.authorHandle is string && data.authorHandle.size() >= 2 && data.authorHandle.size() <= 30 &&
+             isValidHexColor(data.authorColorHex) &&
+             (!('authorPhotoBase64' in data) || (data.authorPhotoBase64 is string && data.authorPhotoBase64.size() <= 140000)) &&
+             data.authorTier in ['USER', 'SUPPORT', 'ADMIN'] &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 500 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isOriginalPostShareable(origPostId) {
+      return exists(/databases/$(database)/documents/profilePosts/$(origPostId)) &&
+             !(('locked' in get(/databases/$(database)/documents/profilePosts/$(origPostId)).data) &&
+               get(/databases/$(database)/documents/profilePosts/$(origPostId)).data.locked == true);
     }
 
     function isValidFriendship(data) {
@@ -495,12 +534,17 @@ service cloud.firestore {
                'createdAt', 'updatedAt'
              ]) &&
              data.keys().hasOnly([
-               'participantIds', 'userAId', 'userAName', 'userAColorHex', 'userATier',
+               'participantIds', 'isGroup', 'groupName', 'participantNamesById', 'kickedUserIds',
+               'userAId', 'userAName', 'userAColorHex', 'userATier',
                'userBId', 'userBName', 'userBColorHex', 'userBTier',
                'lastMessageText', 'lastMessageSenderId', 'unreadByUserIds',
                'createdAt', 'updatedAt'
              ]) &&
-             data.participantIds is list && data.participantIds.size() == 2 &&
+             data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 15 &&
+             (!('isGroup' in data) || data.isGroup is bool) &&
+             (!('groupName' in data) || (data.groupName is string && data.groupName.size() <= 60)) &&
+             (!('participantNamesById' in data) || (data.participantNamesById is map && data.participantNamesById.size() <= 15)) &&
+             (!('kickedUserIds' in data) || isBoundedStringList(data.kickedUserIds, 20)) &&
              data.userAId is string && data.userAId.size() >= 1 && data.userAId.size() <= 128 &&
              data.userBId is string && data.userBId.size() >= 1 && data.userBId.size() <= 128 &&
              data.userAId != data.userBId &&
@@ -513,7 +557,7 @@ service cloud.firestore {
              data.userBTier in ['USER', 'SUPPORT', 'ADMIN'] &&
              data.lastMessageText is string && data.lastMessageText.size() <= 300 &&
              data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 128 &&
-             isBoundedStringList(data.unreadByUserIds, 2) &&
+             isBoundedStringList(data.unreadByUserIds, 15) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
@@ -526,7 +570,7 @@ service cloud.firestore {
                'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier', 'text', 'imageBase64', 'createdAt'
              ]) &&
              data.threadId is string && data.threadId.size() >= 1 && data.threadId.size() <= 260 &&
-             data.participantIds is list && data.participantIds.size() == 2 &&
+             data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 15 &&
              data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
              data.senderId in data.participantIds &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 40 &&
@@ -535,6 +579,62 @@ service cloud.firestore {
              (!('imageBase64' in data) || (data.imageBase64 is string && data.imageBase64.size() <= 460000)) &&
              (data.text.size() >= 1 || ('imageBase64' in data && data.imageBase64.size() >= 1)) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidDmAccessPass(data) {
+      return data.keys().hasAll([
+               'senderId', 'senderName', 'recipientId', 'recipientName',
+               'priceCents', 'creatorShareCents', 'platformShareCents',
+               'active', 'kicked', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'senderId', 'senderName', 'recipientId', 'recipientName',
+               'priceCents', 'creatorShareCents', 'platformShareCents',
+               'active', 'kicked', 'createdAt', 'updatedAt'
+             ]) &&
+             data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 40 &&
+             data.recipientId is string && data.recipientId.size() >= 1 && data.recipientId.size() <= 128 &&
+             data.recipientName is string && data.recipientName.size() >= 1 && data.recipientName.size() <= 40 &&
+             data.senderId != data.recipientId &&
+             data.priceCents is int && data.priceCents == 1000 &&
+             data.creatorShareCents is int && data.creatorShareCents == 500 &&
+             data.platformShareCents is int && data.platformShareCents == 500 &&
+             data.active is bool &&
+             data.kicked is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function hasActiveDmPass(targetUid) {
+      let passId = request.auth.uid + '_' + targetUid;
+      return exists(/databases/$(database)/documents/dmAccessPasses/$(passId)) &&
+             get(/databases/$(database)/documents/dmAccessPasses/$(passId)).data.active == true &&
+             get(/databases/$(database)/documents/dmAccessPasses/$(passId)).data.kicked == false;
+    }
+
+    function canMessageWithDirectory(dirData, targetUid) {
+      let policy = ('dmPolicy' in dirData) ? dirData.dmPolicy : 'OPEN';
+      return policy == 'OPEN' || (policy == 'PAID' && hasActiveDmPass(targetUid));
+    }
+
+    function canMessageUser(targetUid) {
+      return isAdmin() ||
+             targetUid == request.auth.uid ||
+             !exists(/databases/$(database)/documents/userDirectory/$(targetUid)) ||
+             canMessageWithDirectory(get(/databases/$(database)/documents/userDirectory/$(targetUid)).data, targetUid);
+    }
+
+    function otherOneOnOneUid(threadData) {
+      return threadData.userAId == request.auth.uid ? threadData.userBId : threadData.userAId;
+    }
+
+    function isThreadGroup(threadData) {
+      return ('isGroup' in threadData) && threadData.isGroup == true;
+    }
+
+    function isKickedFromThread(threadData, uid) {
+      return ('kickedUserIds' in threadData) && (uid in threadData.kickedUserIds);
     }
 
     function isValidCreatorSubscription(data) {
@@ -570,7 +670,7 @@ service cloud.firestore {
                'type', 'buyerId', 'buyerName', 'creatorId', 'creatorName', 'postId',
                'pointsDelta', 'grossCents', 'creatorShareCents', 'platformShareCents', 'createdAt'
              ]) &&
-             data.type in ['BUY_POINTS', 'UNLOCK_PHOTO', 'SUBSCRIBE_CREATOR'] &&
+             data.type in ['BUY_POINTS', 'UNLOCK_PHOTO', 'SUBSCRIBE_CREATOR', 'BOOST_POST', 'UNLOCK_DM'] &&
              data.buyerId is string && data.buyerId.size() >= 1 && data.buyerId.size() <= 128 &&
              data.buyerName is string && data.buyerName.size() >= 1 && data.buyerName.size() <= 40 &&
              data.creatorId is string && data.creatorId.size() <= 128 &&
@@ -603,6 +703,22 @@ service cloud.firestore {
                 data.platformShareCents == 750 &&
                 data.creatorId.size() >= 1 &&
                 data.creatorId != data.buyerId &&
+                data.postId == '') ||
+               (data.type == 'BOOST_POST' &&
+                data.pointsDelta == -5 &&
+                data.grossCents == 500 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 500 &&
+                data.creatorId == '' &&
+                data.creatorName == '' &&
+                data.postId.size() >= 1) ||
+               (data.type == 'UNLOCK_DM' &&
+                data.pointsDelta == 0 &&
+                data.grossCents == 1000 &&
+                data.creatorShareCents == 500 &&
+                data.platformShareCents == 500 &&
+                data.creatorId.size() >= 1 &&
+                data.creatorId != data.buyerId &&
                 data.postId == '')
              );
     }
@@ -613,18 +729,108 @@ service cloud.firestore {
       let oldSpent = existingInt(oldData, 'totalSpentCents');
       let newSpent = existingInt(newData, 'totalSpentCents');
       let ptsDelta = newPts - oldPts;
-      return newData.diff(oldData).affectedKeys().hasOnly(['pointsBalance', 'totalSpentCents', 'updatedAt']) && (
+      return newPts >= 0 &&
+             newData.diff(oldData).affectedKeys().hasOnly(['pointsBalance', 'totalSpentCents', 'updatedAt']) && (
         (ptsDelta >= 2 && ptsDelta <= 500 && newSpent == oldSpent + (ptsDelta * 100)) ||
         (ptsDelta == -2 && newSpent == oldSpent) ||
-        (ptsDelta == 0 && newSpent == oldSpent + 1500)
+        (ptsDelta == -5 && newSpent == oldSpent) ||
+        (ptsDelta == 0 && (newSpent == oldSpent + 1500 || newSpent == oldSpent + 1000))
       );
+    }
+
+    function callerPaidFivePointsInBatch() {
+      let beforeProfile = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      let afterProfile = getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      let oldPts = existingInt(beforeProfile, 'pointsBalance');
+      let newPts = existingInt(afterProfile, 'pointsBalance');
+      return newPts >= 0 && newPts == oldPts - 5;
+    }
+
+    function isValidBoostWindow(data) {
+      return ('boostedAtMillis' in data) && ('boostedUntilMillis' in data) &&
+             data.boostedAtMillis is int && data.boostedAtMillis > 0 &&
+             data.boostedUntilMillis is int &&
+             data.boostedUntilMillis > request.time.toMillis() &&
+             data.boostedUntilMillis <= request.time.toMillis() + 86700000;
     }
 
     function isValidCreatorEarningsCredit(newData, oldData) {
       let oldEarn = existingInt(oldData, 'creatorEarningsCents');
       let newEarn = existingInt(newData, 'creatorEarningsCents');
       return newData.diff(oldData).affectedKeys().hasOnly(['creatorEarningsCents', 'updatedAt']) &&
-             (newEarn == oldEarn + 100 || newEarn == oldEarn + 750);
+             (newEarn == oldEarn + 100 || newEarn == oldEarn + 500 || newEarn == oldEarn + 750);
+    }
+
+    function canUpdateProfilePost(newData, oldData) {
+      let diffKeys = newData.diff(oldData).affectedKeys();
+      let isAuthor = oldData.authorId == request.auth.uid;
+      let isLocked = ('locked' in oldData) && oldData.locked == true;
+      return (isAuthor && diffKeys.hasOnly([
+                'text', 'imageBase64', 'locked', 'authorName', 'authorHandle',
+                'authorColorHex', 'authorPhotoBase64', 'updatedAt'
+              ])) ||
+             (diffKeys.hasOnly(['likedByUserIds', 'updatedAt']) && (
+               (request.auth.uid in newData.likedByUserIds &&
+                !(request.auth.uid in oldData.likedByUserIds) &&
+                newData.likedByUserIds.size() == oldData.likedByUserIds.size() + 1) ||
+               (!(request.auth.uid in newData.likedByUserIds) &&
+                request.auth.uid in oldData.likedByUserIds &&
+                newData.likedByUserIds.size() == oldData.likedByUserIds.size() - 1)
+             )) ||
+             (isAdmin() && diffKeys.hasOnly(['authorName', 'authorHandle', 'updatedAt'])) ||
+             (!isAuthor && isLocked && diffKeys.hasOnly(['unlockedByUserIds', 'updatedAt']) &&
+              request.auth.uid in newData.unlockedByUserIds &&
+              (!('unlockedByUserIds' in oldData)
+                ? newData.unlockedByUserIds.size() == 1
+                : (!(request.auth.uid in oldData.unlockedByUserIds) &&
+                   newData.unlockedByUserIds.size() == oldData.unlockedByUserIds.size() + 1))) ||
+             (isAuthor && diffKeys.hasOnly(['boostedAtMillis', 'boostedUntilMillis', 'updatedAt']) &&
+              isValidBoostWindow(newData) && callerPaidFivePointsInBatch()) ||
+             (diffKeys.hasOnly(['commentCount', 'updatedAt']) &&
+              (newData.commentCount == existingInt(oldData, 'commentCount') + 1 ||
+               (existingInt(oldData, 'commentCount') > 0 &&
+                newData.commentCount == existingInt(oldData, 'commentCount') - 1))) ||
+             (!isLocked && diffKeys.hasOnly(['shareCount', 'updatedAt']) &&
+              newData.shareCount == existingInt(oldData, 'shareCount') + 1);
+    }
+
+    function canUpdateDirectThread(newData, oldData) {
+      let diffKeys = newData.diff(oldData).affectedKeys();
+      let wasGroup = isThreadGroup(oldData);
+      let nowGroup = isThreadGroup(newData);
+      return wasGroup == nowGroup && (
+        // Action 1: Normal messaging preview / unread / participant display updates
+        (newData.participantIds == oldData.participantIds &&
+         !isKickedFromThread(oldData, request.auth.uid) &&
+         diffKeys.hasOnly([
+           'userAName', 'userAColorHex', 'userATier',
+           'userBName', 'userBColorHex', 'userBTier',
+           'lastMessageText', 'lastMessageSenderId',
+           'unreadByUserIds', 'updatedAt'
+         ])) ||
+        // Action 2: Add new members or update group name in an existing group chat
+        (wasGroup &&
+         !isKickedFromThread(oldData, request.auth.uid) &&
+         newData.participantIds.hasAll(oldData.participantIds) &&
+         newData.participantIds.size() <= 15 &&
+         diffKeys.hasOnly([
+           'participantIds', 'participantNamesById', 'groupName',
+           'lastMessageText', 'lastMessageSenderId', 'unreadByUserIds', 'updatedAt'
+         ])) ||
+        // Action 3: Recipient kicks a paid DM member from messaging them
+        (!wasGroup &&
+         newData.participantIds == oldData.participantIds &&
+         !isKickedFromThread(newData, request.auth.uid) &&
+         diffKeys.hasOnly([
+           'kickedUserIds', 'lastMessageText', 'lastMessageSenderId', 'updatedAt'
+         ]))
+      );
+    }
+
+    function canSendMessageInThread(threadData) {
+      return request.auth.uid in threadData.participantIds &&
+             !isKickedFromThread(threadData, request.auth.uid) &&
+             (isThreadGroup(threadData) || canMessageUser(otherOneOnOneUid(threadData)));
     }
 
     // --- 1. USERS COLLECTION ---
@@ -654,7 +860,7 @@ service cloud.firestore {
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
                             'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled',
-                            'invisibleModePreferred', 'blockedUserIds', 'updatedAt'
+                            'invisibleModePreferred', 'dmPolicy', 'blockedUserIds', 'updatedAt'
                           ])) ||
                          // Action 1b: Owner buys points (2..500 pts at $1/pt), spends 2 pts to unlock photo, or pays $15/mo subscription
                          (request.auth.uid == userId &&
@@ -1126,7 +1332,7 @@ service cloud.firestore {
                        (request.auth.uid in existing().userIds || isAdmin());
     }
 
-    // --- 6. DIRECT PRIVATE MESSAGE THREADS & MESSAGES ---
+    // --- 6. DIRECT PRIVATE MESSAGE & GROUP CHAT THREADS ---
     match /directThreads/{threadId} {
       allow get: if isSignedIn() &&
                     (resource == null ||
@@ -1139,21 +1345,16 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        request.auth.uid in incoming().participantIds &&
                        callerPassesProfileChecks(false, false, false, false) &&
-                       isValidDirectThread(incoming());
+                       isValidDirectThread(incoming()) &&
+                       (isThreadGroup(incoming()) || canMessageUser(otherOneOnOneUid(incoming())));
 
       allow update: if isSignedIn() &&
                        request.auth.uid in existing().participantIds &&
                        isValidDirectThread(incoming()) &&
-                       incoming().participantIds == existing().participantIds &&
                        incoming().userAId == existing().userAId &&
                        incoming().userBId == existing().userBId &&
                        incoming().createdAt == existing().createdAt &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'userAName', 'userAColorHex', 'userATier',
-                         'userBName', 'userBColorHex', 'userBTier',
-                         'lastMessageText', 'lastMessageSenderId',
-                         'unreadByUserIds', 'updatedAt'
-                       ]);
+                       canUpdateDirectThread(incoming(), existing());
 
       allow delete: if isSignedIn() &&
                        (request.auth.uid in existing().participantIds || isAdmin());
@@ -1176,7 +1377,7 @@ service cloud.firestore {
                          callerPassesProfileChecks(false, false, false, false) &&
                          isValidDirectMessage(incoming()) &&
                          exists(/databases/$(database)/documents/directThreads/$(threadId)) &&
-                         request.auth.uid in get(/databases/$(database)/documents/directThreads/$(threadId)).data.participantIds;
+                         canSendMessageInThread(get(/databases/$(database)/documents/directThreads/$(threadId)).data);
 
         allow update: if false;
 
@@ -1186,7 +1387,45 @@ service cloud.firestore {
       }
     }
 
-    // --- 7. PROFILE POSTS (Public Updates, Pictures & Text) ---
+    // --- 6b. PAID PRIVATE MESSAGE ACCESS PASSES ($10 = $5 user / $5 app owner, kickable by recipient) ---
+    match /dmAccessPasses/{passId} {
+      allow get: if isSignedIn() &&
+                    (resource == null ||
+                     existing().senderId == request.auth.uid ||
+                     existing().recipientId == request.auth.uid ||
+                     isAdmin());
+
+      allow list: if isSignedIn() &&
+                     (resource.data.senderId == request.auth.uid ||
+                      resource.data.recipientId == request.auth.uid ||
+                      isAdmin());
+
+      allow create: if isSignedIn() &&
+                       incoming().senderId == request.auth.uid &&
+                       incoming().senderId != incoming().recipientId &&
+                       passId == incoming().senderId + '_' + incoming().recipientId &&
+                       incoming().active == true &&
+                       incoming().kicked == false &&
+                       isValidDmAccessPass(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidDmAccessPass(incoming()) &&
+                       incoming().senderId == existing().senderId &&
+                       incoming().recipientId == existing().recipientId &&
+                       incoming().priceCents == existing().priceCents &&
+                       incoming().creatorShareCents == existing().creatorShareCents &&
+                       incoming().platformShareCents == existing().platformShareCents &&
+                       incoming().createdAt == existing().createdAt &&
+                       (existing().recipientId == request.auth.uid || isAdmin()) &&
+                       incoming().active == false &&
+                       incoming().kicked == true &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['active', 'kicked', 'updatedAt']);
+
+      allow delete: if isSignedIn() &&
+                       (existing().recipientId == request.auth.uid || isAdmin());
+    }
+
+    // --- 7. PROFILE POSTS (Public Updates, Pictures, Comments, Shares & Discovery Boosts) ---
     match /profilePosts/{postId} {
       allow get, list: if isSignedIn();
 
@@ -1195,49 +1434,58 @@ service cloud.firestore {
                        incoming().authorId == request.auth.uid &&
                        incoming().likedByUserIds.size() == 0 &&
                        (!('unlockedByUserIds' in incoming()) || incoming().unlockedByUserIds.size() == 0) &&
+                       (!('commentCount' in incoming()) || incoming().commentCount == 0) &&
+                       (!('shareCount' in incoming()) || incoming().shareCount == 0) &&
+                       (
+                         !('sharedFromPostId' in incoming()) ||
+                         incoming().sharedFromPostId == '' ||
+                         ((!('locked' in incoming()) || incoming().locked == false) &&
+                          isOriginalPostShareable(incoming().sharedFromPostId))
+                       ) &&
+                       (
+                         ((!('boostedAtMillis' in incoming()) || incoming().boostedAtMillis == 0) &&
+                          (!('boostedUntilMillis' in incoming()) || incoming().boostedUntilMillis == 0)) ||
+                         (isValidBoostWindow(incoming()) && callerPaidFivePointsInBatch())
+                       ) &&
                        isAllowedStaffTierClaim(incoming().authorTier) &&
                        callerPassesProfileChecks(false, false, false, false) &&
                        isValidProfilePost(incoming());
 
       allow update: if isSignedIn() &&
                        isValidId(postId) &&
-                       isValidProfilePost(incoming()) &&
                        incoming().authorId == existing().authorId &&
-                       incoming().createdAt == existing().createdAt && (
-                         // Action 1: Author updates their own post caption/image/lock/profile metadata
-                         (existing().authorId == request.auth.uid &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'text', 'imageBase64', 'locked', 'authorName', 'authorHandle',
-                            'authorColorHex', 'authorPhotoBase64', 'updatedAt'
-                          ])) ||
-                         // Action 2: Any signed-in user toggles ONLY their own UID in likedByUserIds
-                         (incoming().diff(existing()).affectedKeys().hasOnly(['likedByUserIds', 'updatedAt']) && (
-                           (request.auth.uid in incoming().likedByUserIds &&
-                            !(request.auth.uid in existing().likedByUserIds) &&
-                            incoming().likedByUserIds.size() == existing().likedByUserIds.size() + 1) ||
-                           (!(request.auth.uid in incoming().likedByUserIds) &&
-                            request.auth.uid in existing().likedByUserIds &&
-                            incoming().likedByUserIds.size() == existing().likedByUserIds.size() - 1)
-                         )) ||
-                         // Action 3: Admin updates authorName/authorHandle when renaming a user
-                         (isAdmin() &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'authorName', 'authorHandle', 'updatedAt'
-                          ])) ||
-                         // Action 4: Buyer unlocks a locked photo by adding ONLY their own UID to unlockedByUserIds
-                         (existing().authorId != request.auth.uid &&
-                          ('locked' in existing()) && existing().locked == true &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['unlockedByUserIds', 'updatedAt']) &&
-                          request.auth.uid in incoming().unlockedByUserIds &&
-                          (!('unlockedByUserIds' in existing())
-                            ? incoming().unlockedByUserIds.size() == 1
-                            : (!(request.auth.uid in existing().unlockedByUserIds) &&
-                               incoming().unlockedByUserIds.size() == existing().unlockedByUserIds.size() + 1)))
-                       );
+                       incoming().createdAt == existing().createdAt &&
+                       canUpdateProfilePost(incoming(), existing()) &&
+                       isValidProfilePost(incoming());
 
       allow delete: if isSignedIn() &&
                        isValidId(postId) &&
                        (existing().authorId == request.auth.uid || isAdminOrSupport());
+
+      // --- 7a. POST COMMENTS SUBCOLLECTION ---
+      match /comments/{commentId} {
+        allow get, list: if isSignedIn();
+
+        allow create: if isSignedIn() &&
+                         isValidId(postId) &&
+                         isValidId(commentId) &&
+                         incoming().postId == postId &&
+                         incoming().authorId == request.auth.uid &&
+                         isAllowedStaffTierClaim(incoming().authorTier) &&
+                         callerPassesProfileChecks(false, false, false, false) &&
+                         isValidPostComment(incoming()) &&
+                         exists(/databases/$(database)/documents/profilePosts/$(postId));
+
+        allow update: if false;
+
+        allow delete: if isSignedIn() &&
+                         isValidId(postId) &&
+                         isValidId(commentId) &&
+                         (existing().authorId == request.auth.uid ||
+                          (exists(/databases/$(database)/documents/profilePosts/$(postId)) &&
+                           get(/databases/$(database)/documents/profilePosts/$(postId)).data.authorId == request.auth.uid) ||
+                          isAdminOrSupport());
+      }
     }
 
     // --- 8. CREATOR SUBSCRIPTIONS ($15/month unlocks all locked photos by creator) ---

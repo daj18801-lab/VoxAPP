@@ -8,6 +8,8 @@ import com.example.data.ChatRoom
 import com.example.data.CreatorSubscription
 import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
+import com.example.data.DmAccessPass
+import com.example.data.DmPolicy
 import com.example.data.Friendship
 import com.example.data.PointTransaction
 import com.example.data.ProfilePost
@@ -42,6 +44,14 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+data class PaidDmPromptTarget(
+    val userId: String,
+    val displayName: String,
+    val colorHex: String,
+    val tier: StaffTier,
+    val onThreadReady: (String) -> Unit
+)
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(
     private val repository: VoxStageRepository,
@@ -74,6 +84,9 @@ class MainViewModel(
 
     private val _isProcessingWallet = MutableStateFlow(false)
     val isProcessingWallet: StateFlow<Boolean> = _isProcessingWallet.asStateFlow()
+
+    private val _pendingPaidDmTarget = MutableStateFlow<PaidDmPromptTarget?>(null)
+    val pendingPaidDmTarget: StateFlow<PaidDmPromptTarget?> = _pendingPaidDmTarget.asStateFlow()
 
     private val _snackbarEvents = MutableSharedFlow<String>(extraBufferCapacity = 12)
     val snackbarEvents: SharedFlow<String> = _snackbarEvents.asSharedFlow()
@@ -143,6 +156,30 @@ class MainViewModel(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
                 initialValue = UiState.Loading
+            )
+
+    val myDmAccessPassesState: StateFlow<List<DmAccessPass>> =
+        repository.observeMyDmAccessPasses(currentUserId)
+            .catch { error ->
+                Log.w(TAG, "Error observing my DM access passes", unwrapFirestoreError(error))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val paidDmMembersForMeState: StateFlow<List<DmAccessPass>> =
+        repository.observePaidDmMembersForMe(currentUserId)
+            .catch { error ->
+                Log.w(TAG, "Error observing paid DM members for me", unwrapFirestoreError(error))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
             )
 
     // --- PROFILE POSTS (MY POSTS & COMMUNITY DISCOVERY FEED) ---
@@ -449,6 +486,34 @@ class MainViewModel(
         otherTier: StaffTier,
         onThreadReady: (String) -> Unit
     ) {
+        val isAdmin = staffCapabilities.value.isAdmin
+        val targetDir = userDirectoryState.value.firstOrNull { it.userId == otherUserId }
+        val targetPolicy = targetDir?.dmPolicyEnum() ?: DmPolicy.OPEN
+
+        if (!isAdmin) {
+            if (targetPolicy == DmPolicy.DISABLED) {
+                _snackbarEvents.tryEmit("$otherName has private messages turned off.")
+                return
+            }
+            if (targetPolicy == DmPolicy.PAID) {
+                val pass = myDmAccessPassesState.value.firstOrNull { it.recipientId == otherUserId }
+                if (pass != null && pass.kicked) {
+                    _snackbarEvents.tryEmit("$otherName removed you from private messaging them.")
+                    return
+                }
+                if (pass == null || !pass.isCurrentlyAllowed()) {
+                    _pendingPaidDmTarget.value = PaidDmPromptTarget(
+                        userId = otherUserId,
+                        displayName = otherName,
+                        colorHex = otherColorHex,
+                        tier = otherTier,
+                        onThreadReady = onThreadReady
+                    )
+                    return
+                }
+            }
+        }
+
         viewModelScope.launch {
             repository.openOrCreateDirectThread(
                 myProfile = effectiveMyProfile(),
@@ -461,6 +526,105 @@ class MainViewModel(
                 onThreadReady(threadId)
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not open private chat")
+            }
+        }
+    }
+
+    fun dismissPaidDmPrompt() {
+        _pendingPaidDmTarget.value = null
+    }
+
+    fun confirmUnlockPaidDmAndOpenChat() {
+        val target = _pendingPaidDmTarget.value ?: return
+        if (_isProcessingWallet.value) return
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            val unlockResult = repository.unlockPaidDirectMessage(
+                recipientId = target.userId,
+                recipientName = target.displayName,
+                buyerName = effectiveMyProfile().displayName
+            )
+            if (unlockResult.isFailure) {
+                _isProcessingWallet.value = false
+                _pendingPaidDmTarget.value = null
+                _snackbarEvents.tryEmit(unlockResult.exceptionOrNull()?.message ?: "Could not unlock private messages")
+                return@launch
+            }
+            val openResult = repository.openOrCreateDirectThread(
+                myProfile = effectiveMyProfile(),
+                myTier = staffCapabilities.value.tier,
+                otherUserId = target.userId,
+                otherName = target.displayName,
+                otherColorHex = target.colorHex,
+                otherTier = target.tier
+            )
+            _isProcessingWallet.value = false
+            _pendingPaidDmTarget.value = null
+            openResult.onSuccess { threadId ->
+                _snackbarEvents.tryEmit("Paid \$10 to message ${target.displayName} (\$5 to ${target.displayName} · \$5 to App Owner)")
+                target.onThreadReady(threadId)
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Unlocked, but could not open chat")
+            }
+        }
+    }
+
+    fun setDmPolicy(policy: DmPolicy) {
+        viewModelScope.launch {
+            repository.updateDmPolicy(
+                policy = policy,
+                currentProfile = effectiveMyProfile(),
+                currentStaffTier = staffCapabilities.value.tier
+            ).onSuccess {
+                val msg = when (policy) {
+                    DmPolicy.OPEN -> "Private messages are now OPEN to everyone"
+                    DmPolicy.PAID -> "Private messages LOCKED to \$10 paid users (\$5 you / \$5 app)"
+                    DmPolicy.DISABLED -> "Private messages turned OFF"
+                }
+                _snackbarEvents.tryEmit(msg)
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update private message setting")
+            }
+        }
+    }
+
+    fun kickPaidDmMember(senderId: String, senderName: String) {
+        viewModelScope.launch {
+            repository.kickPaidDmMember(
+                senderId = senderId,
+                senderName = senderName,
+                myName = effectiveMyProfile().displayName
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Kicked $senderName from private messaging you")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not kick member")
+            }
+        }
+    }
+
+    fun addUserToPrivateChat(
+        currentThread: DirectThread,
+        addedUser: DirectoryEntry,
+        onOpenThread: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            repository.addUserToDirectChatOrCreateGroup(
+                currentThread = currentThread,
+                myProfile = effectiveMyProfile(),
+                myTier = staffCapabilities.value.tier,
+                addedUser = addedUser
+            ).onSuccess { nextThreadId ->
+                val verb = if (currentThread.isGroup) {
+                    "Added ${addedUser.displayName} to the group chat"
+                } else {
+                    "Created group chat with ${addedUser.displayName}!"
+                }
+                _snackbarEvents.tryEmit(verb)
+                if (nextThreadId != currentThread.id) {
+                    onOpenThread(nextThreadId)
+                }
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not add user to chat")
             }
         }
     }
@@ -601,7 +765,9 @@ class MainViewModel(
         } else {
             false
         }
-        val currentPhoto = (userProfileState.value as? UiState.Success)?.data?.photoBase64.orEmpty()
+        val currentProfile = (userProfileState.value as? UiState.Success)?.data
+        val currentPhoto = currentProfile?.photoBase64.orEmpty()
+        val currentPolicy = currentProfile?.dmPolicyEnum() ?: DmPolicy.OPEN
         viewModelScope.launch {
             repository.updateUserProfile(
                 displayName = displayName,
@@ -612,7 +778,8 @@ class MainViewModel(
                 nightModeEnabled = nightModeEnabled,
                 invisibleModePreferred = allowedInvisible,
                 currentStaffTier = staffCapabilities.value.tier,
-                currentPhotoBase64 = currentPhoto
+                currentPhotoBase64 = currentPhoto,
+                currentDmPolicy = currentPolicy
             ).onSuccess {
                 _snackbarEvents.tryEmit("Profile saved")
             }.onFailure { err ->
@@ -645,6 +812,8 @@ class MainViewModel(
         text: String,
         imageBase64: String,
         locked: Boolean = false,
+        boostToTop: Boolean = false,
+        onInsufficientPoints: () -> Unit = {},
         onPosted: () -> Unit = {}
     ) {
         if (_isPublishingPost.value) return
@@ -660,6 +829,14 @@ class MainViewModel(
                 return
             }
         }
+        if (boostToTop) {
+            val currentPoints = currentProfile?.pointsBalance ?: 0L
+            if (currentPoints < 5L) {
+                _snackbarEvents.tryEmit("Boosting to the top of Discovery costs 5 points (\$5). Buy points in Profile Settings.")
+                onInsufficientPoints()
+                return
+            }
+        }
         viewModelScope.launch {
             _isPublishingPost.value = true
             repository.createProfilePost(
@@ -667,18 +844,135 @@ class MainViewModel(
                 myTier = caps.tier,
                 text = text,
                 imageBase64 = imageBase64,
-                locked = locked
+                locked = locked,
+                boostToTop = boostToTop
             ).onSuccess {
                 _isPublishingPost.value = false
                 _snackbarEvents.tryEmit(
-                    if (locked && imageBase64.isNotBlank()) "Locked photo posted (2 pts / \$2 to unlock)"
-                    else "Post shared to your profile!"
+                    when {
+                        boostToTop -> "Posted & boosted to the top of Discovery for 24h! (-5 pts / \$5)"
+                        locked && imageBase64.isNotBlank() -> "Locked photo posted (2 pts / \$2 to unlock)"
+                        else -> "Post shared to your profile!"
+                    }
                 )
                 onPosted()
             }.onFailure { err ->
                 _isPublishingPost.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not publish post")
             }
+        }
+    }
+
+    fun boostProfilePost(
+        post: ProfilePost,
+        onInsufficientPoints: () -> Unit = {}
+    ) {
+        if (_isProcessingWallet.value) return
+        val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
+        if (currentPoints < 5L) {
+            _snackbarEvents.tryEmit("You need 5 points (\$5) to boost your post to the top of Discovery.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.boostProfilePost(
+                post = post,
+                buyerName = effectiveMyProfile().displayName
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit("Boosted to the top of Discovery for 24h! (-5 pts / \$5)")
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not boost post")
+            }
+        }
+    }
+
+    fun observePostComments(postId: String) = repository.observePostComments(postId)
+
+    fun addPostComment(
+        post: ProfilePost,
+        text: String,
+        onSent: () -> Unit = {}
+    ) {
+        val caps = staffCapabilities.value
+        val currentProfile = (userProfileState.value as? UiState.Success)?.data
+        if (!caps.isAdmin && currentProfile != null) {
+            if (currentProfile.globallyBanned) {
+                _snackbarEvents.tryEmit("Your account is banned from commenting.")
+                return
+            }
+            if (currentProfile.currentlySuspended()) {
+                _snackbarEvents.tryEmit("Suspended for ${currentProfile.remainingSuspensionLabel()}.")
+                return
+            }
+        }
+        viewModelScope.launch {
+            repository.addPostComment(
+                post = post,
+                myProfile = effectiveMyProfile(),
+                myTier = caps.tier,
+                text = text
+            ).onSuccess {
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not post comment")
+            }
+        }
+    }
+
+    fun deletePostComment(postId: String, commentId: String) {
+        viewModelScope.launch {
+            repository.deletePostComment(postId, commentId)
+                .onSuccess { _snackbarEvents.tryEmit("Comment deleted") }
+                .onFailure { err -> _snackbarEvents.tryEmit(err.message ?: "Could not delete comment") }
+        }
+    }
+
+    fun shareProfilePostToFeed(
+        post: ProfilePost,
+        note: String = "",
+        onShared: () -> Unit = {}
+    ) {
+        if (post.locked) {
+            _snackbarEvents.tryEmit("Locked pictures cannot be shared.")
+            return
+        }
+        val caps = staffCapabilities.value
+        val currentProfile = (userProfileState.value as? UiState.Success)?.data
+        if (!caps.isAdmin && currentProfile != null) {
+            if (currentProfile.globallyBanned) {
+                _snackbarEvents.tryEmit("Your account is banned from sharing posts.")
+                return
+            }
+            if (currentProfile.currentlySuspended()) {
+                _snackbarEvents.tryEmit("Suspended for ${currentProfile.remainingSuspensionLabel()}.")
+                return
+            }
+        }
+        viewModelScope.launch {
+            repository.shareProfilePostToFeed(
+                originalPost = post,
+                myProfile = effectiveMyProfile(),
+                myTier = caps.tier,
+                note = note
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Shared ${post.authorName}'s post to your profile & Discovery!")
+                onShared()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not share post")
+            }
+        }
+    }
+
+    fun recordExternalPostShare(post: ProfilePost) {
+        if (post.locked) {
+            _snackbarEvents.tryEmit("Locked pictures cannot be shared.")
+            return
+        }
+        viewModelScope.launch {
+            repository.recordExternalPostShare(post)
         }
     }
 

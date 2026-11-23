@@ -36,25 +36,37 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.GroupAdd
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -78,6 +90,10 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.DirectMessage
+import com.example.data.DirectThread
+import com.example.data.DirectoryEntry
+import com.example.data.DmAccessPass
+import com.example.data.DmPolicy
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
@@ -95,17 +111,23 @@ import com.example.ui.components.rememberBase64ImageBitmap
 import com.example.ui.components.showTopMessage
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
+import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SnapBlue
 import com.example.viewmodel.DirectChatViewModel
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DirectChatScreen(
     viewModel: DirectChatViewModel,
     userProfile: UserProfile,
     myStaffTier: StaffTier,
     otherPhotoBase64: String = "",
+    directoryEntries: List<DirectoryEntry> = emptyList(),
+    paidDmMembersForMe: List<DmAccessPass> = emptyList(),
+    onAddUserToChat: (DirectThread, DirectoryEntry) -> Unit = { _, _ -> },
+    onKickPaidMember: (senderId: String, senderName: String) -> Unit = { _, _ -> },
     onOpenUserProfile: (String) -> Unit = {},
     onBack: () -> Unit
 ) {
@@ -132,6 +154,8 @@ fun DirectChatScreen(
     var isEncodingSnap by remember { mutableStateOf(false) }
     var fullScreenPhotoBase64 by remember { mutableStateOf<String?>(null) }
     var pendingCameraAction by remember { mutableStateOf<String?>(null) } // "VIDEO_CALL" or "SNAP_PHOTO"
+    var showAddPersonSheet by remember { mutableStateOf(false) }
+    var showKickPaidMemberDialog by remember { mutableStateOf(false) }
 
     val cameraSnapLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicturePreview()
@@ -265,11 +289,21 @@ fun DirectChatScreen(
         }
     }
 
-    val otherName = thread?.otherName(viewModel.currentUserId) ?: "Private Chat"
+    val isGroup = thread?.isGroup == true
+    val otherName = thread?.displayTitle(viewModel.currentUserId) ?: "Private Chat"
     val otherColorHex = thread?.otherColorHex(viewModel.currentUserId) ?: "#0088FF"
-    val otherTier = thread?.otherTier(viewModel.currentUserId) ?: StaffTier.USER
+    val otherTier = if (isGroup) StaffTier.USER else (thread?.otherTier(viewModel.currentUserId) ?: StaffTier.USER)
+    val otherUid = thread?.otherUserId(viewModel.currentUserId).orEmpty()
+    val amIKicked = thread?.isUserKicked(viewModel.currentUserId) == true
+    val otherPaidPass = remember(paidDmMembersForMe, otherUid, isGroup) {
+        if (!isGroup && otherUid.isNotBlank()) {
+            paidDmMembersForMe.firstOrNull { it.senderId == otherUid && it.isCurrentlyAllowed() }
+        } else null
+    }
+    val canKickOtherPaidMember = !isGroup && otherUid.isNotBlank() &&
+        (otherPaidPass != null || (userProfile.dmPolicyEnum() == DmPolicy.PAID && thread?.isUserKicked(otherUid) != true))
     val remoteVideoTrack = remoteVideoTracks.values.firstOrNull()
-    val canSend = (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
+    val canSend = !amIKicked && (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -286,7 +320,7 @@ fun DirectChatScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                                .padding(horizontal = 4.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             IconButton(
@@ -301,24 +335,40 @@ fun DirectChatScreen(
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                             }
-                            val otherUid = thread?.otherUserId(viewModel.currentUserId).orEmpty()
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clickable(enabled = otherUid.isNotBlank()) {
+                                    .clickable(enabled = !isGroup && otherUid.isNotBlank()) {
                                         onOpenUserProfile(otherUid)
                                     }
                                     .testTag("dm_header_profile_link")
                             ) {
-                                SpeakingAvatarCircle(
-                                    displayName = otherName,
-                                    colorHex = otherColorHex,
-                                    speakingLevel = 0f,
-                                    micActive = isInCall && isMicActive,
-                                    size = 40.dp,
-                                    photoBase64 = otherPhotoBase64
-                                )
+                                if (isGroup) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.primaryContainer),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Groups,
+                                            contentDescription = "Group chat",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                } else {
+                                    SpeakingAvatarCircle(
+                                        displayName = otherName,
+                                        colorHex = otherColorHex,
+                                        speakingLevel = 0f,
+                                        micActive = isInCall && isMicActive,
+                                        size = 40.dp,
+                                        photoBase64 = otherPhotoBase64
+                                    )
+                                }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Row(
@@ -328,14 +378,21 @@ fun DirectChatScreen(
                                         Text(
                                             text = otherName,
                                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                            color = usernameColor(otherTier),
+                                            color = if (isGroup) MaterialTheme.colorScheme.onSurface else usernameColor(otherTier),
                                             maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
                                         )
-                                        StaffTierBadge(tier = otherTier)
+                                        if (!isGroup) {
+                                            StaffTierBadge(tier = otherTier)
+                                        }
                                     }
                                     Text(
-                                        text = if (isInCall) "Live Call Active" else "Private Chat · Tap profile",
+                                        text = when {
+                                            isInCall -> if (isGroup) "Live Group Call Active" else "Live Call Active"
+                                            isGroup -> "${thread?.participantIds?.size ?: 0} members · ${thread?.memberNamesSummary().orEmpty()}"
+                                            else -> "Private Chat · Tap profile"
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (isInCall) SafetyEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
@@ -344,50 +401,102 @@ fun DirectChatScreen(
                                 }
                             }
 
-                            // Private Chat Voice Mic Call Button
-                            IconButton(
-                                onClick = ::requestMicCallToggle,
-                                enabled = !isConnectingCall,
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("dm_mic_call_button")
-                            ) {
-                                Surface(
-                                    shape = CircleShape,
-                                    color = if (isMicActive) SafetyEmerald else MaterialTheme.colorScheme.primaryContainer,
-                                    modifier = Modifier.size(36.dp)
+                            // Add Person -> Creates Group Chat (or adds to Group Chat)
+                            if (!amIKicked && thread != null) {
+                                IconButton(
+                                    onClick = { showAddPersonSheet = true },
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .testTag("dm_add_user_button")
                                 ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = if (isMicActive) Icons.Rounded.Mic else Icons.Rounded.MicOff,
-                                            contentDescription = if (isMicActive) "Mute private call mic" else "Start private voice mic",
-                                            tint = if (isMicActive) Color.White else MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(19.dp)
-                                        )
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.GroupAdd,
+                                                contentDescription = if (isGroup) "Add member to group chat" else "Add user to create group chat",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
 
-                            // Private Chat Live Video Call Button
-                            IconButton(
-                                onClick = ::requestVideoCallToggle,
-                                enabled = !isConnectingCall,
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("dm_video_call_button")
-                            ) {
-                                Surface(
-                                    shape = CircleShape,
-                                    color = if (isCamActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
-                                    modifier = Modifier.size(36.dp)
+                            // Kick Paid Member button (for locked $10 Paid DM owners)
+                            if (canKickOtherPaidMember) {
+                                IconButton(
+                                    onClick = { showKickPaidMemberDialog = true },
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .testTag("dm_kick_paid_member_button")
                                 ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = if (isCamActive) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
-                                            contentDescription = if (isCamActive) "Turn off private video" else "Start private video call",
-                                            tint = if (isCamActive) Color.White else MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(19.dp)
-                                        )
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = LiveCoral.copy(alpha = 0.16f),
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.PersonRemove,
+                                                contentDescription = "Kick paid member from messaging you",
+                                                tint = LiveCoral,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Private Chat Voice Mic Call Button
+                            if (!amIKicked) {
+                                IconButton(
+                                    onClick = ::requestMicCallToggle,
+                                    enabled = !isConnectingCall,
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .testTag("dm_mic_call_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isMicActive) SafetyEmerald else MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isMicActive) Icons.Rounded.Mic else Icons.Rounded.MicOff,
+                                                contentDescription = if (isMicActive) "Mute private call mic" else "Start private voice mic",
+                                                tint = if (isMicActive) Color.White else MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Private Chat Live Video Call Button
+                                IconButton(
+                                    onClick = ::requestVideoCallToggle,
+                                    enabled = !isConnectingCall,
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .testTag("dm_video_call_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isCamActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isCamActive) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
+                                                contentDescription = if (isCamActive) "Turn off private video" else "Start private video call",
+                                                tint = if (isCamActive) Color.White else MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -408,6 +517,29 @@ fun DirectChatScreen(
                     Column {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+                        if (amIKicked) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(LiveCoral.copy(alpha = 0.12f))
+                                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                                    .testTag("dm_kicked_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Block,
+                                    contentDescription = "Blocked from messaging",
+                                    tint = LiveCoral,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "You were removed from messaging in this private chat.",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = LiveCoral
+                                )
+                            }
+                        } else {
                         // Draft Snap Picture Preview Strip
                         if (isEncodingSnap || draftSnapBase64.isNotBlank()) {
                             val draftBmp = rememberBase64ImageBitmap(draftSnapBase64)
@@ -581,6 +713,7 @@ fun DirectChatScreen(
                                     )
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -892,6 +1025,156 @@ fun DirectChatScreen(
             contentDescription = "Snapped photo",
             onDismiss = { fullScreenPhotoBase64 = null }
         )
+    }
+
+    if (showKickPaidMemberDialog && otherUid.isNotBlank()) {
+        AlertDialog(
+            onDismissRequest = { showKickPaidMemberDialog = false },
+            title = { Text("Kick $otherName?") },
+            text = {
+                Text(
+                    "Remove $otherName from private messaging you? They will immediately be blocked from sending messages in this chat."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onKickPaidMember(otherUid, otherName)
+                        showKickPaidMemberDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = LiveCoral,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("dm_confirm_kick_button")
+                ) {
+                    Text("Kick Member")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showKickPaidMemberDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showAddPersonSheet && thread != null) {
+        val currentMemberIds = remember(thread.participantIds) { thread.participantIds.toSet() }
+        val candidates = remember(directoryEntries, currentMemberIds) {
+            directoryEntries.filter { it.userId !in currentMemberIds }
+        }
+        var pickerQuery by remember { mutableStateOf("") }
+        val filteredCandidates = remember(candidates, pickerQuery) {
+            val q = pickerQuery.trim()
+            if (q.isEmpty()) candidates
+            else candidates.filter {
+                it.displayName.contains(q, ignoreCase = true) ||
+                    it.handle.contains(q, ignoreCase = true)
+            }
+        }
+
+        ModalBottomSheet(
+            onDismissRequest = { showAddPersonSheet = false },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = if (isGroup) "Add Person to Group Chat" else "Create Group Chat",
+                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
+                )
+                Text(
+                    text = if (isGroup) {
+                        "Current members (${thread.participantIds.size}/15): ${thread.memberNamesSummary()}"
+                    } else {
+                        "Pick another user to add to your chat with $otherName — this creates a group chat automatically!"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = pickerQuery,
+                    onValueChange = { pickerQuery = it.take(40) },
+                    placeholder = { Text("Search people to add…") },
+                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(999.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("dm_add_person_search")
+                )
+
+                LazyColumn(
+                    modifier = Modifier.height(320.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (filteredCandidates.isEmpty()) {
+                        item(key = "no_candidates") {
+                            Text(
+                                text = "No other users available to add right now.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 14.dp)
+                            )
+                        }
+                    } else {
+                        items(filteredCandidates, key = { "add_cand_${it.userId}" }) { candidate ->
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        showAddPersonSheet = false
+                                        onAddUserToChat(thread, candidate)
+                                    }
+                                    .testTag("dm_add_candidate_${candidate.userId}")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    SpeakingAvatarCircle(
+                                        displayName = candidate.displayName,
+                                        colorHex = candidate.avatarColorHex,
+                                        speakingLevel = 0f,
+                                        micActive = false,
+                                        size = 42.dp,
+                                        photoBase64 = candidate.photoBase64
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = candidate.displayName,
+                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = usernameColor(candidate.tierEnum())
+                                        )
+                                        Text(
+                                            text = "@${candidate.handle}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = Icons.Rounded.GroupAdd,
+                                        contentDescription = "Add ${candidate.displayName}",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -34,17 +34,23 @@ import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.CardMembership
+import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockPerson
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.PersonRemove
+import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Stars
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,6 +63,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -83,8 +90,11 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.R
 import com.example.data.CreatorSubscription
+import com.example.data.DmAccessPass
+import com.example.data.DmPolicy
 import com.example.data.PointTransaction
 import com.example.data.PointTransactionType
+import com.example.data.PostComment
 import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
@@ -95,7 +105,9 @@ import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
 import com.example.ui.components.FullScreenPhotoDialog
+import com.example.ui.components.PostCommentsDialog
 import com.example.ui.components.ProfilePostCard
+import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.encodeImageUriToBase64Jpeg
@@ -106,6 +118,7 @@ import com.example.ui.theme.AvatarAccentHexPalette
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
 @Composable
@@ -119,15 +132,32 @@ fun ProfileScreen(
     mySubscriptions: List<CreatorSubscription>,
     myTransactions: List<PointTransaction>,
     allTransactionsForAdmin: List<PointTransaction>,
+    paidDmMembersForMe: List<DmAccessPass>,
     isPublishingPost: Boolean,
     isUpdatingPhoto: Boolean,
     isProcessingWallet: Boolean,
     initialTabIndex: Int = 0,
     onUpdateProfilePhoto: (String) -> Unit,
-    onCreatePost: (text: String, imageBase64: String, locked: Boolean, onPosted: () -> Unit) -> Unit,
+    onCreatePost: (
+        text: String,
+        imageBase64: String,
+        locked: Boolean,
+        boostToTop: Boolean,
+        onInsufficientPoints: () -> Unit,
+        onPosted: () -> Unit
+    ) -> Unit,
+    onBoostPost: (ProfilePost, onInsufficientPoints: () -> Unit) -> Unit,
+    onObservePostComments: (String) -> Flow<List<PostComment>>,
+    onAddPostComment: (ProfilePost, String, () -> Unit) -> Unit,
+    onDeletePostComment: (String, String) -> Unit,
+    onSharePostToFeed: (ProfilePost, String, () -> Unit) -> Unit,
+    onExternalSharePost: (ProfilePost) -> Unit,
+    onOpenUserProfile: (String) -> Unit,
     onToggleLikePost: (ProfilePost) -> Unit,
     onDeletePost: (ProfilePost) -> Unit,
     onBuyPoints: (Long) -> Unit,
+    onSetDmPolicy: (DmPolicy) -> Unit,
+    onKickPaidDmMember: (senderId: String, senderName: String) -> Unit,
     onSaveProfile: (
         displayName: String,
         handle: String,
@@ -144,6 +174,9 @@ fun ProfileScreen(
 
     var selectedTab by remember(initialTabIndex) { mutableIntStateOf(initialTabIndex) } // 0 = My Posts, 1 = Settings & Points
     var showFullAvatar by remember { mutableStateOf(false) }
+    var showNeedPointsForBoostDialog by remember { mutableStateOf(false) }
+    var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
+    var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
 
     var dmNotificationsEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isDmNotificationsEnabled(context))
@@ -167,6 +200,7 @@ fun ProfileScreen(
     var postText by remember { mutableStateOf("") }
     var draftPostPhotoBase64 by remember { mutableStateOf("") }
     var lockPostPhoto by remember { mutableStateOf(false) }
+    var boostPostOnCreate by remember { mutableStateOf(false) }
     var isEncodingPostPhoto by remember { mutableStateOf(false) }
 
     // Profile editor state
@@ -636,6 +670,55 @@ fun ProfileScreen(
                                 }
                             }
 
+                            // Boost to Top of Discovery Toggle (5 pts / $5)
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (boostPostOnCreate) {
+                                    ModAmber.copy(alpha = 0.14f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (boostPostOnCreate) ModAmber.copy(alpha = 0.55f)
+                                    else MaterialTheme.colorScheme.outlineVariant
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { boostPostOnCreate = !boostPostOnCreate }
+                                    .testTag("boost_post_toggle_row")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.RocketLaunch,
+                                        contentDescription = "Boost to top of Discovery",
+                                        tint = if (boostPostOnCreate) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Boost to Top of Discovery (5 pts / \$5)",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                            color = if (boostPostOnCreate) ModAmber else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "Pin this post at the top of Discovery for 24h so more people notice you",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = boostPostOnCreate,
+                                        onCheckedChange = { boostPostOnCreate = it },
+                                        modifier = Modifier.testTag("boost_post_switch")
+                                    )
+                                }
+                            }
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -665,12 +748,16 @@ fun ProfileScreen(
                                         onCreatePost(
                                             postText,
                                             draftPostPhotoBase64,
-                                            lockPostPhoto && draftPostPhotoBase64.isNotBlank()
-                                        ) {
-                                            postText = ""
-                                            draftPostPhotoBase64 = ""
-                                            lockPostPhoto = false
-                                        }
+                                            lockPostPhoto && draftPostPhotoBase64.isNotBlank(),
+                                            boostPostOnCreate,
+                                            { showNeedPointsForBoostDialog = true },
+                                            {
+                                                postText = ""
+                                                draftPostPhotoBase64 = ""
+                                                lockPostPhoto = false
+                                                boostPostOnCreate = false
+                                            }
+                                        )
                                     },
                                     enabled = !isPublishingPost && !isEncodingPostPhoto &&
                                         (postText.isNotBlank() || draftPostPhotoBase64.isNotBlank()),
@@ -695,7 +782,7 @@ fun ProfileScreen(
                                         )
                                     }
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Post")
+                                    Text(if (boostPostOnCreate) "Post & Boost (5 pts)" else "Post")
                                 }
                             }
                         }
@@ -766,7 +853,18 @@ fun ProfileScreen(
                                     currentUserId = currentUserId,
                                     canDelete = true,
                                     latestAuthorPhotoBase64 = currentPhotoBase64,
+                                    isProcessingUnlock = isProcessingWallet,
                                     onAuthorClick = null,
+                                    onOriginalAuthorClick = onOpenUserProfile,
+                                    onBoostPost = {
+                                        onBoostPost(post) { showNeedPointsForBoostDialog = true }
+                                    },
+                                    onOpenComments = { activeCommentsPost = post },
+                                    onSharePost = if (!post.locked) {
+                                        { activeSharePost = post }
+                                    } else {
+                                        null
+                                    },
                                     onToggleLike = { onToggleLikePost(post) },
                                     onDelete = { onDeletePost(post) }
                                 )
@@ -775,7 +873,7 @@ fun ProfileScreen(
                     }
                 }
             } else {
-                // TAB 1: POINTS WALLET (BUY POINTS), CREATOR EARNINGS, SUBSCRIPTIONS & PROFILE SETTINGS
+                // TAB 1: POINTS WALLET (BUY POINTS), PRIVATE MESSAGE PRIVACY ($10 PAID DM), CREATOR EARNINGS & PROFILE SETTINGS
                 item(key = "points_wallet_card") {
                     PointsWalletSettingsCard(
                         currentUserId = currentUserId,
@@ -786,6 +884,15 @@ fun ProfileScreen(
                         appOwnerRevenueCents = allTransactionsForAdmin.sumOf { it.platformShareCents },
                         isProcessingWallet = isProcessingWallet,
                         onBuyPoints = onBuyPoints
+                    )
+                }
+
+                item(key = "private_message_privacy_card") {
+                    PrivateMessageSettingsCard(
+                        currentPolicy = userProfile?.dmPolicyEnum() ?: DmPolicy.OPEN,
+                        paidMembers = paidDmMembersForMe,
+                        onSelectPolicy = onSetDmPolicy,
+                        onKickMember = onKickPaidDmMember
                     )
                 }
 
@@ -1066,6 +1173,69 @@ fun ProfileScreen(
             onDismiss = { showFullAvatar = false }
         )
     }
+
+    activeCommentsPost?.let { post ->
+        val commentsFlow = remember(post.id) { onObservePostComments(post.id) }
+        PostCommentsDialog(
+            post = post,
+            commentsFlow = commentsFlow,
+            currentUserId = currentUserId,
+            isStaff = staffCapabilities.isStaff,
+            onAuthorClick = { uid ->
+                activeCommentsPost = null
+                onOpenUserProfile(uid)
+            },
+            onAddComment = { text, onSent ->
+                onAddPostComment(post, text, onSent)
+            },
+            onDeleteComment = { commentId ->
+                onDeletePostComment(post.id, commentId)
+            },
+            onDismiss = { activeCommentsPost = null }
+        )
+    }
+
+    activeSharePost?.let { post ->
+        SharePostDialog(
+            post = post,
+            onRepostToFeed = { note, onShared ->
+                onSharePostToFeed(post, note, onShared)
+            },
+            onRecordExternalShare = {
+                onExternalSharePost(post)
+            },
+            onDismiss = { activeSharePost = null }
+        )
+    }
+
+    if (showNeedPointsForBoostDialog) {
+        val currentPts = userProfile?.pointsBalance ?: 0L
+        AlertDialog(
+            onDismissRequest = { showNeedPointsForBoostDialog = false },
+            title = { Text("Need 5 Points to Boost") },
+            text = {
+                Text(
+                    "You currently have $currentPts pts. Boosting a post to the top of Discovery costs 5 points (\$5). Buy points in Settings & Points to promote your post!"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showNeedPointsForBoostDialog = false
+                        selectedTab = 1
+                    },
+                    modifier = Modifier.testTag("profile_boost_go_buy_points")
+                ) {
+                    Text("Buy Points")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNeedPointsForBoostDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -1228,7 +1398,7 @@ private fun PointsWalletSettingsCard(
                                 color = ModAmber
                             )
                             Text(
-                                text = "\$1 per 2-pt photo unlock + \$7.50 per \$15/mo sub",
+                                text = "\$1 photo unlock · \$5 Discovery boost · \$5 paid DM · \$7.50 sub",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1243,12 +1413,12 @@ private fun PointsWalletSettingsCard(
             }
 
             Text(
-                text = "Buy Points (2 points = \$2). Each locked photo costs 2 points (\$2): \$1 goes to the photo owner and \$1 goes to the app owner. Or subscribe to a creator for \$15/month to unlock all their photos.",
+                text = "Buy Points (2 pts = \$2 · 5 pts = \$5). Locked photos cost 2 pts (\$1 owner / \$1 app), Discovery Boost costs 5 pts (\$5), and locked Paid DMs cost \$10 (\$5 user / \$5 app).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            // Buy Points Packages (2 pts = $2, 10 pts = $10, 20 pts = $20, 50 pts = $50)
+            // Buy Points Packages (2 pts = $2, 5 pts = $5, 10 pts = $10, 20 pts = $20, 50 pts = $50)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1260,6 +1430,14 @@ private fun PointsWalletSettingsCard(
                     modifier = Modifier
                         .weight(1f)
                         .testTag("buy_points_2")
+                )
+                BuyPointsPackageButton(
+                    points = 5L,
+                    enabled = !isProcessingWallet,
+                    onClick = { onBuyPoints(5L) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("buy_points_5")
                 )
                 BuyPointsPackageButton(
                     points = 10L,
@@ -1353,6 +1531,14 @@ private fun PointsWalletSettingsCard(
                             } else {
                                 "Subscribed to ${tx.creatorName} (\$15.00/mo)"
                             }
+                        PointTransactionType.BOOST_POST ->
+                            "Boosted post to top of Discovery (-5 pts / \$5.00)"
+                        PointTransactionType.UNLOCK_DM ->
+                            if (isCreatorCredit) {
+                                "${tx.buyerName} unlocked Private Messages (+${formatUsdCents(tx.creatorShareCents)} to you · \$5 app)"
+                            } else {
+                                "Unlocked Private Messages with ${tx.creatorName} (\$10.00 · \$5 user / \$5 app)"
+                            }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1408,6 +1594,249 @@ private fun BuyPointsPackageButton(
                 text = formatUsdCents(points * 100L),
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.9f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PrivateMessageSettingsCard(
+    currentPolicy: DmPolicy,
+    paidMembers: List<DmAccessPass>,
+    onSelectPolicy: (DmPolicy) -> Unit,
+    onKickMember: (senderId: String, senderName: String) -> Unit
+) {
+    var pendingKickPass by remember { mutableStateOf<DmAccessPass?>(null) }
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("dm_privacy_settings_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.LockPerson,
+                    contentDescription = "Private message settings",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp)
+                )
+                Text(
+                    text = "Private Messages Privacy & Paid DM",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Text(
+                text = "Control who can send you private messages. Lock DMs to paid users (\$10 to message you — \$5 to you, \$5 to app owner) and kick any paid member anytime.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            DmPolicyOptionRow(
+                title = "Allow Private Messages (Everyone)",
+                subtitle = "Anyone on VoxStage can start a private chat with you",
+                icon = Icons.Rounded.ChatBubbleOutline,
+                selected = currentPolicy == DmPolicy.OPEN,
+                accentColor = MaterialTheme.colorScheme.primary,
+                onClick = { onSelectPolicy(DmPolicy.OPEN) },
+                testTag = "dm_policy_open"
+            )
+
+            DmPolicyOptionRow(
+                title = "Lock to Paid Users (\$10 to DM)",
+                subtitle = "Users pay \$10 to message you (\$5 to you · \$5 to app owner). You can kick any paid member.",
+                icon = Icons.Rounded.Lock,
+                selected = currentPolicy == DmPolicy.PAID,
+                accentColor = ModAmber,
+                onClick = { onSelectPolicy(DmPolicy.PAID) },
+                testTag = "dm_policy_paid"
+            )
+
+            DmPolicyOptionRow(
+                title = "Turn Off Private Messages",
+                subtitle = "Nobody can start new private messages with you",
+                icon = Icons.Rounded.Block,
+                selected = currentPolicy == DmPolicy.DISABLED,
+                accentColor = LiveCoral,
+                onClick = { onSelectPolicy(DmPolicy.DISABLED) },
+                testTag = "dm_policy_disabled"
+            )
+
+            if (currentPolicy == DmPolicy.PAID || paidMembers.isNotEmpty()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Text(
+                    text = "Paid DM Members (${paidMembers.count { it.isCurrentlyAllowed() }} active)",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                if (paidMembers.isEmpty()) {
+                    Text(
+                        text = "No paid DM members yet. When someone pays \$10 to message you, they will appear here and you can kick them anytime.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    paidMembers.forEach { pass ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("paid_dm_member_row_${pass.senderId}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = pass.senderName.ifBlank { "Member" },
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = if (pass.kicked || !pass.active) {
+                                            "Kicked from messaging you"
+                                        } else {
+                                            "Paid \$10 (\$5 earned by you)"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (pass.kicked || !pass.active) LiveCoral else SafetyEmerald
+                                    )
+                                }
+
+                                if (pass.isCurrentlyAllowed()) {
+                                    OutlinedButton(
+                                        onClick = { pendingKickPass = pass },
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = LiveCoral),
+                                        border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.55f)),
+                                        shape = RoundedCornerShape(999.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("kick_paid_dm_${pass.senderId}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PersonRemove,
+                                            contentDescription = "Kick ${pass.senderName}",
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Kick", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = LiveCoral.copy(alpha = 0.14f)
+                                    ) {
+                                        Text(
+                                            text = "Kicked",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = LiveCoral,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pendingKickPass?.let { pass ->
+        AlertDialog(
+            onDismissRequest = { pendingKickPass = null },
+            title = { Text("Kick ${pass.senderName}?") },
+            text = {
+                Text(
+                    "Remove ${pass.senderName}'s paid private messaging access? They will immediately be blocked from sending you private messages."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onKickMember(pass.senderId, pass.senderName)
+                        pendingKickPass = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = LiveCoral,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("confirm_kick_paid_dm_button")
+                ) {
+                    Text("Kick Member")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingKickPass = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun DmPolicyOptionRow(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    selected: Boolean,
+    accentColor: Color,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) accentColor.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(
+            width = if (selected) 1.5.dp else 1.dp,
+            color = if (selected) accentColor.copy(alpha = 0.65f) else MaterialTheme.colorScheme.outlineVariant
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .testTag(testTag)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = title,
+                tint = if (selected) accentColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    color = if (selected) accentColor else MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            RadioButton(
+                selected = selected,
+                onClick = onClick
             )
         }
     }

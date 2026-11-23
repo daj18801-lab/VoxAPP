@@ -23,8 +23,9 @@
         "suspendedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which the user is suspended by Admin or Support (0 = not suspended)." },
         "suspensionReason": { "type": "string", "description": "Optional reason shown to suspended user (0-200 chars)." },
         "pointsBalance": { "type": "integer", "description": "Available points balance (1 point = $1; 2 points = $2)." },
-        "creatorEarningsCents": { "type": "integer", "description": "Accumulated creator earnings in USD cents ($1 per 2-pt photo unlock, $7.50 per $15/mo subscription)." },
-        "totalSpentCents": { "type": "integer", "description": "Total USD cents spent on points and creator subscriptions." },
+        "creatorEarningsCents": { "type": "integer", "description": "Accumulated creator earnings in USD cents ($1 per 2-pt photo unlock, $5 per $10 paid DM, $7.50 per $15/mo subscription)." },
+        "totalSpentCents": { "type": "integer", "description": "Total USD cents spent on points, paid DMs, and creator subscriptions." },
+        "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"], "description": "Private message privacy setting: OPEN (anyone), PAID ($10 lock, $5 user / $5 app), or DISABLED (no private messages)." },
         "blockedUserIds": { "type": "array", "description": "Bounded list of up to 100 blocked UIDs." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
@@ -243,6 +244,7 @@
         "photoBase64": { "type": "string" },
         "staffTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
         "postCount": { "type": "integer" },
+        "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"] },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "displayName", "handle", "avatarColorHex", "staffTier", "updatedAt"]
@@ -275,10 +277,14 @@
     },
     "DirectThread": {
       "title": "DirectThread",
-      "description": "Private 1-on-1 message thread keyed deterministically by sorted UIDs.",
+      "description": "Private 1-on-1 or multi-user group message thread supporting live calls, camera snaps, and paid-DM kick enforcement.",
       "type": "object",
       "properties": {
-        "participantIds": { "type": "array", "description": "Exactly 2 UIDs for array-contains queries." },
+        "participantIds": { "type": "array", "description": "2 to 15 participant UIDs for array-contains queries." },
+        "isGroup": { "type": "boolean", "description": "True when 3+ users or created as a group chat." },
+        "groupName": { "type": "string", "description": "Optional display name for a group private chat." },
+        "participantNamesById": { "type": "object", "description": "Map of UID to display name for group chat participants." },
+        "kickedUserIds": { "type": "array", "description": "UIDs kicked from sending messages in this thread." },
         "userAId": { "type": "string" },
         "userAName": { "type": "string" },
         "userAColorHex": { "type": "string" },
@@ -318,7 +324,7 @@
     },
     "ProfilePost": {
       "title": "ProfilePost",
-      "description": "User-authored profile update containing text, an optional compressed JPEG photo (optionally locked for 2 points / $2), and community likes.",
+      "description": "User-authored profile update containing text, an optional compressed JPEG photo (optionally locked for 2 points / $2), optional 5-point ($5) Discovery top-pin boost, and community likes.",
       "type": "object",
       "properties": {
         "authorId": { "type": "string" },
@@ -332,13 +338,41 @@
         "locked": { "type": "boolean", "description": "Whether the attached photo is locked (requires 2 points / $2 or $15/mo creator subscription)." },
         "unlockPricePoints": { "type": "integer", "description": "Points required to unlock this locked photo (fixed at 2)." },
         "unlockedByUserIds": { "type": "array", "description": "UIDs that unlocked this photo individually." },
+        "boostedAtMillis": { "type": "integer", "description": "Epoch ms when the author last paid 5 points ($5) to boost this post to the top of Discovery." },
+        "boostedUntilMillis": { "type": "integer", "description": "Epoch ms until which this post stays pinned at the top of Discovery (24 hours per 5-point boost)." },
         "likedByUserIds": { "type": "array" },
+        "commentCount": { "type": "integer", "description": "Total number of comments on this post." },
+        "shareCount": { "type": "integer", "description": "Number of times this unlocked post has been shared." },
+        "sharedFromPostId": { "type": "string", "description": "Original unlocked post ID if this post is an in-app share/repost." },
+        "sharedFromAuthorId": { "type": "string" },
+        "sharedFromAuthorName": { "type": "string" },
+        "sharedFromAuthorHandle": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "authorId", "authorName", "authorHandle", "authorColorHex", "authorTier",
         "text", "imageBase64", "likedByUserIds", "createdAt", "updatedAt"
+      ]
+    },
+    "PostComment": {
+      "title": "PostComment",
+      "description": "User comment on a profile post or picture.",
+      "type": "object",
+      "properties": {
+        "postId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorHandle": { "type": "string" },
+        "authorColorHex": { "type": "string" },
+        "authorPhotoBase64": { "type": "string" },
+        "authorTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "postId", "authorId", "authorName", "authorHandle", "authorColorHex",
+        "authorTier", "text", "createdAt"
       ]
     },
     "CreatorSubscription": {
@@ -363,12 +397,35 @@
         "createdAt", "updatedAt"
       ]
     },
-    "PointTransaction": {
-      "title": "PointTransaction",
-      "description": "Immutable ledger entry recording point purchases, 2-point ($2) photo unlocks ($1 creator / $1 app owner), and $15/mo creator subscriptions.",
+    "DmAccessPass": {
+      "title": "DmAccessPass",
+      "description": "Paid $10 private message access pass ($5 to recipient, $5 to app owner) that can be revoked/kicked by the recipient.",
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["BUY_POINTS", "UNLOCK_PHOTO", "SUBSCRIBE_CREATOR"] },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "recipientId": { "type": "string" },
+        "recipientName": { "type": "string" },
+        "priceCents": { "type": "integer" },
+        "creatorShareCents": { "type": "integer" },
+        "platformShareCents": { "type": "integer" },
+        "active": { "type": "boolean" },
+        "kicked": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "senderId", "senderName", "recipientId", "recipientName",
+        "priceCents", "creatorShareCents", "platformShareCents",
+        "active", "kicked", "createdAt", "updatedAt"
+      ]
+    },
+    "PointTransaction": {
+      "title": "PointTransaction",
+      "description": "Immutable ledger entry recording point purchases, 2-point ($2) photo unlocks ($1 creator / $1 app owner), 5-point ($5) Discovery boosts, $10 paid DMs ($5 user / $5 app owner), and $15/mo creator subscriptions.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["BUY_POINTS", "UNLOCK_PHOTO", "SUBSCRIBE_CREATOR", "BOOST_POST", "UNLOCK_DM"] },
         "buyerId": { "type": "string" },
         "buyerName": { "type": "string" },
         "creatorId": { "type": "string" },
@@ -389,11 +446,11 @@
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "User profiles, preferences, timed suspensions, capability restrictions, and blocklists."
+      "description": "User profiles, preferences, DM privacy policy, timed suspensions, capability restrictions, and blocklists."
     },
     "/userDirectory/{userId}": {
       "schema": { "$ref": "#/entities/DirectoryEntry" },
-      "description": "Minimal public user directory for friend search and direct messaging."
+      "description": "Minimal public user directory for friend search, Discovery, and direct messaging."
     },
     "/friendships/{friendshipId}": {
       "schema": { "$ref": "#/entities/Friendship" },
@@ -401,11 +458,15 @@
     },
     "/directThreads/{threadId}": {
       "schema": { "$ref": "#/entities/DirectThread" },
-      "description": "Private 1-on-1 chat threads displayed on the Snapchat-style Chats home screen."
+      "description": "Private 1-on-1 and group chat threads displayed on the Chats home screen."
     },
     "/directThreads/{threadId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/DirectMessage" },
-      "description": "Private 1-on-1 messages scoped strictly to the two participants."
+      "description": "Private messages scoped strictly to thread participants."
+    },
+    "/dmAccessPasses/{passId}": {
+      "schema": { "$ref": "#/entities/DmAccessPass" },
+      "description": "Paid $10 private message passes ($5 user / $5 app owner) with kick/revoke support."
     },
     "/staffRoles/{userId}": {
       "schema": { "$ref": "#/entities/StaffRole" },
@@ -441,7 +502,11 @@
     },
     "/profilePosts/{postId}": {
       "schema": { "$ref": "#/entities/ProfilePost" },
-      "description": "Public profile posts (text and/or photos, including 2-point locked photos) authored by users."
+      "description": "Public profile posts (text and/or photos, including 2-point locked photos, 5-point Discovery boosts, likes, comments, and unlocked shares)."
+    },
+    "/profilePosts/{postId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/PostComment" },
+      "description": "Community comments on profile posts and pictures."
     },
     "/creatorSubscriptions/{subId}": {
       "schema": { "$ref": "#/entities/CreatorSubscription" },
@@ -449,7 +514,7 @@
     },
     "/pointTransactions/{txId}": {
       "schema": { "$ref": "#/entities/PointTransaction" },
-      "description": "Append-only ledger tracking point purchases, 2-pt photo unlocks ($1 creator / $1 app owner), and $15/mo subscriptions."
+      "description": "Append-only ledger tracking point purchases, 2-pt photo unlocks ($1/$1), 5-pt Discovery boosts ($5), $10 paid DMs ($5/$5), and $15/mo subscriptions ($7.50/$7.50)."
     }
   }
 }

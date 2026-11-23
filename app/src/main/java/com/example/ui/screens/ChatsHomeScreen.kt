@@ -25,9 +25,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MarkChatUnread
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.Search
@@ -66,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
+import com.example.data.DmPolicy
 import com.example.data.Friendship
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
@@ -76,6 +80,7 @@ import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.parseHexColor
 import com.example.ui.components.usernameColor
+import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SnapBlue
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -99,6 +104,9 @@ fun ChatsHomeScreen(
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Unread, 2 = Friends
     var showNewChatSheet by remember { mutableStateOf(false) }
+    val directoryByUid = remember(directoryEntries) {
+        directoryEntries.associateBy { it.userId }
+    }
     val directoryPhotoByUid = remember(directoryEntries) {
         directoryEntries.associate { it.userId to it.photoBase64 }
     }
@@ -120,13 +128,19 @@ fun ChatsHomeScreen(
         val q = searchQuery.trim()
         allThreads.filter { thread ->
             val otherUid = thread.otherUserId(currentUserId)
-            val otherName = thread.otherName(currentUserId)
+            val title = thread.displayTitle(currentUserId)
+            val membersSummary = thread.memberNamesSummary()
             val matchesQuery = q.isEmpty() ||
-                otherName.contains(q, ignoreCase = true) ||
+                title.contains(q, ignoreCase = true) ||
+                membersSummary.contains(q, ignoreCase = true) ||
                 thread.lastMessageText.contains(q, ignoreCase = true)
             val matchesFilter = when (selectedFilter) {
                 1 -> thread.isUnreadFor(currentUserId)
-                2 -> acceptedFriendIds.contains(otherUid)
+                2 -> if (thread.isGroup) {
+                    thread.participantIds.any { it != currentUserId && acceptedFriendIds.contains(it) }
+                } else {
+                    acceptedFriendIds.contains(otherUid)
+                }
                 else -> true
             }
             matchesQuery && matchesFilter
@@ -541,9 +555,12 @@ fun ChatsHomeScreen(
                                 SnapChatFeedRow(
                                     thread = thread,
                                     currentUserId = currentUserId,
-                                    otherPhotoBase64 = directoryPhotoByUid[otherUid].orEmpty(),
+                                    otherPhotoBase64 = if (thread.isGroup) "" else directoryPhotoByUid[otherUid].orEmpty(),
                                     onClick = { onOpenThread(thread.id) },
-                                    onAvatarClick = { onOpenUserProfile(otherUid) }
+                                    onAvatarClick = {
+                                        if (thread.isGroup) onOpenThread(thread.id)
+                                        else onOpenUserProfile(otherUid)
+                                    }
                                 )
                                 HorizontalDivider(
                                     color = MaterialTheme.colorScheme.outlineVariant,
@@ -584,6 +601,7 @@ fun ChatsHomeScreen(
             NewPrivateChatSheetContent(
                 friends = acceptedFriends,
                 directoryUsers = otherDirectoryUsers,
+                directoryByUid = directoryByUid,
                 currentUserId = currentUserId,
                 onSelectUser = { uid, name, color, tier ->
                     showNewChatSheet = false
@@ -644,9 +662,10 @@ private fun SnapChatFeedRow(
     onClick: () -> Unit,
     onAvatarClick: () -> Unit
 ) {
-    val otherName = thread.otherName(currentUserId)
+    val isGroup = thread.isGroup
+    val title = thread.displayTitle(currentUserId)
     val otherColorHex = thread.otherColorHex(currentUserId)
-    val otherTier = thread.otherTier(currentUserId)
+    val otherTier = if (isGroup) StaffTier.USER else thread.otherTier(currentUserId)
     val isUnread = thread.isUnreadFor(currentUserId)
     val lastSentByMe = thread.lastMessageSenderId == currentUserId
 
@@ -663,15 +682,38 @@ private fun SnapChatFeedRow(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            SpeakingAvatarCircle(
-                displayName = otherName,
-                colorHex = otherColorHex,
-                speakingLevel = if (isUnread) 0.5f else 0f,
-                micActive = isUnread,
-                size = 50.dp,
-                photoBase64 = otherPhotoBase64,
-                modifier = Modifier.clickable(onClick = onAvatarClick)
-            )
+            if (isGroup) {
+                Box(
+                    modifier = Modifier
+                        .size(50.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .border(
+                            width = if (isUnread) 2.dp else 1.dp,
+                            color = if (isUnread) SnapBlue else MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                            shape = CircleShape
+                        )
+                        .clickable(onClick = onAvatarClick),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Groups,
+                        contentDescription = "Group chat",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            } else {
+                SpeakingAvatarCircle(
+                    displayName = title,
+                    colorHex = otherColorHex,
+                    speakingLevel = if (isUnread) 0.5f else 0f,
+                    micActive = isUnread,
+                    size = 50.dp,
+                    photoBase64 = otherPhotoBase64,
+                    modifier = Modifier.clickable(onClick = onAvatarClick)
+                )
+            }
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(
@@ -679,15 +721,30 @@ private fun SnapChatFeedRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = otherName,
+                        text = title,
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = if (isUnread) FontWeight.ExtraBold else FontWeight.SemiBold
                         ),
-                        color = usernameColor(otherTier),
+                        color = if (isGroup) MaterialTheme.colorScheme.onSurface else usernameColor(otherTier),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                    StaffTierBadge(tier = otherTier)
+                    if (isGroup) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Text(
+                                text = "Group · ${thread.participantIds.size}",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                    } else {
+                        StaffTierBadge(tier = otherTier)
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(3.dp))
@@ -761,7 +818,7 @@ private fun SnapChatFeedRow(
             ) {
                 Icon(
                     imageVector = if (isUnread) Icons.Rounded.MarkChatUnread else Icons.Rounded.ChatBubble,
-                    contentDescription = "Open chat with $otherName",
+                    contentDescription = "Open chat with $title",
                     tint = if (isUnread) SnapBlue else MaterialTheme.colorScheme.outline,
                     modifier = Modifier.size(20.dp)
                 )
@@ -774,6 +831,7 @@ private fun SnapChatFeedRow(
 private fun NewPrivateChatSheetContent(
     friends: List<Friendship>,
     directoryUsers: List<DirectoryEntry>,
+    directoryByUid: Map<String, DirectoryEntry>,
     currentUserId: String,
     onSelectUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit
 ) {
@@ -843,6 +901,7 @@ private fun NewPrivateChatSheetContent(
                         handle = handle,
                         colorHex = color,
                         tier = tier,
+                        dmPolicy = directoryByUid[uid]?.dmPolicyEnum() ?: DmPolicy.OPEN,
                         onClick = { onSelectUser(uid, name, color, tier) }
                     )
                 }
@@ -862,6 +921,7 @@ private fun NewPrivateChatSheetContent(
                         handle = entry.handle,
                         colorHex = entry.avatarColorHex,
                         tier = entry.tierEnum(),
+                        dmPolicy = entry.dmPolicyEnum(),
                         onClick = {
                             onSelectUser(entry.userId, entry.displayName, entry.avatarColorHex, entry.tierEnum())
                         }
@@ -889,6 +949,7 @@ private fun NewChatPickerRow(
     handle: String,
     colorHex: String,
     tier: StaffTier,
+    dmPolicy: DmPolicy = DmPolicy.OPEN,
     onClick: () -> Unit
 ) {
     Surface(
@@ -928,12 +989,64 @@ private fun NewChatPickerRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Icon(
-                imageVector = Icons.Rounded.ChatBubble,
-                contentDescription = "Start chat",
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp)
-            )
+            when (dmPolicy) {
+                DmPolicy.PAID -> {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = ModAmber.copy(alpha = 0.16f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Lock,
+                                contentDescription = "Paid private messages",
+                                tint = ModAmber,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "\$10 DM",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = ModAmber
+                            )
+                        }
+                    }
+                }
+                DmPolicy.DISABLED -> {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Block,
+                                contentDescription = "Private messages off",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "DMs Off",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                DmPolicy.OPEN -> {
+                    Icon(
+                        imageVector = Icons.Rounded.ChatBubble,
+                        contentDescription = "Start chat",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
         }
     }
 }

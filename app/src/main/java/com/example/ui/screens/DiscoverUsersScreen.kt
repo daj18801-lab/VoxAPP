@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.HourglassTop
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.Search
@@ -62,16 +64,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.DirectoryEntry
+import com.example.data.DmPolicy
 import com.example.data.Friendship
+import com.example.data.PostComment
 import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
+import com.example.ui.components.PostCommentsDialog
 import com.example.ui.components.ProfilePostCard
+import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
+import com.example.ui.theme.ModAmber
+import kotlinx.coroutines.flow.Flow
 
 @Composable
 fun DiscoverUsersScreen(
@@ -91,12 +99,21 @@ fun DiscoverUsersScreen(
     onToggleLikePost: (ProfilePost) -> Unit,
     onDeletePost: (ProfilePost) -> Unit,
     onUnlockPost: (ProfilePost, onInsufficientPoints: () -> Unit) -> Unit,
+    onBoostPost: (ProfilePost, onInsufficientPoints: () -> Unit) -> Unit,
+    onObservePostComments: (String) -> Flow<List<PostComment>>,
+    onAddPostComment: (ProfilePost, String, () -> Unit) -> Unit,
+    onDeletePostComment: (String, String) -> Unit,
+    onSharePostToFeed: (ProfilePost, String, () -> Unit) -> Unit,
+    onExternalSharePost: (ProfilePost) -> Unit,
     onSubscribeCreator: (creatorId: String, creatorName: String) -> Unit,
     onOpenBuyPoints: () -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Browse People, 1 = Posts Feed, 2 = Friends
     var showBuyPointsDialog by remember { mutableStateOf(false) }
+    var buyPointsNeededCount by remember { mutableIntStateOf(2) }
+    var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
+    var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
 
     val directoryByUid = remember(directoryEntries) {
         directoryEntries.associateBy { it.userId }
@@ -380,11 +397,31 @@ fun DiscoverUsersScreen(
                                         isUnlocked = unlocked,
                                         isProcessingUnlock = isProcessingWallet,
                                         onAuthorClick = { onOpenUserProfile(post.authorId) },
+                                        onOriginalAuthorClick = onOpenUserProfile,
                                         onUnlockPost = {
-                                            onUnlockPost(post) { showBuyPointsDialog = true }
+                                            onUnlockPost(post) {
+                                                buyPointsNeededCount = 2
+                                                showBuyPointsDialog = true
+                                            }
                                         },
                                         onSubscribeCreator = {
                                             onSubscribeCreator(post.authorId, post.authorName)
+                                        },
+                                        onBoostPost = if (post.authorId == currentUserId) {
+                                            {
+                                                onBoostPost(post) {
+                                                    buyPointsNeededCount = 5
+                                                    showBuyPointsDialog = true
+                                                }
+                                            }
+                                        } else {
+                                            null
+                                        },
+                                        onOpenComments = { activeCommentsPost = post },
+                                        onSharePost = if (!post.locked) {
+                                            { activeSharePost = post }
+                                        } else {
+                                            null
                                         },
                                         onToggleLike = { onToggleLikePost(post) },
                                         onDelete = { onDeletePost(post) }
@@ -640,7 +677,11 @@ fun DiscoverUsersScreen(
             title = { Text("Need More Points") },
             text = {
                 Text(
-                    "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). Buy points in Profile Settings or subscribe for \$15/month."
+                    if (buyPointsNeededCount >= 5) {
+                        "You currently have $myPointsBalance pts. Boosting a post to the top of Discovery costs 5 points (\$5) for 24 hours. Buy points in Profile Settings."
+                    } else {
+                        "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). Buy points in Profile Settings or subscribe for \$15/month."
+                    }
                 )
             },
             confirmButton = {
@@ -659,6 +700,40 @@ fun DiscoverUsersScreen(
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    activeCommentsPost?.let { post ->
+        val commentsFlow = remember(post.id) { onObservePostComments(post.id) }
+        PostCommentsDialog(
+            post = post,
+            commentsFlow = commentsFlow,
+            currentUserId = currentUserId,
+            isStaff = staffCapabilities.isStaff,
+            onAuthorClick = { uid ->
+                activeCommentsPost = null
+                onOpenUserProfile(uid)
+            },
+            onAddComment = { text, onSent ->
+                onAddPostComment(post, text, onSent)
+            },
+            onDeleteComment = { commentId ->
+                onDeletePostComment(post.id, commentId)
+            },
+            onDismiss = { activeCommentsPost = null }
+        )
+    }
+
+    activeSharePost?.let { post ->
+        SharePostDialog(
+            post = post,
+            onRepostToFeed = { note, onShared ->
+                onSharePostToFeed(post, note, onShared)
+            },
+            onRecordExternalShare = {
+                onExternalSharePost(post)
+            },
+            onDismiss = { activeSharePost = null }
         )
     }
 }
@@ -711,11 +786,67 @@ private fun DiscoverUserCard(
                         )
                         StaffTierBadge(tier = tier)
                     }
-                    Text(
-                        text = "@${entry.handle} · ${entry.postCount} ${if (entry.postCount == 1L) "post" else "posts"}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "@${entry.handle} · ${entry.postCount} ${if (entry.postCount == 1L) "post" else "posts"}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        when (entry.dmPolicyEnum()) {
+                            DmPolicy.PAID -> {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = ModAmber.copy(alpha = 0.16f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Lock,
+                                            contentDescription = "Paid private messages",
+                                            tint = ModAmber,
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                        Text(
+                                            text = "\$10 DM",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = ModAmber
+                                        )
+                                    }
+                                }
+                            }
+                            DmPolicy.DISABLED -> {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Block,
+                                            contentDescription = "Private messages off",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                        Text(
+                                            text = "DMs Off",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                            DmPolicy.OPEN -> Unit
+                        }
+                    }
                     if (entry.bio.isNotBlank()) {
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(

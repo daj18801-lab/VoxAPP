@@ -170,6 +170,17 @@ enum class ReportStatus(val label: String) {
     }
 }
 
+enum class DmPolicy(val label: String, val subtitle: String) {
+    OPEN("Allow Private Messages", "Anyone can send you private messages"),
+    PAID("Paid Only (\$10 Lock)", "Users pay \$10 (\$5 to you · \$5 to app owner) — kick anytime"),
+    DISABLED("Turn Off Private Messages", "No one can start a private chat with you");
+
+    companion object {
+        fun fromRaw(raw: String?): DmPolicy =
+            entries.firstOrNull { it.name == raw } ?: OPEN
+    }
+}
+
 @Keep
 @IgnoreExtraProperties
 data class UserProfile(
@@ -194,10 +205,12 @@ data class UserProfile(
     val pointsBalance: Long = 0L,
     val creatorEarningsCents: Long = 0L,
     val totalSpentCents: Long = 0L,
+    val dmPolicy: String = DmPolicy.OPEN.name,
     val blockedUserIds: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
+    fun dmPolicyEnum(): DmPolicy = DmPolicy.fromRaw(dmPolicy)
     fun currentlySuspended(nowMs: Long = System.currentTimeMillis()): Boolean =
         suspendedUntilMillis > nowMs
 
@@ -442,9 +455,11 @@ data class DirectoryEntry(
     val photoBase64: String = "",
     val staffTier: String = StaffTier.USER.name,
     val postCount: Long = 0L,
+    val dmPolicy: String = DmPolicy.OPEN.name,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun tierEnum(): StaffTier = StaffTier.fromRaw(staffTier)
+    fun dmPolicyEnum(): DmPolicy = DmPolicy.fromRaw(dmPolicy)
 }
 
 @Keep
@@ -485,6 +500,10 @@ data class Friendship(
 data class DirectThread(
     @DocumentId val id: String = "",
     val participantIds: List<String> = emptyList(),
+    val isGroup: Boolean = false,
+    val groupName: String = "",
+    val participantNamesById: Map<String, String> = emptyMap(),
+    val kickedUserIds: List<String> = emptyList(),
     val userAId: String = "",
     val userAName: String = "",
     val userAColorHex: String = "#0088FF",
@@ -506,6 +525,43 @@ data class DirectThread(
         if (userAId == myUid) userBTier else userATier
     )
     fun isUnreadFor(myUid: String): Boolean = unreadByUserIds.contains(myUid)
+    fun isUserKicked(uid: String): Boolean = kickedUserIds.contains(uid)
+    fun displayTitle(myUid: String): String {
+        if (!isGroup) return otherName(myUid)
+        if (groupName.isNotBlank()) return groupName
+        val otherNames = participantNamesById
+            .filterKeys { it != myUid }
+            .values
+            .filter { it.isNotBlank() }
+        return if (otherNames.isNotEmpty()) {
+            otherNames.take(3).joinToString(", ")
+        } else {
+            "Group Chat (${participantIds.size})"
+        }
+    }
+    fun memberNamesSummary(): String {
+        val names = participantNamesById.values.filter { it.isNotBlank() }
+        return if (names.isNotEmpty()) names.joinToString(" · ") else "${participantIds.size} members"
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class DmAccessPass(
+    @DocumentId val id: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val recipientId: String = "",
+    val recipientName: String = "",
+    val priceCents: Long = 1000L,
+    val creatorShareCents: Long = 500L,
+    val platformShareCents: Long = 500L,
+    val active: Boolean = true,
+    val kicked: Boolean = false,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun isCurrentlyAllowed(): Boolean = active && !kicked
 }
 
 @Keep
@@ -539,7 +595,15 @@ data class ProfilePost(
     val locked: Boolean = false,
     val unlockPricePoints: Long = 2L,
     val unlockedByUserIds: List<String> = emptyList(),
+    val boostedAtMillis: Long = 0L,
+    val boostedUntilMillis: Long = 0L,
     val likedByUserIds: List<String> = emptyList(),
+    val commentCount: Long = 0L,
+    val shareCount: Long = 0L,
+    val sharedFromPostId: String = "",
+    val sharedFromAuthorId: String = "",
+    val sharedFromAuthorName: String = "",
+    val sharedFromAuthorHandle: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -547,12 +611,43 @@ data class ProfilePost(
     fun isLikedBy(uid: String): Boolean = likedByUserIds.contains(uid)
     fun isUnlockedFor(uid: String, subscribedCreatorIds: Set<String> = emptySet()): Boolean =
         !locked || authorId == uid || unlockedByUserIds.contains(uid) || subscribedCreatorIds.contains(authorId)
+    fun isShareable(): Boolean = !locked
+    fun isCurrentlyBoosted(nowMs: Long = System.currentTimeMillis()): Boolean = boostedUntilMillis > nowMs
+    fun boostRemainingLabel(nowMs: Long = System.currentTimeMillis()): String {
+        val diff = (boostedUntilMillis - nowMs).coerceAtLeast(0L)
+        val hours = diff / 3_600_000L
+        val minutes = (diff % 3_600_000L) / 60_000L
+        return when {
+            hours >= 1L -> "${hours}h left"
+            minutes >= 1L -> "${minutes}m left"
+            else -> "<1m left"
+        }
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class PostComment(
+    @DocumentId val id: String = "",
+    val postId: String = "",
+    val authorId: String = "",
+    val authorName: String = "",
+    val authorHandle: String = "",
+    val authorColorHex: String = "#0088FF",
+    val authorPhotoBase64: String = "",
+    val authorTier: String = StaffTier.USER.name,
+    val text: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+) {
+    fun authorTierEnum(): StaffTier = StaffTier.fromRaw(authorTier)
 }
 
 enum class PointTransactionType(val label: String) {
     BUY_POINTS("Bought Points"),
     UNLOCK_PHOTO("Unlocked Photo"),
-    SUBSCRIBE_CREATOR("Creator Subscription");
+    SUBSCRIBE_CREATOR("Creator Subscription"),
+    BOOST_POST("Boosted to Top of Discovery"),
+    UNLOCK_DM("Paid Private Message (\$10)");
 
     companion object {
         fun fromRaw(raw: String?): PointTransactionType =

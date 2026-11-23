@@ -25,8 +25,11 @@ import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -37,6 +40,7 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -81,6 +85,7 @@ import com.example.ui.screens.SafetyScreen
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.showTopMessage
 import com.example.ui.screens.UserProfileScreen
+import com.example.ui.theme.ModAmber
 import com.example.ui.theme.VoxStageTheme
 import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageSyncWorker
@@ -222,6 +227,8 @@ private fun AuthenticatedVoxStageApp(
     val mySubscriptions by mainViewModel.mySubscriptionsState.collectAsStateWithLifecycle()
     val myTransactions by mainViewModel.myTransactionsState.collectAsStateWithLifecycle()
     val allTransactions by mainViewModel.allTransactionsState.collectAsStateWithLifecycle()
+    val paidDmMembersForMe by mainViewModel.paidDmMembersForMeState.collectAsStateWithLifecycle()
+    val pendingPaidDmTarget by mainViewModel.pendingPaidDmTarget.collectAsStateWithLifecycle()
     val publicRoomsState by mainViewModel.publicRoomsState.collectAsStateWithLifecycle()
     val myRoomsState by mainViewModel.myRoomsState.collectAsStateWithLifecycle()
     val safetyReportsState by mainViewModel.safetyReportsState.collectAsStateWithLifecycle()
@@ -507,6 +514,12 @@ private fun AuthenticatedVoxStageApp(
                                     onToggleLikePost = mainViewModel::toggleLikePost,
                                     onDeletePost = mainViewModel::deleteProfilePost,
                                     onUnlockPost = mainViewModel::unlockProfilePost,
+                                    onBoostPost = mainViewModel::boostProfilePost,
+                                    onObservePostComments = mainViewModel::observePostComments,
+                                    onAddPostComment = mainViewModel::addPostComment,
+                                    onDeletePostComment = mainViewModel::deletePostComment,
+                                    onSharePostToFeed = mainViewModel::shareProfilePostToFeed,
+                                    onExternalSharePost = mainViewModel::recordExternalPostShare,
                                     onSubscribeCreator = mainViewModel::subscribeToCreator,
                                     onOpenBuyPoints = ::openProfileBuyPoints
                                 )
@@ -614,15 +627,25 @@ private fun AuthenticatedVoxStageApp(
                                     mySubscriptions = mySubscriptions,
                                     myTransactions = myTransactions,
                                     allTransactionsForAdmin = allTransactions,
+                                    paidDmMembersForMe = paidDmMembersForMe,
                                     isPublishingPost = isPublishingPost,
                                     isUpdatingPhoto = isUpdatingPhoto,
                                     isProcessingWallet = isProcessingWallet,
                                     initialTabIndex = profileInitialTab,
                                     onUpdateProfilePhoto = mainViewModel::updateProfilePhoto,
                                     onCreatePost = mainViewModel::createProfilePost,
+                                    onBoostPost = mainViewModel::boostProfilePost,
+                                    onObservePostComments = mainViewModel::observePostComments,
+                                    onAddPostComment = mainViewModel::addPostComment,
+                                    onDeletePostComment = mainViewModel::deletePostComment,
+                                    onSharePostToFeed = mainViewModel::shareProfilePostToFeed,
+                                    onExternalSharePost = mainViewModel::recordExternalPostShare,
+                                    onOpenUserProfile = ::openUserProfile,
                                     onToggleLikePost = mainViewModel::toggleLikePost,
                                     onDeletePost = mainViewModel::deleteProfilePost,
                                     onBuyPoints = mainViewModel::buyPoints,
+                                    onSetDmPolicy = mainViewModel::setDmPolicy,
+                                    onKickPaidDmMember = mainViewModel::kickPaidDmMember,
                                     onSaveProfile = mainViewModel::updateProfile,
                                     onSignOut = {
                                         signOutFromVoxStage(
@@ -667,6 +690,7 @@ private fun AuthenticatedVoxStageApp(
                                     activeSubscription = activeSubForCreator,
                                     isProcessingWallet = isProcessingWallet,
                                     onBack = { navController.popBackStack() },
+                                    onOpenUserProfile = ::openUserProfile,
                                     onMessageUser = { otherUid, otherName, otherColor, otherTier ->
                                         mainViewModel.startPrivateChat(
                                             otherUserId = otherUid,
@@ -682,6 +706,12 @@ private fun AuthenticatedVoxStageApp(
                                     onAcceptFriendRequest = mainViewModel::acceptFriendRequest,
                                     onRemoveOrDeclineFriendship = mainViewModel::removeOrDeclineFriendship,
                                     onUnlockPost = mainViewModel::unlockProfilePost,
+                                    onBoostPost = mainViewModel::boostProfilePost,
+                                    onObservePostComments = mainViewModel::observePostComments,
+                                    onAddPostComment = mainViewModel::addPostComment,
+                                    onDeletePostComment = mainViewModel::deletePostComment,
+                                    onSharePostToFeed = mainViewModel::shareProfilePostToFeed,
+                                    onExternalSharePost = mainViewModel::recordExternalPostShare,
                                     onSubscribeCreator = mainViewModel::subscribeToCreator,
                                     onOpenBuyPoints = ::openProfileBuyPoints
                                 )
@@ -719,6 +749,20 @@ private fun AuthenticatedVoxStageApp(
                                     userProfile = effectiveProfile,
                                     myStaffTier = staffCapabilities.tier,
                                     otherPhotoBase64 = directoryPhotoByUid[dmOtherUid].orEmpty(),
+                                    directoryEntries = directoryEntries,
+                                    paidDmMembersForMe = paidDmMembersForMe,
+                                    onAddUserToChat = { currentThread, addedUser ->
+                                        mainViewModel.addUserToPrivateChat(
+                                            currentThread = currentThread,
+                                            addedUser = addedUser,
+                                            onOpenThread = { newThreadId ->
+                                                navController.navigate("dm/$newThreadId") {
+                                                    launchSingleTop = true
+                                                }
+                                            }
+                                        )
+                                    },
+                                    onKickPaidMember = mainViewModel::kickPaidDmMember,
                                     onOpenUserProfile = ::openUserProfile,
                                     onBack = { navController.popBackStack() }
                                 )
@@ -773,6 +817,37 @@ private fun AuthenticatedVoxStageApp(
                 IncomingAlertModalDialog(
                     alert = latestAlert,
                     onAcknowledge = { mainViewModel.acknowledgeAlert(latestAlert.id) }
+                )
+            }
+
+            // Global $10 Paid Private Message Unlock Prompt ($5 user / $5 app owner)
+            pendingPaidDmTarget?.let { target ->
+                AlertDialog(
+                    onDismissRequest = mainViewModel::dismissPaidDmPrompt,
+                    title = { Text("Unlock Private Messages (\$10)") },
+                    text = {
+                        Text(
+                            "${target.displayName} has private messages locked to paid users. Pay \$10 to unlock private messaging with them (\$5 goes to ${target.displayName} and \$5 goes to the app owner). Note: ${target.displayName} can kick any paid member from messaging them at any time."
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = mainViewModel::confirmUnlockPaidDmAndOpenChat,
+                            enabled = !isProcessingWallet,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ModAmber,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("confirm_pay_10_dm_button")
+                        ) {
+                            Text(if (isProcessingWallet) "Processing…" else "Pay \$10 & Message")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = mainViewModel::dismissPaidDmPrompt) {
+                            Text("Cancel")
+                        }
+                    }
                 )
             }
         }

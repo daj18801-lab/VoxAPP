@@ -23,11 +23,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CardMembership
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.HourglassTop
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -61,20 +64,26 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.CreatorSubscription
 import com.example.data.DirectoryEntry
+import com.example.data.DmPolicy
 import com.example.data.Friendship
+import com.example.data.PostComment
 import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.ui.components.FullScreenPhotoDialog
+import com.example.ui.components.PostCommentsDialog
 import com.example.ui.components.ProfilePostCard
+import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.showTopMessage
 import com.example.ui.components.usernameColor
+import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
 import com.example.viewmodel.UserProfileViewModel
+import kotlinx.coroutines.flow.Flow
 
 @Composable
 fun UserProfileScreen(
@@ -85,11 +94,18 @@ fun UserProfileScreen(
     activeSubscription: CreatorSubscription?,
     isProcessingWallet: Boolean,
     onBack: () -> Unit,
+    onOpenUserProfile: (String) -> Unit,
     onMessageUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit,
     onSendFriendRequest: (DirectoryEntry) -> Unit,
     onAcceptFriendRequest: (Friendship) -> Unit,
     onRemoveOrDeclineFriendship: (Friendship) -> Unit,
     onUnlockPost: (ProfilePost, onInsufficientPoints: () -> Unit) -> Unit,
+    onBoostPost: (ProfilePost, onInsufficientPoints: () -> Unit) -> Unit,
+    onObservePostComments: (String) -> Flow<List<PostComment>>,
+    onAddPostComment: (ProfilePost, String, () -> Unit) -> Unit,
+    onDeletePostComment: (String, String) -> Unit,
+    onSharePostToFeed: (ProfilePost, String, () -> Unit) -> Unit,
+    onExternalSharePost: (ProfilePost) -> Unit,
     onSubscribeCreator: (creatorId: String, creatorName: String) -> Unit,
     onOpenBuyPoints: () -> Unit
 ) {
@@ -100,6 +116,9 @@ fun UserProfileScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showFullAvatar by remember { mutableStateOf(false) }
     var showBuyPointsDialog by remember { mutableStateOf(false) }
+    var buyPointsNeededCount by remember { mutableIntStateOf(2) }
+    var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
+    var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
 
     LaunchedEffect(Unit) {
         viewModel.snackbarEvents.collect { msg ->
@@ -299,6 +318,7 @@ fun UserProfileScreen(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                                             ) {
+                                                val dmPolicy = user.dmPolicyEnum()
                                                 Button(
                                                     onClick = {
                                                         onMessageUser(
@@ -310,8 +330,15 @@ fun UserProfileScreen(
                                                     },
                                                     shape = RoundedCornerShape(999.dp),
                                                     colors = ButtonDefaults.buttonColors(
-                                                        containerColor = MaterialTheme.colorScheme.primary,
-                                                        contentColor = Color.White
+                                                        containerColor = when (dmPolicy) {
+                                                            DmPolicy.PAID -> ModAmber
+                                                            DmPolicy.DISABLED -> MaterialTheme.colorScheme.surfaceVariant
+                                                            DmPolicy.OPEN -> MaterialTheme.colorScheme.primary
+                                                        },
+                                                        contentColor = when (dmPolicy) {
+                                                            DmPolicy.DISABLED -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                            else -> Color.White
+                                                        }
                                                     ),
                                                     modifier = Modifier
                                                         .weight(1f)
@@ -319,12 +346,22 @@ fun UserProfileScreen(
                                                         .testTag("user_profile_message_button")
                                                 ) {
                                                     Icon(
-                                                        Icons.Rounded.ChatBubble,
+                                                        imageVector = when (dmPolicy) {
+                                                            DmPolicy.PAID -> Icons.Rounded.Lock
+                                                            DmPolicy.DISABLED -> Icons.Rounded.Block
+                                                            DmPolicy.OPEN -> Icons.Rounded.ChatBubble
+                                                        },
                                                         contentDescription = null,
                                                         modifier = Modifier.size(18.dp)
                                                     )
                                                     Spacer(modifier = Modifier.width(6.dp))
-                                                    Text("Message")
+                                                    Text(
+                                                        when (dmPolicy) {
+                                                            DmPolicy.PAID -> "DM (\$10)"
+                                                            DmPolicy.DISABLED -> "DMs Off"
+                                                            DmPolicy.OPEN -> "Message"
+                                                        }
+                                                    )
                                                 }
 
                                                 when {
@@ -547,11 +584,31 @@ fun UserProfileScreen(
                                     isUnlocked = unlocked,
                                     isProcessingUnlock = isProcessingWallet,
                                     onAuthorClick = null,
+                                    onOriginalAuthorClick = onOpenUserProfile,
                                     onUnlockPost = {
-                                        onUnlockPost(post) { showBuyPointsDialog = true }
+                                        onUnlockPost(post) {
+                                            buyPointsNeededCount = 2
+                                            showBuyPointsDialog = true
+                                        }
                                     },
                                     onSubscribeCreator = {
                                         onSubscribeCreator(post.authorId, post.authorName)
+                                    },
+                                    onBoostPost = if (post.authorId == viewModel.currentUserId) {
+                                        {
+                                            onBoostPost(post) {
+                                                buyPointsNeededCount = 5
+                                                showBuyPointsDialog = true
+                                            }
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    onOpenComments = { activeCommentsPost = post },
+                                    onSharePost = if (!post.locked) {
+                                        { activeSharePost = post }
+                                    } else {
+                                        null
                                     },
                                     onToggleLike = { viewModel.toggleLikePost(post) },
                                     onDelete = { viewModel.deletePost(post) }
@@ -588,7 +645,11 @@ fun UserProfileScreen(
             title = { Text("Need More Points") },
             text = {
                 Text(
-                    "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). You can buy points in Profile Settings or subscribe for \$15/month to unlock all photos."
+                    if (buyPointsNeededCount >= 5) {
+                        "You currently have $myPointsBalance pts. Boosting a post to the top of Discovery costs 5 points (\$5) for 24 hours. Buy points in Profile Settings."
+                    } else {
+                        "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). You can buy points in Profile Settings or subscribe for \$15/month to unlock all photos."
+                    }
                 )
             },
             confirmButton = {
@@ -607,6 +668,40 @@ fun UserProfileScreen(
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    activeCommentsPost?.let { post ->
+        val commentsFlow = remember(post.id) { onObservePostComments(post.id) }
+        PostCommentsDialog(
+            post = post,
+            commentsFlow = commentsFlow,
+            currentUserId = viewModel.currentUserId,
+            isStaff = staffCapabilities.isStaff,
+            onAuthorClick = { uid ->
+                activeCommentsPost = null
+                onOpenUserProfile(uid)
+            },
+            onAddComment = { text, onSent ->
+                onAddPostComment(post, text, onSent)
+            },
+            onDeleteComment = { commentId ->
+                onDeletePostComment(post.id, commentId)
+            },
+            onDismiss = { activeCommentsPost = null }
+        )
+    }
+
+    activeSharePost?.let { post ->
+        SharePostDialog(
+            post = post,
+            onRepostToFeed = { note, onShared ->
+                onSharePostToFeed(post, note, onShared)
+            },
+            onRecordExternalShare = {
+                onExternalSharePost(post)
+            },
+            onDismiss = { activeSharePost = null }
         )
     }
 }
