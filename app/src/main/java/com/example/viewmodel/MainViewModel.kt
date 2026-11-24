@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AlertSeverity
+import com.example.data.AppBroadcast
 import com.example.data.AppConfig
 import com.example.data.ChatRoom
 import com.example.data.CreatorSubscription
@@ -13,13 +14,21 @@ import com.example.data.DmAccessPass
 import com.example.data.DmPolicy
 import com.example.data.Friendship
 import com.example.data.PointTransaction
+import com.example.data.PresenceStatus
 import com.example.data.ProfilePost
+import com.example.data.PttChirpStyle
+import com.example.data.PttThemeStyle
+import com.example.data.Reel
+import com.example.data.ReelChunk
+import com.example.data.ReelComment
+import com.example.data.ReferralRecord
 import com.example.data.ReportStatus
 import com.example.data.RoomCategory
 import com.example.data.RoomCoverKey
 import com.example.data.RoomTransfer
 import com.example.data.RoomVisibility
 import com.example.data.SafetyReport
+import com.example.data.SpotlightFrameColor
 import com.example.data.formatUsdCents
 import com.example.data.StaffCapabilities
 import com.example.data.StaffInvite
@@ -32,9 +41,13 @@ import com.example.data.UiState
 import com.example.data.UserAlert
 import com.example.data.UserFollow
 import com.example.data.UserProfile
+import com.example.data.UserSex
 import com.example.data.VoxStageRepository
 import com.example.data.unwrapFirestoreError
+import com.example.media.LivePttSessionManager
+import com.example.media.PreparedReelVideo
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -136,6 +149,46 @@ class MainViewModel(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
             initialValue = AppConfig()
+        )
+
+    val appBroadcastsState: StateFlow<List<AppBroadcast>> = repository.observeAppBroadcasts()
+        .catch { error ->
+            Log.w(TAG, "Error observing app broadcasts", unwrapFirestoreError(error))
+            emit(emptyList())
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val reelsState: StateFlow<UiState<List<Reel>>> = repository.observeReels()
+        .catch { error ->
+            val root = unwrapFirestoreError(error)
+            Log.w(TAG, "Error observing Reels", root)
+            emit(UiState.Error(root.message ?: "Failed to load Reels"))
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = UiState.Loading
+        )
+
+    private val _isUploadingReel = MutableStateFlow(false)
+    val isUploadingReel: StateFlow<Boolean> = _isUploadingReel.asStateFlow()
+
+    val followerCountsByUserId: StateFlow<Map<String, Int>> = repository.observeAllUserFollows()
+        .map { follows ->
+            follows.groupingBy { it.followingId }.eachCount()
+        }
+        .catch { error ->
+            Log.w(TAG, "Error observing all user follows for Top 10", unwrapFirestoreError(error))
+            emit(emptyMap())
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyMap()
         )
 
     val pendingRoomTransferState: StateFlow<RoomTransfer?> = repository.observePendingRoomTransfer(currentUserId)
@@ -435,6 +488,24 @@ class MainViewModel(
             initialValue = emptyList()
         )
 
+    val incomingReferralState: StateFlow<ReferralRecord?> =
+        repository.observeMyIncomingReferral(currentUserId)
+            .catch { emit(null) }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = null
+            )
+
+    val invitedReferralsState: StateFlow<List<ReferralRecord>> =
+        repository.observeMyInvitedReferrals(currentUserId)
+            .catch { emit(emptyList()) }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
     init {
         viewModelScope.launch {
             val safeName = initialDisplayName.ifBlank { "Studio Host" }
@@ -450,6 +521,20 @@ class MainViewModel(
                 staffTier = staffCapabilities.value.tier
             ).onSuccess {
                 repository.updateOnlinePresence(true)
+                repository.ensureMyReferralCode()
+                repository.recordDailyLoginStreak(
+                    buyerName = safeName,
+                    staffTier = staffCapabilities.value.tier
+                ).onSuccess { outcome ->
+                    if (outcome != null && outcome.awardedHalfPoint) {
+                        val msg = if (outcome.convertedToFullPoint) {
+                            "${outcome.streakDays}-Day Login Streak! +0.5 pt rolled into +1 full spendable point!"
+                        } else {
+                            "${outcome.streakDays}-Day Login Streak! Free member bonus: +0.5 pt banked!"
+                        }
+                        _snackbarEvents.tryEmit(msg)
+                    }
+                }
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not initialize profile")
             }
@@ -487,6 +572,20 @@ class MainViewModel(
                         repository.syncAcceptedFriendIdsToDirectory(acceptedIds)
                     }
                 }
+        }
+        // Track mutual DM Talk Streaks & trigger Invite-a-Friend +2 pt bonus on first live PTT clip
+        viewModelScope.launch {
+            LivePttSessionManager.completedPttThreadEvents.collect { threadId ->
+                repository.recordLivePttTalkStreak(threadId)
+                repository.completeReferralBonusOnFirstPttClip(effectiveMyProfile().displayName)
+                    .onSuccess { award ->
+                        if (award != null) {
+                            _snackbarEvents.tryEmit(
+                                "Invite bonus unlocked! You and ${award.inviterName} each earned +${award.bonusPointsEach} points!"
+                            )
+                        }
+                    }
+            }
         }
     }
 
@@ -660,7 +759,7 @@ class MainViewModel(
             _isProcessingWallet.value = false
             _pendingPaidDmTarget.value = null
             openResult.onSuccess { threadId ->
-                _snackbarEvents.tryEmit("Paid \$10 to message ${target.displayName} (\$5 to ${target.displayName} · \$5 to App Owner)")
+                _snackbarEvents.tryEmit("Unlocked private chat with ${target.displayName} (\$5)! (${target.displayName} earned +1 usable point)")
                 target.onThreadReady(threadId)
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Unlocked, but could not open chat")
@@ -677,7 +776,7 @@ class MainViewModel(
             ).onSuccess {
                 val msg = when (policy) {
                     DmPolicy.OPEN -> "Private messages are now OPEN to everyone"
-                    DmPolicy.PAID -> "Private messages LOCKED to \$10 paid users (\$5 you / \$5 app)"
+                    DmPolicy.PAID -> "Private messages LOCKED to \$5 paid users (you earn +1 usable point per user)"
                     DmPolicy.DISABLED -> "Private messages turned OFF"
                 }
                 _snackbarEvents.tryEmit(msg)
@@ -857,7 +956,9 @@ class MainViewModel(
         avatarColorHex: String,
         pushToTalkPreferred: Boolean,
         nightModeEnabled: Boolean,
-        invisibleModePreferred: Boolean
+        invisibleModePreferred: Boolean,
+        sex: UserSex = UserSex.UNSPECIFIED,
+        age: Long = 0L
     ) {
         val allowedInvisible = if (staffCapabilities.value.effectiveCanEnterInvisible) {
             invisibleModePreferred
@@ -876,6 +977,8 @@ class MainViewModel(
                 pushToTalkPreferred = pushToTalkPreferred,
                 nightModeEnabled = nightModeEnabled,
                 invisibleModePreferred = allowedInvisible,
+                sex = sex,
+                age = age,
                 currentStaffTier = staffCapabilities.value.tier,
                 currentPhotoBase64 = currentPhoto,
                 currentDmPolicy = currentPolicy
@@ -1141,7 +1244,7 @@ class MainViewModel(
                 buyerName = effectiveMyProfile().displayName
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit("Photo unlocked for 2 points! (\$1 to ${post.authorName}, \$1 to App Owner)")
+                _snackbarEvents.tryEmit("Photo unlocked for 2 points! (${post.authorName} earned +1 usable point)")
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not unlock photo")
@@ -1163,7 +1266,7 @@ class MainViewModel(
                 buyerName = effectiveMyProfile().displayName
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit("Subscribed to $creatorName for \$15/month — all locked photos unlocked!")
+                _snackbarEvents.tryEmit("Subscribed to $creatorName for \$15/month — all locked photos unlocked! ($creatorName earned +8 usable points)")
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not activate subscription")
@@ -1640,6 +1743,387 @@ class MainViewModel(
                 onSaved()
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not update bio")
+            }
+        }
+    }
+
+    fun setAppearanceStatus(status: PresenceStatus) {
+        viewModelScope.launch {
+            repository.updateAppearanceStatus(status)
+                .onSuccess {
+                    val note = if (status == PresenceStatus.ONLINE) {
+                        "Status set to Online"
+                    } else {
+                        "Appearing ${status.label} (Admins & Support still see true status)"
+                    }
+                    _snackbarEvents.tryEmit(note)
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update status")
+                }
+        }
+    }
+
+    fun recordAppTimeSpent(deltaSeconds: Long) {
+        if (deltaSeconds <= 0L) return
+        viewModelScope.launch {
+            repository.incrementTimeSpentOnApp(deltaSeconds)
+        }
+    }
+
+    fun sendUserToSupportChat(
+        targetUser: DirectoryEntry,
+        supportMember: DirectoryEntry,
+        reason: String = "",
+        onSent: () -> Unit = {}
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only Administrators can send users to Support private chats.")
+            return
+        }
+        viewModelScope.launch {
+            repository.sendUserToSupportPrivateChat(
+                targetUser = targetUser,
+                supportMember = supportMember,
+                adminName = currentActorName(),
+                reason = reason
+            ).onSuccess {
+                _snackbarEvents.tryEmit(
+                    "Sent ${targetUser.displayName} to private support chat with ${supportMember.displayName}"
+                )
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send user to Support chat")
+            }
+        }
+    }
+
+    fun sendAppBroadcastToAllUsers(
+        title: String,
+        message: String,
+        severity: AlertSeverity,
+        onSent: () -> Unit = {}
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only Administrators can send app-wide messages to all users.")
+            return
+        }
+        viewModelScope.launch {
+            repository.sendAppBroadcastToAllUsers(
+                senderName = currentActorName(),
+                title = title,
+                message = message,
+                severity = severity
+            ).onSuccess {
+                _snackbarEvents.tryEmit("App message sent to all users!")
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send app message")
+            }
+        }
+    }
+
+    fun deleteAppBroadcast(broadcastId: String) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only Administrators can delete app-wide messages.")
+            return
+        }
+        viewModelScope.launch {
+            repository.deleteAppBroadcast(broadcastId)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("App broadcast deleted.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not delete broadcast")
+                }
+        }
+    }
+
+    // --- PRO MEMBERSHIP ($9.99/MONTH OR 10 POINTS) ---
+
+    fun activateProMembership(
+        paidWithPoints: Boolean = false,
+        playOrderId: String = "",
+        playProductId: String = ""
+    ) {
+        if (_isProcessingWallet.value) return
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.activateProMembership(
+                buyerName = effectiveMyProfile().displayName,
+                staffTier = staffCapabilities.value.tier,
+                paidWithPoints = paidWithPoints,
+                playOrderId = playOrderId,
+                playProductId = playProductId
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(
+                    "Welcome to VoxStage Pro! 1-minute PTT, 30s Reels uploads, and Blue username unlocked for 30 days."
+                )
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not activate Pro membership")
+            }
+        }
+    }
+
+    // --- REELS ---
+
+    fun uploadReel(
+        preparedVideo: PreparedReelVideo,
+        caption: String,
+        boostToTop: Boolean,
+        onUploaded: () -> Unit = {}
+    ) {
+        if (_isUploadingReel.value) return
+        val profile = effectiveMyProfile()
+        val tier = staffCapabilities.value.tier
+        if (!profile.isProActive(tier)) {
+            _snackbarEvents.tryEmit("Pro Membership (\$9.99/mo) is required to upload Reels.")
+            return
+        }
+        viewModelScope.launch {
+            _isUploadingReel.value = true
+            repository.createReelWithChunks(
+                authorName = profile.displayName,
+                authorHandle = profile.handle,
+                authorColorHex = profile.avatarColorHex,
+                authorPhotoBase64 = profile.photoBase64,
+                authorTier = tier,
+                caption = caption,
+                durationSec = preparedVideo.durationSec,
+                thumbnailBase64 = preparedVideo.thumbnailBase64,
+                chunksBase64 = preparedVideo.chunksBase64,
+                boostToTop = boostToTop
+            ).onSuccess {
+                _isUploadingReel.value = false
+                _snackbarEvents.tryEmit(
+                    if (boostToTop) "Reel uploaded & boosted to top for \$5!" else "Reel uploaded!"
+                )
+                onUploaded()
+            }.onFailure { err ->
+                _isUploadingReel.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not upload Reel")
+            }
+        }
+    }
+
+    suspend fun loadReelChunks(reelId: String): Result<List<ReelChunk>> =
+        repository.loadReelChunks(reelId)
+
+    fun boostReelToTop(reel: Reel, onInsufficientPoints: () -> Unit = {}) {
+        if (_isProcessingWallet.value) return
+        val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
+        if (currentPoints < Reel.BOOST_PRICE_POINTS) {
+            _snackbarEvents.tryEmit("You need 5 points (\$5) to push this Reel to the top.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.boostReelToTop(
+                reel = reel,
+                buyerName = effectiveMyProfile().displayName
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit("Reel boosted to the top of Reels for 24h! (-5 pts)")
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not boost Reel")
+            }
+        }
+    }
+
+    fun toggleLikeReel(reel: Reel) {
+        viewModelScope.launch {
+            repository.toggleLikeReel(reel)
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update like")
+                }
+        }
+    }
+
+    fun deleteReel(reel: Reel) {
+        viewModelScope.launch {
+            repository.deleteReel(reel.id)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Reel deleted.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not delete Reel")
+                }
+        }
+    }
+
+    fun observeReelComments(reelId: String): Flow<List<ReelComment>> =
+        repository.observeReelComments(reelId)
+
+    fun addReelComment(reelId: String, text: String, onSent: () -> Unit = {}) {
+        val profile = effectiveMyProfile()
+        val tier = staffCapabilities.value.tier
+        viewModelScope.launch {
+            repository.addReelComment(
+                reelId = reelId,
+                authorName = profile.displayName,
+                authorHandle = profile.handle,
+                authorColorHex = profile.avatarColorHex,
+                authorTier = tier,
+                text = text
+            ).onSuccess {
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not post comment")
+            }
+        }
+    }
+
+    fun deleteReelComment(reelId: String, commentId: String) {
+        viewModelScope.launch {
+            repository.deleteReelComment(reelId, commentId)
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not delete comment")
+                }
+        }
+    }
+
+    fun incrementReelShareCount(reelId: String) {
+        viewModelScope.launch {
+            repository.incrementReelShareCount(reelId)
+        }
+    }
+
+    fun boostMyProfile(onInsufficientPoints: () -> Unit = {}) {
+        if (_isProcessingWallet.value) return
+        val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
+        if (currentPoints < 5L) {
+            _snackbarEvents.tryEmit("You need 5 points to promote your profile to the top of Discovery.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.boostMyProfileToTop(
+                buyerName = effectiveMyProfile().displayName,
+                staffTier = staffCapabilities.value.tier
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit("Profile promoted to the top of Discovery for 24h! (-5 pts)")
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not promote profile")
+            }
+        }
+    }
+
+    fun purchaseOrSelectPttTheme(theme: PttThemeStyle, onInsufficientPoints: () -> Unit = {}) {
+        if (_isProcessingWallet.value) return
+        val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
+        if (profile.ownsPttTheme(theme)) {
+            if (profile.selectedPttThemeEnum() == theme) return
+            viewModelScope.launch {
+                repository.selectPttTheme(theme)
+                    .onSuccess {
+                        _snackbarEvents.tryEmit("Equipped ${theme.label} PTT button!")
+                    }
+                    .onFailure { err ->
+                        _snackbarEvents.tryEmit(err.message ?: "Could not switch PTT theme")
+                    }
+            }
+            return
+        }
+        if (profile.pointsBalance < theme.pricePoints) {
+            _snackbarEvents.tryEmit("You need ${theme.pricePoints} points to unlock ${theme.label}.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.purchasePttTheme(theme, profile.displayName)
+                .onSuccess {
+                    _isProcessingWallet.value = false
+                    _snackbarEvents.tryEmit("Unlocked & equipped ${theme.label}! (-${theme.pricePoints} pts)")
+                }
+                .onFailure { err ->
+                    _isProcessingWallet.value = false
+                    _snackbarEvents.tryEmit(err.message ?: "Could not unlock PTT theme")
+                }
+        }
+    }
+
+    fun purchaseOrSelectPttChirp(chirp: PttChirpStyle, onInsufficientPoints: () -> Unit = {}) {
+        if (_isProcessingWallet.value) return
+        val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
+        if (profile.ownsPttChirp(chirp)) {
+            if (profile.selectedPttChirpEnum() == chirp) return
+            viewModelScope.launch {
+                repository.selectPttChirp(chirp)
+                    .onSuccess {
+                        _snackbarEvents.tryEmit("Equipped ${chirp.label} walkie chirp!")
+                    }
+                    .onFailure { err ->
+                        _snackbarEvents.tryEmit(err.message ?: "Could not switch walkie chirp")
+                    }
+            }
+            return
+        }
+        if (profile.pointsBalance < chirp.pricePoints) {
+            _snackbarEvents.tryEmit("You need ${chirp.pricePoints} points to unlock ${chirp.label}.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.purchasePttChirp(chirp, profile.displayName)
+                .onSuccess {
+                    _isProcessingWallet.value = false
+                    _snackbarEvents.tryEmit("Unlocked & equipped ${chirp.label}! (-${chirp.pricePoints} pts)")
+                }
+                .onFailure { err ->
+                    _isProcessingWallet.value = false
+                    _snackbarEvents.tryEmit(err.message ?: "Could not unlock walkie chirp")
+                }
+        }
+    }
+
+    fun buySpotlightFrame(color: SpotlightFrameColor, onInsufficientPoints: () -> Unit = {}) {
+        if (_isProcessingWallet.value) return
+        val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
+        if (profile.pointsBalance < SpotlightFrameColor.PRICE_POINTS) {
+            _snackbarEvents.tryEmit("You need 5 points to activate a 24-Hour Glowing Neon Spotlight Frame.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.purchaseSpotlightFrame(
+                color = color,
+                buyerName = profile.displayName,
+                staffTier = staffCapabilities.value.tier
+            ).onSuccess {
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit("${color.label} Spotlight Frame active for 24 hours across Discover & Chats! (-5 pts)")
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not activate Spotlight Frame")
+            }
+        }
+    }
+
+    fun redeemReferralCode(codeInput: String) {
+        if (_isProcessingWallet.value) return
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.redeemReferralCode(
+                codeInput = codeInput,
+                myName = effectiveMyProfile().displayName
+            ).onSuccess { inviterName ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(
+                    "Invite linked to $inviterName! Send your first PTT clip in any DM to unlock +2 points each."
+                )
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not redeem invite code")
             }
         }
     }

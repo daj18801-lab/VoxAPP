@@ -1,6 +1,9 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -11,12 +14,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -50,6 +57,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.DoneAll
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Groups
@@ -61,8 +69,11 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.RecordVoiceOver
+import androidx.compose.material.icons.rounded.Screenshot
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SupportAgent
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
@@ -107,8 +118,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -120,6 +133,8 @@ import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
 import com.example.data.DmAccessPass
 import com.example.data.DmPolicy
+import com.example.data.PresenceStatus
+import com.example.data.ReportCategory
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
@@ -132,9 +147,10 @@ import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.VoxStageNotificationState
 import com.example.ui.components.FullScreenPhotoDialog
-import com.example.ui.components.OnlinePresenceDot
+import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.TalkStreakBadge
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.encodeBitmapToBase64Jpeg
 import com.example.ui.components.encodeImageUriToBase64Jpeg
@@ -152,7 +168,7 @@ import com.example.viewmodel.DirectChatViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun DirectChatScreen(
     viewModel: DirectChatViewModel,
@@ -198,6 +214,9 @@ fun DirectChatScreen(
     var showKickPaidMemberDialog by remember { mutableStateOf(false) }
     var showBlockContactDialog by remember { mutableStateOf(false) }
     var showChatPrivacyDialog by remember { mutableStateOf(false) }
+    var actionTargetMessage by remember { mutableStateOf<DirectMessage?>(null) }
+    var reportTargetMessage by remember { mutableStateOf<DirectMessage?>(null) }
+    var lastScreenshotNotifiedMs by remember { mutableLongStateOf(0L) }
     val globalReadReceiptsEnabled = remember(context) {
         DirectMessageNotificationPrefs.isReadReceiptsEnabled(context)
     }
@@ -208,6 +227,9 @@ fun DirectChatScreen(
     val pttIsConnecting by LivePttSessionManager.isConnecting.collectAsStateWithLifecycle()
     val pttIsTransmitting by LivePttSessionManager.isTransmitting.collectAsStateWithLifecycle()
     val pttRemoteSpeaker by LivePttSessionManager.remoteSpeakingName.collectAsStateWithLifecycle()
+    val pttElapsedSec by LivePttSessionManager.transmittingElapsedSec.collectAsStateWithLifecycle()
+    val pttMaxSec by LivePttSessionManager.maxPttSeconds.collectAsStateWithLifecycle()
+    val myMaxPttSeconds = userProfile.pttMaxDurationSeconds(myStaffTier)
     val isThisThreadLivePttConnected = pttActiveThreadId == viewModel.threadId && pttIsConnected
     val isThisThreadLivePttConnecting = pttActiveThreadId == viewModel.threadId && pttIsConnecting
     val isThisThreadTransmitting = pttActiveThreadId == viewModel.threadId && pttIsTransmitting
@@ -238,7 +260,7 @@ fun DirectChatScreen(
 
     fun startVoiceNoteRecording() {
         voicePlayer.stop()
-        if (voiceRecorder.startRecording()) {
+        if (voiceRecorder.startRecording(maxDurationSeconds = myMaxPttSeconds)) {
             recordingSeconds = 0
             isRecordingVoiceNote = true
         } else {
@@ -276,15 +298,18 @@ fun DirectChatScreen(
         }
     }
 
-    LaunchedEffect(isRecordingVoiceNote) {
+    LaunchedEffect(isRecordingVoiceNote, myMaxPttSeconds) {
         if (isRecordingVoiceNote) {
-            while (isRecordingVoiceNote && recordingSeconds < VoiceNoteRecorder.MAX_DURATION_SECONDS) {
+            while (isRecordingVoiceNote && recordingSeconds < myMaxPttSeconds) {
                 delay(1000L)
                 if (isRecordingVoiceNote) {
                     recordingSeconds += 1
                 }
             }
             if (isRecordingVoiceNote) {
+                if (myMaxPttSeconds <= UserProfile.FREE_PTT_MAX_SECONDS) {
+                    snackbarHostState.showTopMessage("Free members have 5s PTT clips. Upgrade to Pro ($9.99/mo) for 1-minute clips!")
+                }
                 stopAndSendVoiceNote()
             }
         }
@@ -505,7 +530,16 @@ fun DirectChatScreen(
     val otherDirectoryEntry = remember(directoryEntries, otherUid) {
         directoryEntries.firstOrNull { it.userId == otherUid }
     }
-    val isOtherOnline = !isGroup && (otherDirectoryEntry?.isCurrentlyOnline(nowMillis) == true)
+    val otherDisplayedStatus = if (!isGroup) {
+        otherDirectoryEntry?.displayedStatusFor(
+            viewerIsStaff = myStaffTier.isStaff(),
+            nowMillis = nowMillis
+        ) ?: PresenceStatus.OFFLINE
+    } else {
+        PresenceStatus.OFFLINE
+    }
+    val otherHidingTrueOnline = !isGroup && myStaffTier.isStaff() &&
+        (otherDirectoryEntry?.isHidingTrueOnlineStatus(nowMillis) == true)
     val amIKicked = thread?.isUserKicked(viewModel.currentUserId) == true
     val iBlockedOther = !isGroup && (
         thread?.isBlockedBy(viewModel.currentUserId) == true ||
@@ -526,6 +560,39 @@ fun DirectChatScreen(
     val canSend = !amIKicked && !isBlockedThread && (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
     val remainingPictureQuota = remember(userProfile.pictureUploadTimestamps) {
         userProfile.remainingPictureUploads()
+    }
+
+    // Android 14+ Screenshot Detection in Private Messages -> Notifies the other user
+    DisposableEffect(context, thread?.id, amIKicked, isBlockedThread, userProfile.displayName, myStaffTier) {
+        val activeThreadId = thread?.id
+        val activity = context.findActivity()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+            activity != null &&
+            !activeThreadId.isNullOrBlank() &&
+            !amIKicked &&
+            !isBlockedThread
+        ) {
+            val callback = Activity.ScreenCaptureCallback {
+                val now = System.currentTimeMillis()
+                if (now - lastScreenshotNotifiedMs >= 3_000L) {
+                    lastScreenshotNotifiedMs = now
+                    viewModel.sendScreenshotNotice(
+                        userName = userProfile.displayName,
+                        senderTier = myStaffTier
+                    )
+                }
+            }
+            runCatching {
+                activity.registerScreenCaptureCallback(activity.mainExecutor, callback)
+            }
+            onDispose {
+                runCatching {
+                    activity.unregisterScreenCaptureCallback(callback)
+                }
+            }
+        } else {
+            onDispose { }
+        }
     }
 
     LaunchedEffect(isMutualPttActive, thread?.id, otherName, userProfile.displayName) {
@@ -608,7 +675,8 @@ fun DirectChatScreen(
                                         speakingLevel = 0f,
                                         micActive = isInCall && isMicActive,
                                         size = 40.dp,
-                                        photoBase64 = otherPhotoBase64
+                                        photoBase64 = otherPhotoBase64,
+                                        userId = otherUid
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
@@ -618,34 +686,44 @@ fun DirectChatScreen(
                                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                                     ) {
                                         if (!isGroup) {
-                                            OnlinePresenceDot(
-                                                isOnline = isOtherOnline,
+                                            PresenceStatusDot(
+                                                status = otherDisplayedStatus,
                                                 modifier = Modifier.testTag("dm_header_presence_dot")
                                             )
                                         }
                                         Text(
                                             text = otherName,
                                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                            color = if (isGroup) MaterialTheme.colorScheme.onSurface else usernameColor(otherTier),
+                                            color = if (isGroup) MaterialTheme.colorScheme.onSurface else usernameColor(otherTier, userId = otherUid),
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f, fill = false)
                                         )
                                         if (!isGroup) {
                                             StaffTierBadge(tier = otherTier)
+                                            val activeStreak = thread?.activeTalkStreakCount() ?: 0
+                                            if (activeStreak >= 3) {
+                                                TalkStreakBadge(
+                                                    streakDays = activeStreak,
+                                                    expiringToday = thread?.isTalkStreakExpiringToday() == true,
+                                                    compact = true,
+                                                    modifier = Modifier.testTag("dm_header_talk_streak")
+                                                )
+                                            }
                                         }
                                     }
                                     Text(
                                         text = when {
                                             isInCall -> if (isGroup) "Live Group Call Active" else "Live Call Active"
                                             isGroup -> "${thread?.participantIds?.size ?: 0} members · ${thread?.memberNamesSummary().orEmpty()}"
-                                            isOtherOnline -> "Online · Tap profile"
-                                            else -> "Offline · Tap profile"
+                                            otherHidingTrueOnline -> "Online (Appearing ${otherDirectoryEntry?.appearanceStatusEnum()?.label}) · Tap profile"
+                                            else -> "${otherDisplayedStatus.label} · Tap profile"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = when {
                                             isInCall -> SafetyEmerald
-                                            !isGroup && isOtherOnline -> PresenceOnlineGreen
+                                            !isGroup && otherDisplayedStatus == PresenceStatus.ONLINE -> PresenceOnlineGreen
+                                            !isGroup && otherDisplayedStatus == PresenceStatus.IDLE -> ModAmber
                                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                                         },
                                         maxLines = 1,
@@ -777,7 +855,7 @@ fun DirectChatScreen(
                                 }
                             }
 
-                            // Kick Paid Member button (for locked $10 Paid DM owners)
+                            // Kick Paid Member button (for locked $5 Paid DM owners)
                             if (canKickOtherPaidMember) {
                                 IconButton(
                                     onClick = { showKickPaidMemberDialog = true },
@@ -905,6 +983,67 @@ fun DirectChatScreen(
                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                     color = MaterialTheme.colorScheme.primary
                                 )
+                            }
+                        }
+                        if (thread?.hasPinnedMessage() == true) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f))
+                                    .clickable {
+                                        val idx = visibleMessages.indexOfFirst { it.id == thread.pinnedMessageId }
+                                        scope.launch {
+                                            if (idx >= 0) {
+                                                listState.animateScrollToItem(idx)
+                                            } else {
+                                                val pinner = thread.pinnedByName.ifBlank { "a participant" }
+                                                snackbarHostState.showTopMessage("Pinned by $pinner")
+                                            }
+                                        }
+                                    }
+                                    .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                                    .testTag("dm_pinned_message_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PushPin,
+                                    contentDescription = "Pinned message",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Pinned · ${thread.pinnedMessageSenderName.ifBlank { "Message" }}",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = thread.pinnedMessageText.ifBlank { "Pinned message" },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (!amIKicked && !isBlockedThread) {
+                                    IconButton(
+                                        onClick = { viewModel.unpinMessage() },
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("dm_unpin_message_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Close,
+                                            contentDescription = "Unpin message",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -1114,16 +1253,18 @@ fun DirectChatScreen(
                                             Spacer(modifier = Modifier.width(8.dp))
                                             Text(
                                                 text = when {
-                                                    isThisThreadTransmitting || (isInCall && isMicActive) ->
+                                                    isThisThreadTransmitting ->
+                                                        "LIVE (${pttElapsedSec}s/${pttMaxSec}s) · $otherName…"
+                                                    isInCall && isMicActive ->
                                                         "LIVE AUDIO STREAMING to $otherName…"
                                                     !thisThreadRemoteSpeaker.isNullOrBlank() ->
                                                         "$thisThreadRemoteSpeaker is streaming live audio…"
                                                     isThisThreadLivePttConnecting ->
                                                         "Connecting live Push-to-Talk channel…"
                                                     isThisThreadLivePttConnected ->
-                                                        "HOLD TO TALK LIVE · $otherName"
+                                                        "HOLD TO TALK (${myMaxPttSeconds}s ${if (myMaxPttSeconds >= 60) "PRO" else "FREE"}) · $otherName"
                                                     else ->
-                                                        "HOLD TO STREAM LIVE AUDIO · $otherName"
+                                                        "HOLD TO STREAM (${myMaxPttSeconds}s ${if (myMaxPttSeconds >= 60) "PRO" else "FREE"}) · $otherName"
                                                 },
                                                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                                                 color = Color.White,
@@ -1354,7 +1495,7 @@ fun DirectChatScreen(
                                         color = LiveCoral
                                     )
                                     Text(
-                                        text = "${formatVoiceDuration(recordingSeconds.toLong())} / ${formatVoiceDuration(VoiceNoteRecorder.MAX_DURATION_SECONDS.toLong())}",
+                                        text = "${formatVoiceDuration(recordingSeconds.toLong())} / ${formatVoiceDuration(myMaxPttSeconds.toLong())} · ${if (myMaxPttSeconds >= 60) "Pro 1m" else "Free 5s max"}",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -1469,39 +1610,62 @@ fun DirectChatScreen(
                                     .testTag("dm_message_input")
                             )
 
-                            Surface(
-                                shape = CircleShape,
-                                color = if (canSend) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                },
-                                modifier = Modifier.size(48.dp)
-                            ) {
-                                IconButton(
-                                    onClick = {
-                                        val toSend = composerText.trim()
-                                        val snapToSend = draftSnapBase64
-                                        if (toSend.isNotEmpty() || snapToSend.isNotBlank()) {
-                                            composerText = ""
-                                            draftSnapBase64 = ""
+                            if (canSend) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = {
+                                            val toSend = composerText.trim()
+                                            val snapToSend = draftSnapBase64
+                                            if (toSend.isNotEmpty() || snapToSend.isNotBlank()) {
+                                                composerText = ""
+                                                draftSnapBase64 = ""
+                                                viewModel.sendMessage(
+                                                    senderName = userProfile.displayName,
+                                                    senderTier = myStaffTier,
+                                                    text = toSend,
+                                                    imageBase64 = snapToSend
+                                                )
+                                            }
+                                        },
+                                        enabled = canSend,
+                                        modifier = Modifier.testTag("dm_send_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Rounded.Send,
+                                            contentDescription = "Send private message",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            } else {
+                                // 1-Tap Thumbs Up 👍 Quick Send Button
+                                val canSendThumbsUp = !amIKicked && !isBlockedThread && !isSending && !isEncodingSnap
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = {
                                             viewModel.sendMessage(
                                                 senderName = userProfile.displayName,
                                                 senderTier = myStaffTier,
-                                                text = toSend,
-                                                imageBase64 = snapToSend
+                                                text = "👍"
                                             )
-                                        }
-                                    },
-                                    enabled = canSend,
-                                    modifier = Modifier.testTag("dm_send_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Rounded.Send,
-                                        contentDescription = "Send private message",
-                                        tint = if (canSend) Color.White else MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
+                                        },
+                                        enabled = canSendThumbsUp,
+                                        modifier = Modifier.testTag("dm_thumbs_up_button")
+                                    ) {
+                                        Text(
+                                            text = "👍",
+                                            fontSize = 22.sp
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1772,7 +1936,7 @@ fun DirectChatScreen(
                                     Text(
                                         text = otherName,
                                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = usernameColor(otherTier)
+                                        color = usernameColor(otherTier, userId = otherUid)
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
@@ -1814,9 +1978,11 @@ fun DirectChatScreen(
                                             msgCreatedMs > 0L && otherLastReadMs >= msgCreatedMs
                                         SnapChatMessageBlock(
                                             message = msg,
+                                            currentUserId = viewModel.currentUserId,
                                             isMe = isMine,
+                                            isPinned = thread?.pinnedMessageId == msg.id,
                                             nowMs = expiryClockMs,
-                                            showReadReceipt = isMine && showReadReceipts,
+                                            showReadReceipt = isMine && showReadReceipts && !msg.isSystemNotice(),
                                             isReadByOther = isReadByOther,
                                             showReadTimeLabel = isMine && msg.id == latestMyMessageId && isReadByOther,
                                             otherReadMillis = otherLastReadMs,
@@ -1832,7 +1998,15 @@ fun DirectChatScreen(
                                                     }
                                                 )
                                             },
-                                            onOpenPhoto = { photo -> fullScreenPhotoBase64 = photo }
+                                            onOpenPhoto = { photo -> fullScreenPhotoBase64 = photo },
+                                            onLongPressMessage = {
+                                                if (!msg.isSystemNotice()) {
+                                                    actionTargetMessage = msg
+                                                }
+                                            },
+                                            onToggleReaction = { emoji ->
+                                                viewModel.toggleMessageReaction(msg, emoji)
+                                            }
                                         )
                                     }
                                 }
@@ -2021,7 +2195,7 @@ fun DirectChatScreen(
                                             Text(
                                                 text = candidate.displayName,
                                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                                color = usernameColor(candTier)
+                                                color = usernameColor(candTier, isPro = candidate.isProActive(), userId = candidate.userId)
                                             )
                                             StaffTierBadge(tier = candTier)
                                         }
@@ -2069,6 +2243,244 @@ fun DirectChatScreen(
             onDismiss = { showChatPrivacyDialog = false }
         )
     }
+
+    actionTargetMessage?.let { targetMsg ->
+        val myActiveReaction = targetMsg.myReaction(viewModel.currentUserId)
+        AlertDialog(
+            onDismissRequest = { actionTargetMessage = null },
+            title = {
+                Text(
+                    text = "Message Options",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    val previewText = when {
+                        targetMsg.text.isNotBlank() -> targetMsg.text.take(100)
+                        targetMsg.hasVoiceNote() -> "Voice note (${formatVoiceDuration(targetMsg.audioDurationSec)})"
+                        targetMsg.imageBase64.isNotBlank() -> "Photo message"
+                        else -> "Private message"
+                    }
+                    Text(
+                        text = "${targetMsg.senderName}: \"$previewText\"",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Tap an emoji to react",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        DirectMessage.ALLOWED_REACTIONS.forEachIndexed { idx, emoji ->
+                            val isSelected = myActiveReaction == emoji
+                            Surface(
+                                shape = CircleShape,
+                                color = if (isSelected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                },
+                                border = if (isSelected) {
+                                    BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+                                } else null,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        viewModel.toggleMessageReaction(targetMsg, emoji)
+                                        actionTargetMessage = null
+                                    }
+                                    .testTag("dm_react_option_$idx")
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(text = emoji, fontSize = 20.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    if (!amIKicked && !isBlockedThread) {
+                        val isCurrentlyPinned = thread?.pinnedMessageId == targetMsg.id
+                        Button(
+                            onClick = {
+                                actionTargetMessage = null
+                                if (isCurrentlyPinned) {
+                                    viewModel.unpinMessage()
+                                } else {
+                                    viewModel.pinMessage(targetMsg, userProfile.displayName)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.primary
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("dm_pin_message_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PushPin,
+                                contentDescription = if (isCurrentlyPinned) "Unpin message" else "Pin message",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isCurrentlyPinned) "Unpin Message" else "Pin Message",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            actionTargetMessage = null
+                            reportTargetMessage = targetMsg
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = LiveCoral.copy(alpha = 0.14f),
+                            contentColor = LiveCoral
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("dm_report_message_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Flag,
+                            contentDescription = "Report message",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Report Message",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { actionTargetMessage = null }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+    reportTargetMessage?.let { reportingMsg ->
+        var selectedCategory by remember(reportingMsg.id) { mutableStateOf(ReportCategory.HARASSMENT) }
+        var reportDetails by remember(reportingMsg.id) { mutableStateOf("") }
+        var isSubmittingReport by remember(reportingMsg.id) { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isSubmittingReport) reportTargetMessage = null },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Flag,
+                        contentDescription = null,
+                        tint = LiveCoral
+                    )
+                    Text(
+                        text = "Report Private Message",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Report this message from ${reportingMsg.senderName} to Admins & Support for review.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        ReportCategory.entries.forEach { category ->
+                            FilterChip(
+                                selected = selectedCategory == category,
+                                onClick = { selectedCategory = category },
+                                label = {
+                                    Text(
+                                        text = category.label,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold)
+                                    )
+                                },
+                                modifier = Modifier.testTag("dm_report_category_${category.name}")
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = reportDetails,
+                        onValueChange = { reportDetails = it.take(300) },
+                        label = { Text("Additional details (optional)") },
+                        placeholder = { Text("Describe why this message violates safety guidelines…") },
+                        minLines = 2,
+                        maxLines = 4,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dm_report_details_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isSubmittingReport = true
+                        viewModel.reportMessage(
+                            reporterName = userProfile.displayName,
+                            message = reportingMsg,
+                            category = selectedCategory,
+                            details = reportDetails,
+                            onReported = {
+                                isSubmittingReport = false
+                                reportTargetMessage = null
+                            }
+                        )
+                    },
+                    enabled = !isSubmittingReport,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = LiveCoral,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("dm_submit_report_button")
+                ) {
+                    Text(if (isSubmittingReport) "Submitting…" else "Submit Report")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { reportTargetMessage = null },
+                    enabled = !isSubmittingReport
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 @Composable
@@ -2192,10 +2604,13 @@ private fun ChatPrivacyOptionsDialog(
 /**
  * Snapchat-signature vertical bar chat block supporting text, voice notes, and snapped pictures.
  */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun SnapChatMessageBlock(
     message: DirectMessage,
+    currentUserId: String,
     isMe: Boolean,
+    isPinned: Boolean = false,
     nowMs: Long,
     showReadReceipt: Boolean,
     isReadByOther: Boolean,
@@ -2204,12 +2619,59 @@ private fun SnapChatMessageBlock(
     isPlayingVoice: Boolean,
     voicePlaybackProgress: Float,
     onToggleVoicePlay: () -> Unit,
-    onOpenPhoto: (String) -> Unit
+    onOpenPhoto: (String) -> Unit,
+    onLongPressMessage: () -> Unit,
+    onToggleReaction: (String) -> Unit
 ) {
+    // Centered system banners for Screenshot alerts and Admin-to-Support handoffs
+    if (message.isSystemNotice()) {
+        val isScreenshot = message.isScreenshotNotice()
+        val accent = if (isScreenshot) LiveCoral else MaterialTheme.colorScheme.primary
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = RoundedCornerShape(999.dp),
+                color = accent.copy(alpha = 0.12f),
+                border = BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+                modifier = Modifier.testTag(
+                    if (isScreenshot) "dm_screenshot_notice_${message.id}"
+                    else "dm_support_handoff_notice_${message.id}"
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isScreenshot) Icons.Rounded.Screenshot else Icons.Rounded.SupportAgent,
+                        contentDescription = if (isScreenshot) "Screenshot taken" else "Support handoff",
+                        tint = accent,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "${message.text} · ${formatTimestampShort(message.createdAt)}",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = accent,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+        return
+    }
+
     val tier = message.senderTierEnum()
-    val accentBarColor = if (isMe) SnapBlue else usernameColor(tier)
+    val accentBarColor = usernameColor(tier, userId = message.senderId)
     val snapBitmap = rememberBase64ImageBitmap(message.imageBase64)
     val hasVoice = message.hasVoiceNote()
+    val isStandaloneThumbsUp = message.isStandaloneThumbsUp()
+    val groupedReactions = remember(message.reactionsByUserId) { message.groupedReactions() }
+    val myReaction = message.myReaction(currentUserId)
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -2232,6 +2694,30 @@ private fun SnapChatMessageBlock(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (isPinned) {
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PushPin,
+                            contentDescription = "Pinned message badge",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(11.dp)
+                        )
+                        Text(
+                            text = "Pinned",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
             if (message.isDisappearing()) {
                 Surface(
                     shape = RoundedCornerShape(999.dp),
@@ -2266,24 +2752,33 @@ private fun SnapChatMessageBlock(
                 modifier = Modifier
                     .padding(top = 4.dp)
                     .width(3.5.dp)
-                    .height(if (snapBitmap != null) 56.dp else if (hasVoice) 44.dp else 26.dp)
+                    .height(if (snapBitmap != null) 56.dp else if (hasVoice) 44.dp else if (isStandaloneThumbsUp) 38.dp else 26.dp)
                     .clip(RoundedCornerShape(999.dp))
                     .background(accentBarColor)
             )
             Spacer(modifier = Modifier.width(10.dp))
             Surface(
                 shape = RoundedCornerShape(14.dp),
-                color = if (isMe) {
+                color = if (isStandaloneThumbsUp) {
+                    Color.Transparent
+                } else if (isMe) {
                     MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
                 } else {
                     MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
                 },
-                modifier = Modifier.weight(1f, fill = false)
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .clip(RoundedCornerShape(14.dp))
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = onLongPressMessage
+                    )
+                    .testTag("dm_message_bubble_${message.id}")
             ) {
                 Column(
                     modifier = Modifier.padding(
-                        horizontal = if (snapBitmap != null) 8.dp else 12.dp,
-                        vertical = 8.dp
+                        horizontal = if (snapBitmap != null) 8.dp else if (isStandaloneThumbsUp) 4.dp else 12.dp,
+                        vertical = if (isStandaloneThumbsUp) 2.dp else 8.dp
                     ),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -2294,7 +2789,10 @@ private fun SnapChatMessageBlock(
                                 .heightIn(min = 120.dp, max = 280.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .clickable { onOpenPhoto(message.imageBase64) }
+                                .combinedClickable(
+                                    onClick = { onOpenPhoto(message.imageBase64) },
+                                    onLongClick = onLongPressMessage
+                                )
                                 .testTag("dm_snap_image_${message.id}")
                         ) {
                             Image(
@@ -2378,13 +2876,67 @@ private fun SnapChatMessageBlock(
                             }
                         }
                     }
-                    if (message.text.isNotBlank()) {
+                    if (isStandaloneThumbsUp) {
+                        Text(
+                            text = "👍",
+                            fontSize = 36.sp
+                        )
+                    } else if (message.text.isNotBlank()) {
                         Text(
                             text = message.text,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                             modifier = if (snapBitmap != null) Modifier.padding(horizontal = 4.dp) else Modifier
                         )
+                    }
+                }
+            }
+        }
+
+        if (groupedReactions.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.padding(start = 14.dp, top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                groupedReactions.forEach { (emoji, count) ->
+                    val isMineReaction = myReaction == emoji
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = if (isMineReaction) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (isMineReaction) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outlineVariant
+                            }
+                        ),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable { onToggleReaction(emoji) }
+                            .testTag("dm_reaction_chip_${message.id}_$emoji")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(text = emoji, fontSize = 13.sp)
+                            Text(
+                                text = "$count",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (isMineReaction) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
                     }
                 }
             }

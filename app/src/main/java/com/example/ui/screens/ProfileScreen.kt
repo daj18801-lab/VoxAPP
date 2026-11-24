@@ -48,6 +48,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Stars
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Videocam
@@ -84,10 +85,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -98,20 +101,33 @@ import com.example.data.DmPolicy
 import com.example.data.PointTransaction
 import com.example.data.PointTransactionType
 import com.example.data.PostComment
+import com.example.data.PresenceStatus
 import com.example.data.ProfilePost
+import com.example.data.PttChirpStyle
+import com.example.data.PttThemeStyle
+import com.example.data.ReferralRecord
+import com.example.data.SpotlightFrameColor
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
+import com.example.data.UserSex
 import com.example.data.formatUsdCents
 import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.ui.components.DailyLoginStreakCard
 import com.example.ui.components.FullScreenPhotoDialog
+import com.example.ui.components.InviteFriendReferralCard
 import com.example.ui.components.PostCommentsDialog
+import com.example.ui.components.PresenceStatusDot
+import com.example.ui.components.ProMemberBadge
 import com.example.ui.components.ProfilePostCard
+import com.example.ui.components.PttCustomizationShopCard
 import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
+import com.example.ui.components.SpotlightFrameShopCard
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.encodeImageUriToBase64Jpeg
 import com.example.ui.components.parseHexColor
@@ -161,6 +177,16 @@ fun ProfileScreen(
     onToggleLikePost: (ProfilePost) -> Unit,
     onDeletePost: (ProfilePost) -> Unit,
     onBuyPoints: (Long) -> Unit,
+    onUpgradeToProPlay: () -> Unit = {},
+    onActivateProWithPoints: () -> Unit = {},
+    onBoostMyProfile: (onInsufficientPoints: () -> Unit) -> Unit = {},
+    onSelectOrBuyPttTheme: (PttThemeStyle, onInsufficientPoints: () -> Unit) -> Unit = { _, _ -> },
+    onSelectOrBuyPttChirp: (PttChirpStyle, onInsufficientPoints: () -> Unit) -> Unit = { _, _ -> },
+    onBuySpotlightFrame: (SpotlightFrameColor, onInsufficientPoints: () -> Unit) -> Unit = { _, _ -> },
+    incomingReferral: ReferralRecord? = null,
+    invitedReferrals: List<ReferralRecord> = emptyList(),
+    userEmailVerified: Boolean = false,
+    onRedeemReferralCode: (String) -> Unit = {},
     playBillingManager: com.example.billing.PlayBillingManager? = null,
     onSetDmPolicy: (DmPolicy) -> Unit,
     onKickPaidDmMember: (senderId: String, senderName: String) -> Unit,
@@ -172,9 +198,12 @@ fun ProfileScreen(
         avatarColorHex: String,
         pushToTalkPreferred: Boolean,
         darkThemePreferred: Boolean,
-        invisibleModePreferred: Boolean
+        invisibleModePreferred: Boolean,
+        sex: UserSex,
+        age: Long
     ) -> Unit,
     onSaveBio: (String, () -> Unit) -> Unit = { _, _ -> },
+    onChangeAppearanceStatus: (PresenceStatus) -> Unit = {},
     onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
@@ -199,6 +228,9 @@ fun ProfileScreen(
     }
     var readReceiptsEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isReadReceiptsEnabled(context))
+    }
+    var volumeDownPttEnabled by remember {
+        mutableStateOf(DirectMessageNotificationPrefs.isVolumeDownPttEnabled(context))
     }
     var hasNotificationPermission by remember {
         mutableStateOf(DirectMessageNotificationHelper.hasNotificationPermission(context))
@@ -230,6 +262,12 @@ fun ProfileScreen(
     var pushToTalkPreferred by remember { mutableStateOf(userProfile?.pushToTalkPreferred ?: true) }
     var nightModeEnabled by remember { mutableStateOf(userProfile?.nightModeEnabled ?: false) }
     var invisibleModePreferred by remember { mutableStateOf(userProfile?.invisibleModePreferred ?: false) }
+    var selectedSex by remember { mutableStateOf(userProfile?.sexEnum() ?: UserSex.UNSPECIFIED) }
+    var ageInput by remember {
+        mutableStateOf(
+            userProfile?.effectiveAge()?.takeIf { it in 18..120 }?.toString().orEmpty()
+        )
+    }
 
     LaunchedEffect(userProfile?.userId, userProfile?.updatedAt) {
         if (userProfile != null) {
@@ -240,6 +278,8 @@ fun ProfileScreen(
             pushToTalkPreferred = userProfile.pushToTalkPreferred
             nightModeEnabled = userProfile.nightModeEnabled
             invisibleModePreferred = userProfile.invisibleModePreferred
+            selectedSex = userProfile.sexEnum()
+            ageInput = userProfile.effectiveAge().takeIf { it in 18..120 }?.toString().orEmpty()
         }
     }
 
@@ -363,7 +403,8 @@ fun ProfileScreen(
                                     speakingLevel = 0.35f,
                                     micActive = false,
                                     size = 80.dp,
-                                    photoBase64 = currentPhotoBase64
+                                    photoBase64 = currentPhotoBase64,
+                                    userId = currentUserId
                                 )
                                 Surface(
                                     shape = CircleShape,
@@ -405,12 +446,20 @@ fun ProfileScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
+                                    val isMyPro = userProfile?.isProSubscriberOnly() == true
                                     Text(
                                         text = displayName.ifBlank { "Studio Host" },
                                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = usernameColor(staffCapabilities.tier)
+                                        color = usernameColor(
+                                            tier = staffCapabilities.tier,
+                                            isPro = isMyPro,
+                                            userId = currentUserId
+                                        )
                                     )
                                     StaffTierBadge(tier = staffCapabilities.tier)
+                                    if (isMyPro) {
+                                        ProMemberBadge()
+                                    }
                                 }
                                 if (!staffCapabilities.isAdmin) {
                                     Text(
@@ -580,6 +629,115 @@ fun ProfileScreen(
                             }
                         }
 
+                        // Time Spent on App Strip
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("profile_time_spent_badge")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Schedule,
+                                        contentDescription = "Time spent on app",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "Time Spent on App",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Text(
+                                    text = userProfile?.formattedTimeSpent() ?: "0s",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
+                        // Appearance Status Picker (Online / Idle / Offline)
+                        val selectedAppearance = userProfile?.appearanceStatusEnum() ?: PresenceStatus.ONLINE
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("profile_appearance_status_section")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Status",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        PresenceStatusDot(status = selectedAppearance, size = 9.dp)
+                                        Text(
+                                            text = "Appearing ${selectedAppearance.label}",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    PresenceStatus.entries.forEach { statusOption ->
+                                        val isSelected = selectedAppearance == statusOption
+                                        FilterChip(
+                                            selected = isSelected,
+                                            onClick = { onChangeAppearanceStatus(statusOption) },
+                                            leadingIcon = {
+                                                PresenceStatusDot(status = statusOption, size = 9.dp)
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = statusOption.label,
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                                )
+                                            },
+                                            shape = RoundedCornerShape(999.dp),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("profile_status_option_${statusOption.name}")
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "Choose how you appear to other members. Admins & Support always see your true status.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
                         // Points Pill + Change/Remove Photo Buttons
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -595,7 +753,7 @@ fun ProfileScreen(
                                     .testTag("profile_points_pill")
                             ) {
                                 Text(
-                                    text = "${userProfile?.pointsBalance ?: 0L} pts",
+                                    text = userProfile?.formattedPointsBalance() ?: "0 pts",
                                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                     color = SafetyEmerald,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
@@ -804,7 +962,7 @@ fun ProfileScreen(
                                             )
                                             Text(
                                                 text = if (isAdultVerified) {
-                                                    "You earn \$1 & app owner gets \$1 per unlock, or viewers subscribe \$15/mo"
+                                                    "You earn +1 usable in-app point per unlock (or +8 pts when viewers subscribe \$15/mo)"
                                                 } else {
                                                     "18+ age verification required — tap to verify your age first"
                                                 },
@@ -1032,7 +1190,18 @@ fun ProfileScreen(
                     }
                 }
             } else {
-                // TAB 1: POINTS WALLET (BUY POINTS), PRIVATE MESSAGE PRIVACY ($10 PAID DM), CREATOR EARNINGS & PROFILE SETTINGS
+                // TAB 1: VOXSTAGE PRO ($9.99/MO), POINTS WALLET, PRIVATE MESSAGE PRIVACY, CREATOR POINTS & PROFILE SETTINGS
+                item(key = "pro_membership_card") {
+                    ProMembershipCard(
+                        userProfile = userProfile,
+                        staffCapabilities = staffCapabilities,
+                        isProcessingWallet = isProcessingWallet,
+                        playBillingManager = playBillingManager,
+                        onUpgradeToProPlay = onUpgradeToProPlay,
+                        onActivateProWithPoints = onActivateProWithPoints
+                    )
+                }
+
                 item(key = "points_wallet_card") {
                     PointsWalletSettingsCard(
                         currentUserId = currentUserId,
@@ -1043,7 +1212,51 @@ fun ProfileScreen(
                         appOwnerRevenueCents = allTransactionsForAdmin.sumOf { it.platformShareCents },
                         isProcessingWallet = isProcessingWallet,
                         playBillingManager = playBillingManager,
-                        onBuyPoints = onBuyPoints
+                        onBuyPoints = onBuyPoints,
+                        onBoostMyProfile = {
+                            onBoostMyProfile { showNeedPointsForBoostDialog = true }
+                        }
+                    )
+                }
+
+                item(key = "spotlight_frame_shop_card") {
+                    SpotlightFrameShopCard(
+                        userProfile = userProfile,
+                        isProcessingWallet = isProcessingWallet,
+                        onBuySpotlightFrame = { color ->
+                            onBuySpotlightFrame(color) { showNeedPointsForBoostDialog = true }
+                        }
+                    )
+                }
+
+                item(key = "daily_login_streak_card") {
+                    DailyLoginStreakCard(
+                        userProfile = userProfile,
+                        staffTier = staffCapabilities.tier
+                    )
+                }
+
+                item(key = "invite_friend_referral_card") {
+                    InviteFriendReferralCard(
+                        currentUserId = currentUserId,
+                        userProfile = userProfile,
+                        isEmailVerified = userEmailVerified,
+                        incomingReferral = incomingReferral,
+                        invitedReferrals = invitedReferrals,
+                        onRedeemReferralCode = onRedeemReferralCode
+                    )
+                }
+
+                item(key = "ptt_customization_shop_card") {
+                    PttCustomizationShopCard(
+                        userProfile = userProfile,
+                        isProcessingWallet = isProcessingWallet,
+                        onSelectOrBuyTheme = { theme ->
+                            onSelectOrBuyPttTheme(theme) { showNeedPointsForBoostDialog = true }
+                        },
+                        onSelectOrBuyChirp = { chirp ->
+                            onSelectOrBuyPttChirp(chirp) { showNeedPointsForBoostDialog = true }
+                        }
                     )
                 }
 
@@ -1271,6 +1484,40 @@ fun ProfileScreen(
                                     .testTag("profile_bio_input")
                             )
 
+                            OutlinedTextField(
+                                value = ageInput,
+                                onValueChange = { raw ->
+                                    ageInput = raw.filter { it.isDigit() }.take(3)
+                                },
+                                label = { Text("Age (18+ · used for Discovery filters)") },
+                                placeholder = { Text("e.g. 26") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("profile_age_input")
+                            )
+
+                            Text("Sex (used for Discovery filters)", style = MaterialTheme.typography.labelLarge)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(UserSex.MALE, UserSex.FEMALE, UserSex.UNSPECIFIED).forEach { sexOption ->
+                                    FilterChip(
+                                        selected = selectedSex == sexOption,
+                                        onClick = { selectedSex = sexOption },
+                                        label = { Text(sexOption.label) },
+                                        shape = RoundedCornerShape(999.dp),
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                            selectedLabelColor = Color.White
+                                        ),
+                                        modifier = Modifier.testTag("profile_sex_chip_${sexOption.name}")
+                                    )
+                                }
+                            }
+
                             Text("Avatar Ring Color", style = MaterialTheme.typography.labelLarge)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1397,8 +1644,22 @@ fun ProfileScreen(
                                 )
                             }
 
+                            Box(modifier = Modifier.testTag("toggle_volume_down_ptt")) {
+                                ToggleSettingRow(
+                                    title = "Volume Down Push-to-Talk",
+                                    subtitle = "Hold the hardware Volume Down key to transmit whenever PTT is active in VoxStage",
+                                    checked = volumeDownPttEnabled,
+                                    onCheckedChange = { enable ->
+                                        volumeDownPttEnabled = enable
+                                        DirectMessageNotificationPrefs.setVolumeDownPttEnabled(context, enable)
+                                    }
+                                )
+                            }
+
                             Button(
                                 onClick = {
+                                    val parsedAge = ageInput.trim().toLongOrNull()
+                                        ?.takeIf { it in 18L..120L } ?: 0L
                                     onSaveProfile(
                                         displayName,
                                         handle,
@@ -1406,7 +1667,9 @@ fun ProfileScreen(
                                         avatarColorHex,
                                         pushToTalkPreferred,
                                         nightModeEnabled,
-                                        invisibleModePreferred
+                                        invisibleModePreferred,
+                                        selectedSex,
+                                        parsedAge
                                     )
                                 },
                                 shape = RoundedCornerShape(14.dp),
@@ -1617,6 +1880,149 @@ private fun HardwarePermissionRow(
 }
 
 @Composable
+private fun ProMembershipCard(
+    userProfile: UserProfile?,
+    staffCapabilities: StaffCapabilities,
+    isProcessingWallet: Boolean,
+    playBillingManager: com.example.billing.PlayBillingManager? = null,
+    onUpgradeToProPlay: () -> Unit,
+    onActivateProWithPoints: () -> Unit
+) {
+    val isProSubscriber = userProfile?.isProSubscriberOnly() == true
+    val hasProAccess = userProfile?.isProActive(staffCapabilities.tier) == true
+    val daysLeft = userProfile?.proDaysRemaining() ?: 0
+    val pointsBalance = userProfile?.pointsBalance ?: 0L
+    val isPlayInFlight = playBillingManager?.isPurchaseInFlight?.collectAsStateWithLifecycle()?.value ?: false
+    val proPrice = playBillingManager?.formattedProPrice() ?: "\$9.99/mo"
+    val canClick = !isProcessingWallet && !isPlayInFlight
+    val proBlue = usernameColor(StaffTier.USER, isPro = true)
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            width = if (hasProAccess) 1.5.dp else 1.dp,
+            color = proBlue.copy(alpha = if (hasProAccess) 0.75f else 0.45f)
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("pro_membership_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Stars,
+                    contentDescription = "VoxStage Pro",
+                    tint = proBlue,
+                    modifier = Modifier.size(22.dp)
+                )
+                Text(
+                    text = "VoxStage Pro Membership",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                    color = proBlue,
+                    modifier = Modifier.weight(1f)
+                )
+                if (isProSubscriber) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = proBlue.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            text = "ACTIVE · ${daysLeft}d left",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = proBlue,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                        )
+                    }
+                } else if (staffCapabilities.isStaff) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = SafetyEmerald.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            text = "STAFF INCLUDED",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = SafetyEmerald,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                        )
+                    }
+                } else {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = proBlue.copy(alpha = 0.14f)
+                    ) {
+                        Text(
+                            text = proPrice,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = proBlue,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = "• 1-minute Push-to-Talk clips (Free members get 5-second clips)\n" +
+                    "• Upload short video Reels (up to 30 seconds)\n" +
+                    "• Blue Pro member username color & PRO badge\n" +
+                    "• Unlimited Discovery photos (Free gets 2/week)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onUpgradeToProPlay,
+                    enabled = canClick,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = proBlue,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("pro_subscribe_play_button")
+                ) {
+                    Text(
+                        text = if (isProSubscriber) "Renew Pro ($proPrice)" else "Go Pro · $proPrice",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onActivateProWithPoints,
+                    enabled = canClick && pointsBalance >= UserProfile.PRO_REDEEM_POINTS,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, proBlue.copy(alpha = 0.6f)),
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("pro_activate_with_points_button")
+                ) {
+                    Text(
+                        text = "Use ${UserProfile.PRO_REDEEM_POINTS} pts",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        color = if (pointsBalance >= UserProfile.PRO_REDEEM_POINTS) proBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PointsWalletSettingsCard(
     currentUserId: String,
     userProfile: UserProfile?,
@@ -1626,10 +2032,11 @@ private fun PointsWalletSettingsCard(
     appOwnerRevenueCents: Long,
     isProcessingWallet: Boolean,
     playBillingManager: com.example.billing.PlayBillingManager? = null,
-    onBuyPoints: (Long) -> Unit
+    onBuyPoints: (Long) -> Unit,
+    onBoostMyProfile: () -> Unit = {}
 ) {
     val pointsBalance = userProfile?.pointsBalance ?: 0L
-    val creatorEarningsCents = userProfile?.creatorEarningsCents ?: 0L
+    val creatorEarnedPoints = userProfile?.creatorEarnedPoints ?: 0L
     val billingState = playBillingManager?.connectionState?.collectAsStateWithLifecycle()?.value
         ?: com.example.billing.PlayBillingConnectionState.DISCONNECTED
     val billingBanner = playBillingManager?.statusBanner?.collectAsStateWithLifecycle()?.value
@@ -1733,7 +2140,7 @@ private fun PointsWalletSettingsCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = "$pointsBalance pts",
+                            text = userProfile?.formattedPointsBalance() ?: "0 pts",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -1749,12 +2156,12 @@ private fun PointsWalletSettingsCard(
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         Text(
-                            text = "Creator Earnings",
+                            text = "Creator Points Earned",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = formatUsdCents(creatorEarningsCents),
+                            text = "$creatorEarnedPoints pts",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
                             color = SafetyEmerald
                         )
@@ -1778,12 +2185,12 @@ private fun PointsWalletSettingsCard(
                     ) {
                         Column {
                             Text(
-                                text = "App Owner Revenue Share",
+                                text = "App Owner Revenue (100%)",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                 color = ModAmber
                             )
                             Text(
-                                text = "\$1 photo unlock · \$5 Discovery boost · \$5 paid DM · \$7.50 sub",
+                                text = "All payments go to the app owner · Creators earn usable in-app points",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1798,10 +2205,73 @@ private fun PointsWalletSettingsCard(
             }
 
             Text(
-                text = "Buy Points via Google Play Store (2 pts = \$2 · 5 pts = \$5). Locked photos cost 2 pts (\$1 owner / \$1 app), Discovery Boost costs 5 pts (\$5), and locked Paid DMs cost \$10 (\$5 user / \$5 app).",
+                text = "Creators earn usable in-app points (added directly to your Points Balance, never cash): +1 pt per locked photo unlock, +1 pt per \$5 paid DM, and +8 pts per creator subscription. Spend points on Pro Membership (10 pts), promoting photos, videos, or your profile (5 pts), and Custom PTT Themes & Walkie Chirps!",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            // Promote Profile to Top of Discovery (5 pts / 24h)
+            val isProfileBoosted = userProfile?.isProfileBoosted() == true
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = if (isProfileBoosted) SafetyEmerald.copy(alpha = 0.14f) else ModAmber.copy(alpha = 0.12f),
+                border = BorderStroke(
+                    1.dp,
+                    if (isProfileBoosted) SafetyEmerald.copy(alpha = 0.55f) else ModAmber.copy(alpha = 0.45f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("promote_profile_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.RocketLaunch,
+                        contentDescription = "Promote profile to top of Discovery",
+                        tint = if (isProfileBoosted) SafetyEmerald else ModAmber,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isProfileBoosted) {
+                                "Profile Promoted · ${userProfile?.profileBoostRemainingLabel()}"
+                            } else {
+                                "Promote Your Profile to Top"
+                            },
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = if (isProfileBoosted) SafetyEmerald else MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Pin your profile at the top of Discover → People for 24 hours (5 pts)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Button(
+                        onClick = onBoostMyProfile,
+                        enabled = !isProcessingWallet,
+                        shape = RoundedCornerShape(999.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isProfileBoosted) SafetyEmerald else ModAmber,
+                            contentColor = Color.White
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .height(38.dp)
+                            .testTag("promote_profile_button")
+                    ) {
+                        Text(
+                            text = if (isProfileBoosted) "Extend · 5 pts" else "5 pts",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
+                }
+            }
 
             // Buy Points Packages via Google Play Store Billing
             Row(
@@ -1901,7 +2371,7 @@ private fun PointsWalletSettingsCard(
             if (recentTransactions.isNotEmpty()) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Text(
-                    text = "Recent Points & Earnings",
+                    text = "Recent Points Activity",
                     style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                 )
                 recentTransactions.forEach { tx ->
@@ -1911,23 +2381,49 @@ private fun PointsWalletSettingsCard(
                             "Bought +${tx.pointsDelta} pts (${formatUsdCents(tx.grossCents)})"
                         PointTransactionType.UNLOCK_PHOTO ->
                             if (isCreatorCredit) {
-                                "${tx.buyerName} unlocked your photo (+${formatUsdCents(tx.creatorShareCents)} to you · \$1 app)"
+                                "${tx.buyerName} unlocked your photo (+1 usable point earned)"
                             } else {
-                                "Unlocked ${tx.creatorName}'s photo (-2 pts · \$1 owner / \$1 app)"
+                                "Unlocked ${tx.creatorName}'s photo (-2 pts)"
                             }
                         PointTransactionType.SUBSCRIBE_CREATOR ->
                             if (isCreatorCredit) {
-                                "${tx.buyerName} subscribed \$15/mo (+${formatUsdCents(tx.creatorShareCents)} to you)"
+                                "${tx.buyerName} subscribed (+8 usable points earned)"
                             } else {
                                 "Subscribed to ${tx.creatorName} (\$15.00/mo)"
                             }
                         PointTransactionType.BOOST_POST ->
-                            "Boosted post to top of Discovery (-5 pts / \$5.00)"
+                            "Promoted photo post to top of Discovery (-5 pts)"
+                        PointTransactionType.BOOST_REEL ->
+                            "Promoted Reel video to top of Reels (-5 pts)"
+                        PointTransactionType.BOOST_PROFILE ->
+                            "Promoted profile to top of Discovery (-5 pts · 24h)"
+                        PointTransactionType.BUY_PTT_ITEM ->
+                            "Unlocked custom PTT item (${tx.postId.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }}) (${tx.pointsDelta} pts)"
+                        PointTransactionType.PRO_MEMBERSHIP ->
+                            if (tx.pointsDelta < 0) {
+                                "Activated VoxStage Pro Membership (${tx.pointsDelta} pts · 30 days)"
+                            } else {
+                                "Activated VoxStage Pro Membership (${formatUsdCents(tx.grossCents)}/mo)"
+                            }
                         PointTransactionType.UNLOCK_DM ->
                             if (isCreatorCredit) {
-                                "${tx.buyerName} unlocked Private Messages (+${formatUsdCents(tx.creatorShareCents)} to you · \$5 app)"
+                                "${tx.buyerName} unlocked Private Messages (+1 usable point earned)"
                             } else {
-                                "Unlocked Private Messages with ${tx.creatorName} (\$10.00 · \$5 user / \$5 app)"
+                                "Unlocked Private Messages with ${tx.creatorName} (\$5.00)"
+                            }
+                        PointTransactionType.BUY_SPOTLIGHT_FRAME ->
+                            "Activated 24-Hour Glowing Neon Spotlight Frame (-5 pts)"
+                        PointTransactionType.DAILY_STREAK_BONUS ->
+                            if (tx.pointsDelta >= 1L) {
+                                "7-Day Login Streak Bonus (+0.5 pt → +1 full point)"
+                            } else {
+                                "7-Day Login Streak Bonus (+0.5 pt banked)"
+                            }
+                        PointTransactionType.REFERRAL_BONUS ->
+                            if (isCreatorCredit) {
+                                "Invite-a-Friend Bonus: ${tx.buyerName} verified & sent 1st PTT (+2 pts)"
+                            } else {
+                                "Invite-a-Friend Bonus with ${tx.creatorName} (+2 pts)"
                             }
                     }
                     Row(
@@ -1938,7 +2434,11 @@ private fun PointsWalletSettingsCard(
                         Icon(
                             imageVector = Icons.Rounded.Stars,
                             contentDescription = null,
-                            tint = if (isCreatorCredit || tx.typeEnum() == PointTransactionType.BUY_POINTS) {
+                            tint = if (isCreatorCredit ||
+                                tx.typeEnum() == PointTransactionType.BUY_POINTS ||
+                                tx.typeEnum() == PointTransactionType.DAILY_STREAK_BONUS ||
+                                tx.typeEnum() == PointTransactionType.REFERRAL_BONUS
+                            ) {
                                 SafetyEmerald
                             } else {
                                 MaterialTheme.colorScheme.primary
@@ -2029,7 +2529,7 @@ private fun PrivateMessageSettingsCard(
             }
 
             Text(
-                text = "Control who can send you private messages. Lock DMs to paid users (\$10 to message you — \$5 to you, \$5 to app owner) and kick any paid member anytime.",
+                text = "Control who can send you private messages. Lock DMs to paid users (\$5 to message you — full \$5 goes to the app owner and you earn +1 usable point per user; 10 points = Pro Membership) and kick any paid member anytime.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -2045,8 +2545,8 @@ private fun PrivateMessageSettingsCard(
             )
 
             DmPolicyOptionRow(
-                title = "Lock to Paid Users (\$10 to DM)",
-                subtitle = "Users pay \$10 to message you (\$5 to you · \$5 to app owner). You can kick any paid member.",
+                title = "Lock to Paid Users (\$5 to DM)",
+                subtitle = "Users pay \$5 to message you (+1 usable in-app point per user; earn 10 pts for Pro or spend in-app). Kick anytime.",
                 icon = Icons.Rounded.Lock,
                 selected = currentPolicy == DmPolicy.PAID,
                 accentColor = ModAmber,
@@ -2074,7 +2574,7 @@ private fun PrivateMessageSettingsCard(
 
                 if (paidMembers.isEmpty()) {
                     Text(
-                        text = "No paid DM members yet. When someone pays \$10 to message you, they will appear here and you can kick them anytime.",
+                        text = "No paid DM members yet. When someone pays \$5 to message you, you earn +1 usable in-app point and they appear here so you can kick them anytime.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2102,7 +2602,7 @@ private fun PrivateMessageSettingsCard(
                                         text = if (pass.kicked || !pass.active) {
                                             "Kicked from messaging you"
                                         } else {
-                                            "Paid \$10 (\$5 earned by you)"
+                                            "Paid \$5 (+1 usable point earned)"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (pass.kicked || !pass.active) LiveCoral else SafetyEmerald

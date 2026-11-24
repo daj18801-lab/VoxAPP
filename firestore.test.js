@@ -1320,7 +1320,7 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
     })
   );
 
-  // Bob unlocks Alice's locked photo: spends 2 pts, adds self to unlockedByUserIds, credits Alice $1 (100c), logs $1/$1 split!
+  // Bob unlocks Alice's locked photo: spends 2 pts, adds self to unlockedByUserIds, credits Alice +1 usable point (pointsBalance + creatorEarnedPoints)!
   await assertSucceeds(
     bobDb.collection("users").doc(BOB_UID).update({
       pointsBalance: 0,
@@ -1335,7 +1335,8 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
   );
   await assertSucceeds(
     bobDb.collection("users").doc(ALICE_UID).update({
-      creatorEarningsCents: 100,
+      pointsBalance: 1,
+      creatorEarnedPoints: 1,
       updatedAt: pastDate(2300),
     })
   );
@@ -1349,8 +1350,8 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
       postId: "post_locked_1",
       pointsDelta: -2,
       grossCents: 200,
-      creatorShareCents: 100,
-      platformShareCents: 100,
+      creatorShareCents: 0,
+      platformShareCents: 200,
       createdAt: pastDate(2200),
     })
   );
@@ -1372,7 +1373,7 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
     })
   );
 
-  // Bob subscribes to Alice for $15/month (30 days)
+  // Bob subscribes to Alice for $15/month (30 days) — 100% revenue to app owner, Alice earns +8 usable points
   const subId = `${BOB_UID}_${ALICE_UID}`;
   await assertSucceeds(
     bobDb.collection("creatorSubscriptions").doc(subId).set({
@@ -1380,8 +1381,8 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
       creatorId: ALICE_UID,
       creatorName: "Alice",
       priceCents: 1500,
-      creatorShareCents: 750,
-      platformShareCents: 750,
+      creatorShareCents: 0,
+      platformShareCents: 1500,
       active: true,
       expiresAtMillis: Date.now() + 30 * 24 * 60 * 60 * 1000,
       createdAt: pastDate(1800),
@@ -1390,7 +1391,8 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
   );
   await assertSucceeds(
     bobDb.collection("users").doc(ALICE_UID).update({
-      creatorEarningsCents: 850,
+      pointsBalance: 9,
+      creatorEarnedPoints: 9,
       updatedAt: pastDate(1700),
     })
   );
@@ -1404,8 +1406,8 @@ test("Locked photos, 2-point ($2) unlock with $1/$1 split, and $15/mo creator su
       postId: "",
       pointsDelta: 0,
       grossCents: 1500,
-      creatorShareCents: 750,
-      platformShareCents: 750,
+      creatorShareCents: 0,
+      platformShareCents: 1500,
       createdAt: pastDate(1600),
     })
   );
@@ -1832,7 +1834,7 @@ test("Group chats, DM privacy controls, $10 paid DM ($5/$5 split), and kicking p
     })
   );
 
-  // 3) Bob pays $10 ($5 to Alice / $5 to app owner) -> creates dmAccessPasses/{bob}_{alice} + credits Alice 500c + UNLOCK_DM ledger
+  // 3) Bob pays $5 (100% to app owner) -> creates dmAccessPasses/{bob}_{alice} + credits Alice +1 usable point + UNLOCK_DM ledger
   const passId = `${BOB_UID}_${ALICE_UID}`;
   const payBatch = bobDb.batch();
   payBatch.set(bobDb.collection("dmAccessPasses").doc(passId), {
@@ -1840,8 +1842,8 @@ test("Group chats, DM privacy controls, $10 paid DM ($5/$5 split), and kicking p
     senderName: "Bob",
     recipientId: ALICE_UID,
     recipientName: "Alice",
-    priceCents: 1000,
-    creatorShareCents: 500,
+    priceCents: 500,
+    creatorShareCents: 0,
     platformShareCents: 500,
     active: true,
     kicked: false,
@@ -1849,11 +1851,12 @@ test("Group chats, DM privacy controls, $10 paid DM ($5/$5 split), and kicking p
     updatedAt: pastDate(3500),
   });
   payBatch.update(bobDb.collection("users").doc(BOB_UID), {
-    totalSpentCents: 1000,
+    totalSpentCents: 500,
     updatedAt: pastDate(3500),
   });
   payBatch.update(bobDb.collection("users").doc(ALICE_UID), {
-    creatorEarningsCents: 500,
+    pointsBalance: 1,
+    creatorEarnedPoints: 1,
     updatedAt: pastDate(3500),
   });
   payBatch.set(bobDb.collection("pointTransactions").doc("tx_dm_unlock_1"), {
@@ -1864,8 +1867,8 @@ test("Group chats, DM privacy controls, $10 paid DM ($5/$5 split), and kicking p
     creatorName: "Alice",
     postId: "",
     pointsDelta: 0,
-    grossCents: 1000,
-    creatorShareCents: 500,
+    grossCents: 500,
+    creatorShareCents: 0,
     platformShareCents: 500,
     createdAt: pastDate(3500),
   });
@@ -2133,8 +2136,8 @@ test("Room message emoji reactions, private voice notes, and 18+ locked photo ga
       creatorId: ALICE_UID,
       creatorName: "Alice",
       priceCents: 1500,
-      creatorShareCents: 750,
-      platformShareCents: 750,
+      creatorShareCents: 0,
+      platformShareCents: 1500,
       active: true,
       expiresAtMillis: Date.now() + 30 * 24 * 60 * 60 * 1000,
       createdAt: pastDate(900),
@@ -2871,6 +2874,1304 @@ test("Admin enabling PTT in a private chat automatically enables it for the othe
     })
   );
 });
+
+// 31. FREE MEMBER 2-DISCOVERY-PHOTOS-PER-WEEK LIMIT + PROFILE AGE/SEX VALIDATION
+test("Free members can post at most 2 Discovery photos per week; paid members unlimited; age/sex validated", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const ts = pastDate(5000);
+  const nowMs = Date.now();
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+
+  // Valid age & sex updates succeed on users and userDirectory
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      sex: "FEMALE",
+      age: 26,
+      updatedAt: pastDate(4500),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      bio: "Hello",
+      avatarColorHex: "#1877F2",
+      photoBase64: "",
+      staffTier: "USER",
+      postCount: 0,
+      dmPolicy: "OPEN",
+      sex: "FEMALE",
+      age: 26,
+      online: true,
+      acceptedFriendIds: [],
+      lastActiveAt: pastDate(4500),
+      updatedAt: pastDate(4500),
+    })
+  );
+
+  // Invalid sex or age < 18 denied
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      sex: "INVALID_SEX",
+      updatedAt: pastDate(4400),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      age: 15,
+      updatedAt: pastDate(4300),
+    })
+  );
+
+  // Free member posts 2 Discovery photos (recording discoveryPhotoTimestamps)
+  const batch1 = aliceDb.batch();
+  batch1.set(aliceDb.collection("profilePosts").doc("disc_pic_1"), {
+    authorId: ALICE_UID,
+    authorName: "Alice",
+    authorHandle: "alice_vox",
+    authorColorHex: "#1877F2",
+    authorPhotoBase64: "",
+    authorTier: "USER",
+    text: "First discovery pic",
+    imageBase64: "ZmFrZV9pbWFnZV8x",
+    likedByUserIds: [],
+    createdAt: pastDate(4000),
+    updatedAt: pastDate(4000),
+  });
+  batch1.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pictureUploadTimestamps: [nowMs - 4000],
+    discoveryPhotoTimestamps: [nowMs - 4000],
+    updatedAt: pastDate(4000),
+  });
+  await assertSucceeds(batch1.commit());
+
+  const batch2 = aliceDb.batch();
+  batch2.set(aliceDb.collection("profilePosts").doc("disc_pic_2"), {
+    authorId: ALICE_UID,
+    authorName: "Alice",
+    authorHandle: "alice_vox",
+    authorColorHex: "#1877F2",
+    authorPhotoBase64: "",
+    authorTier: "USER",
+    text: "Second discovery pic",
+    imageBase64: "ZmFrZV9pbWFnZV8y",
+    likedByUserIds: [],
+    createdAt: pastDate(3000),
+    updatedAt: pastDate(3000),
+  });
+  batch2.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pictureUploadTimestamps: [nowMs - 4000, nowMs - 3000],
+    discoveryPhotoTimestamps: [nowMs - 4000, nowMs - 3000],
+    updatedAt: pastDate(3000),
+  });
+  await assertSucceeds(batch2.commit());
+
+  // 3rd Discovery photo within 7 days is DENIED for free member!
+  await assertFails(
+    aliceDb.collection("profilePosts").doc("disc_pic_3").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#1877F2",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Third discovery pic should fail",
+      imageBase64: "ZmFrZV9pbWFnZV8z",
+      likedByUserIds: [],
+      createdAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Free member CANNOT wipe discoveryPhotoTimestamps inside the 7-day window
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      discoveryPhotoTimestamps: [],
+      updatedAt: pastDate(1900),
+    })
+  );
+
+  // Text-only post STILL succeeds for free member even after 2 weekly photos
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("disc_text_only").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#1877F2",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Text-only status update still works!",
+      imageBase64: "",
+      likedByUserIds: [],
+      createdAt: pastDate(1800),
+      updatedAt: pastDate(1800),
+    })
+  );
+
+  // Once Alice becomes a Paid Member (buys points), 3rd Discovery photo SUCCEEDS!
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      pointsBalance: 5,
+      totalSpentCents: 500,
+      updatedAt: pastDate(1500),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("profilePosts").doc("disc_pic_3_paid").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#1877F2",
+      authorPhotoBase64: "",
+      authorTier: "USER",
+      text: "Paid member unlimited photo!",
+      imageBase64: "ZmFrZV9pbWFnZV8z",
+      likedByUserIds: [],
+      createdAt: pastDate(1000),
+      updatedAt: pastDate(1000),
+    })
+  );
+});
+
+// 32. PRIVATE MESSAGE REACTIONS & SCREENSHOT NOTIFICATION
+test("DM participants can toggle their own emoji reaction and send screenshot notices; spoofing others or invalid emojis denied", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext("charlie_999").firestore();
+  const ts = pastDate(5000);
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#1877F2",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Alice sends a normal message and Bob sends a screenshot notice
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_react_1").set({
+      threadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: ALICE_UID,
+      senderName: "Alice",
+      senderTier: "USER",
+      text: "Hey Bob! 👍",
+      messageType: "TEXT",
+      reactionsByUserId: {},
+      createdAt: pastDate(4000),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_ss_1").set({
+      threadId,
+      participantIds: [ALICE_UID, BOB_UID],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Bob took a screenshot of this chat",
+      messageType: "SCREENSHOT",
+      createdAt: pastDate(3500),
+    })
+  );
+
+  // Bob reacts with ❤️ to Alice's message
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_react_1").update({
+      reactionsByUserId: { [BOB_UID]: "❤️" },
+    })
+  );
+
+  // Alice adds her own 👍 reaction while keeping Bob's ❤️
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_react_1").update({
+      reactionsByUserId: { [BOB_UID]: "❤️", [ALICE_UID]: "👍" },
+    })
+  );
+
+  // Bob CANNOT remove or change Alice's reaction, or use an invalid emoji, or edit message text
+  await assertFails(
+    bobDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_react_1").update({
+      reactionsByUserId: { [BOB_UID]: "❤️" },
+    })
+  );
+  await assertFails(
+    bobDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_react_1").update({
+      reactionsByUserId: { [BOB_UID]: "💀", [ALICE_UID]: "👍" },
+    })
+  );
+  await assertFails(
+    bobDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_react_1").update({
+      text: "Tampered",
+    })
+  );
+
+  // Non-participant Charlie CANNOT react
+  await assertFails(
+    charlieDb.collection("directThreads").doc(threadId).collection("messages").doc("dm_react_1").update({
+      reactionsByUserId: { [BOB_UID]: "❤️", [ALICE_UID]: "👍", charlie_999: "🔥" },
+    })
+  );
+});
+
+// 33. LONG-PRESS PRIVATE MESSAGE REPORTING VIA SAFETY REPORTS
+test("DM participants can report a private message to safetyReports; non-participants denied; Support can list reports", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const supportDb = testEnv
+    .authenticatedContext(SUPPORT_UID, { email: SUPPORT_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext("charlie_999").firestore();
+  const ts = pastDate(5000);
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+
+  await assertSucceeds(
+    adminDb.collection("staffRoles").doc(SUPPORT_UID).set({
+      userId: SUPPORT_UID,
+      email: SUPPORT_EMAIL,
+      displayName: "Sam Support",
+      staffTier: "SUPPORT",
+      canEnterInvisible: false,
+      addedByUid: ADMIN_UID,
+      addedByName: "Admin",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#1877F2",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Offensive DM",
+      lastMessageSenderId: BOB_UID,
+      unreadByUserIds: [ALICE_UID],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Participant Alice CAN report a private message in her thread
+  await assertSucceeds(
+    aliceDb.collection("safetyReports").doc("rep_dm_1").set({
+      reporterId: ALICE_UID,
+      reporterName: "Alice",
+      roomId: threadId,
+      roomTitle: "Private Message",
+      roomHostId: ALICE_UID,
+      targetUserId: BOB_UID,
+      targetName: "Bob",
+      category: "HARASSMENT",
+      details: "Reported DM: \"Offensive DM\"",
+      status: "OPEN",
+      resolutionNote: "",
+      createdAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Non-participant Charlie CANNOT file a DM report for Alice & Bob's thread
+  await assertFails(
+    charlieDb.collection("safetyReports").doc("rep_dm_spoof").set({
+      reporterId: "charlie_999",
+      reporterName: "Charlie",
+      roomId: threadId,
+      roomTitle: "Private Message",
+      roomHostId: "charlie_999",
+      targetUserId: BOB_UID,
+      targetName: "Bob",
+      category: "HARASSMENT",
+      details: "Fake report",
+      status: "OPEN",
+      resolutionNote: "",
+      createdAt: pastDate(1500),
+      updatedAt: pastDate(1500),
+    })
+  );
+
+  // Support staff CAN list and review safetyReports
+  await assertSucceeds(supportDb.collection("safetyReports").get());
+});
+
+// 34. ADMIN SENDS USER TO A SUPPORT MEMBER'S PRIVATE CHAT
+test("Admin can create/update a user-to-support private chat, post a SUPPORT_HANDOFF intro, and send a SUPPORT_DM transfer", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const supportDb = testEnv
+    .authenticatedContext(SUPPORT_UID, { email: SUPPORT_EMAIL, email_verified: true })
+    .firestore();
+  const ts = pastDate(5000);
+  const supportThreadId = `${ALICE_UID}_${SUPPORT_UID}`;
+
+  // Admin opens a 1-on-1 private thread between Alice and Support Member
+  await assertSucceeds(
+    adminDb.collection("directThreads").doc(supportThreadId).set({
+      participantIds: [ALICE_UID, SUPPORT_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#1877F2",
+      userATier: "USER",
+      userBId: SUPPORT_UID,
+      userBName: "Sam Support",
+      userBColorHex: "#1565C0",
+      userBTier: "SUPPORT",
+      lastMessageText: "Admin connected you with Sam Support for help.",
+      lastMessageSenderId: ADMIN_UID,
+      unreadByUserIds: [ALICE_UID, SUPPORT_UID],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Admin posts a SUPPORT_HANDOFF system message into that thread
+  await assertSucceeds(
+    adminDb.collection("directThreads").doc(supportThreadId).collection("messages").doc("msg_handoff_1").set({
+      threadId: supportThreadId,
+      participantIds: [ALICE_UID, SUPPORT_UID],
+      senderId: ADMIN_UID,
+      senderName: "VoxStage Admin",
+      senderTier: "ADMIN",
+      text: "Admin connected Alice with Sam Support: Billing help",
+      messageType: "SUPPORT_HANDOFF",
+      createdAt: pastDate(4000),
+    })
+  );
+
+  // Admin sends SUPPORT_DM transfer directive to Alice
+  await assertSucceeds(
+    adminDb.collection("roomTransfers").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      targetRoomId: supportThreadId,
+      targetRoomTitle: "Support Chat: Sam Support",
+      fromRoomId: "",
+      movedByAdminId: ADMIN_UID,
+      movedByAdminName: "VoxStage Admin",
+      reason: "Billing help",
+      transferType: "SUPPORT_DM",
+      targetThreadId: supportThreadId,
+      targetSupportUserId: SUPPORT_UID,
+      targetSupportName: "Sam Support",
+      consumed: false,
+      createdAt: pastDate(3500),
+    })
+  );
+
+  // Alice and Support can both read the handoff message and Alice consumes the transfer
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(supportThreadId).collection("messages").doc("msg_handoff_1").get()
+  );
+  await assertSucceeds(
+    supportDb.collection("directThreads").doc(supportThreadId).collection("messages").doc("msg_handoff_1").get()
+  );
+  await assertSucceeds(
+    aliceDb.collection("roomTransfers").doc(ALICE_UID).update({ consumed: true })
+  );
+
+  // Regular user Alice CANNOT issue a SUPPORT_DM transfer to Bob
+  await assertFails(
+    aliceDb.collection("roomTransfers").doc(BOB_UID).set({
+      userId: BOB_UID,
+      targetRoomId: `${BOB_UID}_${SUPPORT_UID}`,
+      targetRoomTitle: "Support Chat",
+      fromRoomId: "",
+      movedByAdminId: ALICE_UID,
+      movedByAdminName: "Alice",
+      reason: "Fake",
+      transferType: "SUPPORT_DM",
+      targetThreadId: `${BOB_UID}_${SUPPORT_UID}`,
+      targetSupportUserId: SUPPORT_UID,
+      targetSupportName: "Sam Support",
+      consumed: false,
+      createdAt: pastDate(2000),
+    })
+  );
+});
+
+// 35. APPEARANCE STATUS (ONLINE/IDLE/OFFLINE) & MONOTONIC TIME SPENT ON APP
+test("Users can set appearanceStatus (ONLINE/IDLE/OFFLINE) and monotonically increment totalTimeSpentSec; invalid values denied", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const ts = pastDate(5000);
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+
+  // Valid appearanceStatus + monotonic totalTimeSpentSec increment
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      appearanceStatus: "IDLE",
+      totalTimeSpentSec: 120,
+      updatedAt: pastDate(4000),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      appearanceStatus: "OFFLINE",
+      totalTimeSpentSec: 240,
+      updatedAt: pastDate(3000),
+    })
+  );
+
+  // Directory sync with true online=true + appearanceStatus='OFFLINE' + totalTimeSpentSec=240 succeeds
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      bio: "Hello",
+      avatarColorHex: "#1877F2",
+      photoBase64: "",
+      staffTier: "USER",
+      postCount: 0,
+      dmPolicy: "OPEN",
+      online: true,
+      appearanceStatus: "OFFLINE",
+      totalTimeSpentSec: 240,
+      acceptedFriendIds: [],
+      lastActiveAt: pastDate(3000),
+      updatedAt: pastDate(3000),
+    })
+  );
+
+  // Invalid appearanceStatus denied
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      appearanceStatus: "INVISIBLE_FAKE",
+      updatedAt: pastDate(2500),
+    })
+  );
+
+  // Decreasing totalTimeSpentSec or jumping > 86400s in one update denied
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      totalTimeSpentSec: 100,
+      updatedAt: pastDate(2000),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      totalTimeSpentSec: 500000,
+      updatedAt: pastDate(1500),
+    })
+  );
+});
+
+// 36. ADMIN APP-WIDE BROADCAST MESSAGES TO ALL USERS
+test("Admin can broadcast app-wide messages to all users and delete them; non-admins/support denied create/delete; unauthenticated denied read", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const supportDb = testEnv
+    .authenticatedContext(SUPPORT_UID, { email: SUPPORT_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+
+  const broadcastPayload = {
+    title: "Maintenance Window",
+    message: "VoxStage will refresh audio servers tonight at 11 PM UTC.",
+    severity: "INFO",
+    senderId: ADMIN_UID,
+    senderName: "VoxStage Admin",
+    createdAt: pastDate(4000),
+  };
+
+  // Admin can create an app-wide broadcast
+  await assertSucceeds(
+    adminDb.collection("appBroadcasts").doc("bcast_1").set(broadcastPayload)
+  );
+
+  // Regular signed-in user Alice can read and list broadcasts
+  await assertSucceeds(aliceDb.collection("appBroadcasts").doc("bcast_1").get());
+  await assertSucceeds(aliceDb.collection("appBroadcasts").get());
+
+  // Unauthenticated user CANNOT read or list broadcasts
+  await assertFails(unauthDb.collection("appBroadcasts").doc("bcast_1").get());
+  await assertFails(unauthDb.collection("appBroadcasts").get());
+
+  // Regular user and Support Staff CANNOT create broadcasts
+  await assertFails(
+    aliceDb.collection("appBroadcasts").doc("bcast_alice").set({
+      ...broadcastPayload,
+      senderId: ALICE_UID,
+      senderName: "Alice",
+    })
+  );
+  await assertFails(
+    supportDb.collection("appBroadcasts").doc("bcast_support").set({
+      ...broadcastPayload,
+      senderId: SUPPORT_UID,
+      senderName: "Sam Support",
+    })
+  );
+
+  // Updates are immutable (even for Admin)
+  await assertFails(
+    adminDb.collection("appBroadcasts").doc("bcast_1").update({
+      title: "Edited Title",
+    })
+  );
+
+  // Non-admin CANNOT delete broadcasts; Admin CAN delete
+  await assertFails(aliceDb.collection("appBroadcasts").doc("bcast_1").delete());
+  await assertFails(supportDb.collection("appBroadcasts").doc("bcast_1").delete());
+  await assertSucceeds(adminDb.collection("appBroadcasts").doc("bcast_1").delete());
+});
+
+// 37. PINNING & UNPINNING MESSAGES IN PRIVATE CHATS
+test("DM participants can pin and unpin messages; spoofed pinner, non-participants, and blocked threads denied", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieUid = "charlie_999";
+  const charlieDb = testEnv.authenticatedContext(charlieUid).firestore();
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+  const ts = pastDate(5000);
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#1877F2",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#E91E63",
+      userBTier: "USER",
+      lastMessageText: "Meet at 8pm!",
+      lastMessageSenderId: ALICE_UID,
+      unreadByUserIds: [BOB_UID],
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // Alice pins a message
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      pinnedMessageId: "msg_1",
+      pinnedMessageText: "Meet at 8pm!",
+      pinnedMessageSenderName: "Alice",
+      pinnedByUserId: ALICE_UID,
+      pinnedByName: "Alice",
+      pinnedAtMillis: Date.now() - 2000,
+      updatedAt: pastDate(3000),
+    })
+  );
+
+  // Bob (other participant) can unpin the message
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).update({
+      pinnedMessageId: "",
+      pinnedMessageText: "",
+      pinnedMessageSenderName: "",
+      pinnedByUserId: "",
+      pinnedByName: "",
+      pinnedAtMillis: 0,
+      updatedAt: pastDate(2500),
+    })
+  );
+
+  // Spoofed pinnedByUserId is denied
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      pinnedMessageId: "msg_2",
+      pinnedMessageText: "Spoof",
+      pinnedMessageSenderName: "Bob",
+      pinnedByUserId: BOB_UID,
+      pinnedByName: "Bob",
+      pinnedAtMillis: Date.now() - 1000,
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // Non-participant Charlie cannot pin
+  await assertFails(
+    charlieDb.collection("directThreads").doc(threadId).update({
+      pinnedMessageId: "msg_3",
+      pinnedMessageText: "Intrusion",
+      pinnedMessageSenderName: "Charlie",
+      pinnedByUserId: charlieUid,
+      pinnedByName: "Charlie",
+      pinnedAtMillis: Date.now() - 1000,
+      updatedAt: pastDate(1800),
+    })
+  );
+
+  // Blocked thread cannot pin messages
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(threadId).update({
+      blockedByUserIds: [BOB_UID],
+      unreadByUserIds: [],
+      updatedAt: pastDate(1500),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("directThreads").doc(threadId).update({
+      pinnedMessageId: "msg_4",
+      pinnedMessageText: "Blocked pin",
+      pinnedMessageSenderName: "Alice",
+      pinnedByUserId: ALICE_UID,
+      pinnedByName: "Alice",
+      pinnedAtMillis: Date.now() - 1000,
+      updatedAt: pastDate(1000),
+    })
+  );
+});
+
+test("38. Pro Membership ($9.99/mo), Creator Spendable Points, and Reels (Pro-only <=30s, $5 Boost, Likes/Comments/Shares)", async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID, { displayName: "Alice", handle: "alice" }));
+    await db.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID, { displayName: "Bob", handle: "bob" }));
+  });
+
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  // Free user Alice CANNOT spoof proMember in userDirectory before activating Pro
+  await assertFails(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice",
+      avatarColorHex: "#1E6BFF",
+      staffTier: "USER",
+      proMember: true,
+      proExpiresAtMillis: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      updatedAt: pastDate(4000),
+    })
+  );
+
+  // Free user Alice CANNOT upload a Reel
+  await assertFails(
+    aliceDb.collection("reels").doc("reel_free_denied").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice",
+      authorColorHex: "#1E6BFF",
+      authorTier: "USER",
+      caption: "Trying as free user",
+      thumbnailBase64: "AAAA",
+      durationSec: 15,
+      chunkCount: 1,
+      mimeType: "video/mp4",
+      likedByUserIds: [],
+      commentCount: 0,
+      shareCount: 0,
+      createdAt: pastDate(3900),
+      updatedAt: pastDate(3900),
+    })
+  );
+
+  // Alice activates Pro Membership ($9.99/mo = 999 cents) + updates userDirectory + logs PRO_MEMBERSHIP transaction
+  const proExpiry = Date.now() + 30 * 24 * 60 * 60 * 1000;
+  const proBatch = aliceDb.batch();
+  proBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    proMember: true,
+    proExpiresAtMillis: proExpiry,
+    totalSpentCents: 999,
+    updatedAt: pastDate(3800),
+  });
+  proBatch.set(aliceDb.collection("userDirectory").doc(ALICE_UID), {
+    userId: ALICE_UID,
+    displayName: "Alice",
+    handle: "alice",
+    avatarColorHex: "#1E6BFF",
+    staffTier: "USER",
+    proMember: true,
+    proExpiresAtMillis: proExpiry,
+    updatedAt: pastDate(3800),
+  });
+  proBatch.set(aliceDb.collection("pointTransactions").doc("tx_pro_alice"), {
+    type: "PRO_MEMBERSHIP",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "",
+    pointsDelta: 0,
+    grossCents: 999,
+    creatorShareCents: 0,
+    platformShareCents: 999,
+    createdAt: pastDate(3800),
+  });
+  await assertSucceeds(proBatch.commit());
+
+  // Pro user Alice CANNOT upload a Reel longer than 30 seconds
+  await assertFails(
+    aliceDb.collection("reels").doc("reel_too_long").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice",
+      authorColorHex: "#1E6BFF",
+      authorTier: "USER",
+      caption: "Too long",
+      thumbnailBase64: "AAAA",
+      durationSec: 31,
+      chunkCount: 1,
+      mimeType: "video/mp4",
+      likedByUserIds: [],
+      commentCount: 0,
+      shareCount: 0,
+      createdAt: pastDate(3700),
+      updatedAt: pastDate(3700),
+    })
+  );
+
+  // Pro user Alice CAN upload a valid 24-second Reel + video chunk
+  await assertSucceeds(
+    aliceDb.collection("reels").doc("reel_1").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice",
+      authorColorHex: "#1E6BFF",
+      authorTier: "USER",
+      caption: "Sunset vibes",
+      thumbnailBase64: "AAAA",
+      durationSec: 24,
+      chunkCount: 1,
+      mimeType: "video/mp4",
+      likedByUserIds: [],
+      commentCount: 0,
+      shareCount: 0,
+      createdAt: pastDate(3600),
+      updatedAt: pastDate(3600),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("reels").doc("reel_1").collection("chunks").doc("chunk_0").set({
+      reelId: "reel_1",
+      authorId: ALICE_UID,
+      chunkIndex: 0,
+      dataBase64: "QUFBQQ==",
+      createdAt: pastDate(3550),
+    })
+  );
+
+  // Alice CANNOT boost without paying 5 points
+  await assertFails(
+    aliceDb.collection("reels").doc("reel_1").update({
+      boostedAtMillis: Date.now() - 1000,
+      boostedUntilMillis: Date.now() + 86400000,
+      updatedAt: pastDate(3400),
+    })
+  );
+
+  // Alice buys 5 points ($5) then boosts her Reel to top via atomic batch!
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      pointsBalance: 5,
+      totalSpentCents: 1499,
+      updatedAt: pastDate(3300),
+    })
+  );
+  const boostBatch = aliceDb.batch();
+  boostBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 0,
+    updatedAt: pastDate(3200),
+  });
+  boostBatch.update(aliceDb.collection("reels").doc("reel_1"), {
+    boostedAtMillis: Date.now() - 1000,
+    boostedUntilMillis: Date.now() + 86400000,
+    updatedAt: pastDate(3200),
+  });
+  boostBatch.set(aliceDb.collection("pointTransactions").doc("tx_boost_reel_1"), {
+    type: "BOOST_REEL",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "reel_1",
+    pointsDelta: -5,
+    grossCents: 500,
+    creatorShareCents: 0,
+    platformShareCents: 500,
+    createdAt: pastDate(3200),
+  });
+  await assertSucceeds(boostBatch.commit());
+
+  // Bob CAN like, comment on, and share Alice's Reel
+  await assertSucceeds(
+    bobDb.collection("reels").doc("reel_1").update({
+      likedByUserIds: [BOB_UID],
+      updatedAt: pastDate(3000),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("reels").doc("reel_1").collection("comments").doc("c1").set({
+      reelId: "reel_1",
+      authorId: BOB_UID,
+      authorName: "Bob",
+      authorHandle: "bob",
+      authorColorHex: "#10B981",
+      authorTier: "USER",
+      text: "Awesome reel!",
+      createdAt: pastDate(2900),
+      updatedAt: pastDate(2900),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("reels").doc("reel_1").update({
+      commentCount: 1,
+      updatedAt: pastDate(2850),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("reels").doc("reel_1").update({
+      shareCount: 1,
+      updatedAt: pastDate(2800),
+    })
+  );
+});
+
+// 39. PROFILE BOOST (5 PTS) + CUSTOM PTT THEMES & WALKIE CHIRPS SHOP (ANTI-SPOOFING)
+test("Users can spend points to promote their profile to top of Discovery and buy/equip custom PTT themes & walkie chirps; spoofing is denied", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const ts = pastDate(5000);
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID))
+  );
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice",
+      avatarColorHex: "#0088FF",
+      staffTier: "USER",
+      proMember: false,
+      proExpiresAtMillis: 0,
+      profileBoostedUntilMillis: 0,
+      updatedAt: ts,
+    })
+  );
+
+  // Alice CANNOT spoof profileBoostedUntilMillis in userDirectory without paying 5 pts
+  await assertFails(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).update({
+      profileBoostedUntilMillis: Date.now() + 86400000,
+      updatedAt: pastDate(4800),
+    })
+  );
+
+  // Alice CANNOT equip an unowned PTT theme or chirp for free
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      selectedPttTheme: "NEON_MAGENTA",
+      updatedAt: pastDate(4700),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      selectedPttChirp: "ROGER_BEEP",
+      updatedAt: pastDate(4650),
+    })
+  );
+
+  // Alice buys 10 points ($10)
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      pointsBalance: 10,
+      totalSpentCents: 1000,
+      updatedAt: pastDate(4500),
+    })
+  );
+
+  // Alice spends 5 points to promote her profile for 24h (atomic batch updating users + userDirectory + BOOST_PROFILE tx)
+  const boostUntil = Date.now() + 86400000;
+  const profileBoostBatch = aliceDb.batch();
+  profileBoostBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 5,
+    profileBoostedUntilMillis: boostUntil,
+    updatedAt: pastDate(4200),
+  });
+  profileBoostBatch.update(aliceDb.collection("userDirectory").doc(ALICE_UID), {
+    profileBoostedUntilMillis: boostUntil,
+    updatedAt: pastDate(4200),
+  });
+  profileBoostBatch.set(aliceDb.collection("pointTransactions").doc("tx_boost_profile_1"), {
+    type: "BOOST_PROFILE",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "",
+    pointsDelta: -5,
+    grossCents: 500,
+    creatorShareCents: 0,
+    platformShareCents: 500,
+    createdAt: pastDate(4200),
+  });
+  await assertSucceeds(profileBoostBatch.commit());
+
+  // Alice buys Neon Magenta PTT Theme (2 pts) and auto-equips it
+  const buyThemeBatch = aliceDb.batch();
+  buyThemeBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 3,
+    ownedPttThemes: ["NEON_MAGENTA"],
+    selectedPttTheme: "NEON_MAGENTA",
+    updatedAt: pastDate(4000),
+  });
+  buyThemeBatch.set(aliceDb.collection("pointTransactions").doc("tx_ptt_theme_1"), {
+    type: "BUY_PTT_ITEM",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "THEME_NEON_MAGENTA",
+    pointsDelta: -2,
+    grossCents: 200,
+    creatorShareCents: 0,
+    platformShareCents: 200,
+    createdAt: pastDate(4000),
+  });
+  await assertSucceeds(buyThemeBatch.commit());
+
+  // Alice buys Roger Beep Walkie Chirp (2 pts) and auto-equips it
+  const buyChirpBatch = aliceDb.batch();
+  buyChirpBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 1,
+    ownedPttChirps: ["ROGER_BEEP"],
+    selectedPttChirp: "ROGER_BEEP",
+    updatedAt: pastDate(3800),
+  });
+  buyChirpBatch.set(aliceDb.collection("pointTransactions").doc("tx_ptt_chirp_1"), {
+    type: "BUY_PTT_ITEM",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "CHIRP_ROGER_BEEP",
+    pointsDelta: -2,
+    grossCents: 200,
+    creatorShareCents: 0,
+    platformShareCents: 200,
+    createdAt: pastDate(3800),
+  });
+  await assertSucceeds(buyChirpBatch.commit());
+
+  // Alice CAN freely switch between CLASSIC and owned NEON_MAGENTA without spending points
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      selectedPttTheme: "CLASSIC",
+      selectedPttChirp: "STANDARD",
+      updatedAt: pastDate(3600),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      selectedPttTheme: "NEON_MAGENTA",
+      selectedPttChirp: "ROGER_BEEP",
+      updatedAt: pastDate(3500),
+    })
+  );
+});
+
+// 40. SPOTLIGHT FRAME (5 PTS / 24H), FREE 7-DAY LOGIN STREAK (+0.5 PT), INVITE-A-FRIEND (+2 PTS EACH) & MUTUAL DM TALK STREAKS
+test("24-Hour Spotlight Frame, Free-User 7-Day Login Streak (+0.5 pt), Invite-a-Friend (+2 pts each), and Mutual DM Talk Streaks", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
+  const unverifiedUid = "user_unverified_ref";
+  const unverifiedDb = testEnv.authenticatedContext(unverifiedUid, { email: "unv@example.com", email_verified: false }).firestore();
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      referralCode: "VOX-ALICE1",
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      bio: "",
+      avatarColorHex: "#0088FF",
+      photoBase64: "",
+      staffTier: "USER",
+      referralCode: "VOX-ALICE1",
+      postCount: 0,
+      dmPolicy: "OPEN",
+      online: true,
+      updatedAt: pastDate(6000),
+    })
+  );
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+  await assertSucceeds(
+    bobDb.collection("userDirectory").doc(BOB_UID).set({
+      userId: BOB_UID,
+      displayName: "Bob",
+      handle: "bob_vox",
+      bio: "",
+      avatarColorHex: "#0088FF",
+      photoBase64: "",
+      staffTier: "USER",
+      postCount: 0,
+      dmPolicy: "OPEN",
+      online: true,
+      updatedAt: pastDate(6000),
+    })
+  );
+
+  // 1) Spotlight Frame anti-spoof: Alice cannot claim spotlightFrameUntilMillis on directory without buying it
+  await assertFails(
+    aliceDb.collection("userDirectory").doc(ALICE_UID).update({
+      spotlightFrameUntilMillis: Date.now() + 86400000,
+      spotlightFrameColorHex: "#00F5FF",
+      updatedAt: pastDate(5800),
+    })
+  );
+
+  // Alice buys 10 pts, then spends 5 pts on 24-Hour Glowing Neon Spotlight Frame
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      pointsBalance: 10,
+      totalSpentCents: 1000,
+      updatedAt: pastDate(5600),
+    })
+  );
+  const frameUntil = Date.now() + 86400000;
+  const frameBatch = aliceDb.batch();
+  frameBatch.update(aliceDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 5,
+    spotlightFrameUntilMillis: frameUntil,
+    spotlightFrameColorHex: "#FF2E93",
+    updatedAt: pastDate(5400),
+  });
+  frameBatch.update(aliceDb.collection("userDirectory").doc(ALICE_UID), {
+    spotlightFrameUntilMillis: frameUntil,
+    spotlightFrameColorHex: "#FF2E93",
+    updatedAt: pastDate(5400),
+  });
+  frameBatch.set(aliceDb.collection("pointTransactions").doc("tx_spotlight_1"), {
+    type: "BUY_SPOTLIGHT_FRAME",
+    buyerId: ALICE_UID,
+    buyerName: "Alice",
+    creatorId: "",
+    creatorName: "",
+    postId: "",
+    pointsDelta: -5,
+    grossCents: 500,
+    creatorShareCents: 0,
+    platformShareCents: 500,
+    createdAt: pastDate(5400),
+  });
+  await assertSucceeds(frameBatch.commit());
+
+  // 2) Free-user Daily Login Streak (+0.5 pt after 7-day streak; two 7-day streaks merge to +1 full pt)
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc(BOB_UID).update({
+      loginStreakDays: 6,
+      lastLoginDayKey: "2026-11-23",
+    });
+  });
+  // Cannot claim reward on same day
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).update({
+      loginStreakDays: 7,
+      lastLoginDayKey: "2026-11-23",
+      lastStreakRewardDayKey: "2026-11-23",
+      halfPointsBalance: 1,
+      updatedAt: pastDate(5000),
+    })
+  );
+  // Day 7 free-user login awards +0.5 pt (halfPointsBalance = 1)
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).update({
+      loginStreakDays: 7,
+      lastLoginDayKey: "2026-11-24",
+      lastStreakRewardDayKey: "2026-11-24",
+      halfPointsBalance: 1,
+      updatedAt: pastDate(4900),
+    })
+  );
+  // Second 7-day streak (Day 13 -> Day 14) merges halfPointsBalance 1 -> 0 and credits +1 full point
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc(BOB_UID).update({
+      loginStreakDays: 13,
+      lastLoginDayKey: "2026-11-30",
+    });
+  });
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).update({
+      loginStreakDays: 14,
+      lastLoginDayKey: "2026-12-01",
+      lastStreakRewardDayKey: "2026-12-01",
+      halfPointsBalance: 0,
+      pointsBalance: 1,
+      updatedAt: pastDate(4800),
+    })
+  );
+
+  // 3) Invite-a-Friend Point Bonus (+2 pts each after verified account + first PTT clip)
+  // Self-referral denied
+  await assertFails(
+    aliceDb.collection("referrals").doc(ALICE_UID).set({
+      inviteeId: ALICE_UID,
+      inviteeName: "Alice",
+      inviterId: ALICE_UID,
+      inviterName: "Alice",
+      referralCode: "VOX-ALICE1",
+      accountVerified: true,
+      firstPttSent: false,
+      bonusClaimed: false,
+      bonusPointsEach: 2,
+      createdAt: pastDate(4700),
+      updatedAt: pastDate(4700),
+    })
+  );
+  // Unverified user cannot claim referral bonus even if linked
+  await assertSucceeds(unverifiedDb.collection("users").doc(unverifiedUid).set(validProfilePayload(unverifiedUid)));
+  await assertSucceeds(
+    unverifiedDb.collection("referrals").doc(unverifiedUid).set({
+      inviteeId: unverifiedUid,
+      inviteeName: "Unverified",
+      inviterId: ALICE_UID,
+      inviterName: "Alice",
+      referralCode: "VOX-ALICE1",
+      accountVerified: false,
+      firstPttSent: false,
+      bonusClaimed: false,
+      bonusPointsEach: 2,
+      createdAt: pastDate(4650),
+      updatedAt: pastDate(4650),
+    })
+  );
+  await assertFails(
+    unverifiedDb.collection("referrals").doc(unverifiedUid).update({
+      accountVerified: true,
+      firstPttSent: true,
+      bonusClaimed: true,
+      updatedAt: pastDate(4600),
+    })
+  );
+
+  // Verified Bob links Alice's invite code, then completes verification + first PTT clip -> +2 pts each!
+  await assertSucceeds(
+    bobDb.collection("referrals").doc(BOB_UID).set({
+      inviteeId: BOB_UID,
+      inviteeName: "Bob",
+      inviterId: ALICE_UID,
+      inviterName: "Alice",
+      referralCode: "VOX-ALICE1",
+      accountVerified: true,
+      firstPttSent: false,
+      bonusClaimed: false,
+      bonusPointsEach: 2,
+      createdAt: pastDate(4500),
+      updatedAt: pastDate(4500),
+    })
+  );
+  const referralBatch = bobDb.batch();
+  referralBatch.update(bobDb.collection("referrals").doc(BOB_UID), {
+    accountVerified: true,
+    firstPttSent: true,
+    bonusClaimed: true,
+    updatedAt: pastDate(4400),
+  });
+  referralBatch.update(bobDb.collection("users").doc(BOB_UID), {
+    pointsBalance: 3,
+    referralBonusClaimed: true,
+    referredByUserId: ALICE_UID,
+    updatedAt: pastDate(4400),
+  });
+  referralBatch.update(bobDb.collection("users").doc(ALICE_UID), {
+    pointsBalance: 7,
+    referralEarnedPoints: 2,
+    updatedAt: pastDate(4400),
+  });
+  referralBatch.set(bobDb.collection("pointTransactions").doc("tx_ref_bonus_1"), {
+    type: "REFERRAL_BONUS",
+    buyerId: BOB_UID,
+    buyerName: "Bob",
+    creatorId: ALICE_UID,
+    creatorName: "Alice",
+    postId: "",
+    pointsDelta: 2,
+    grossCents: 0,
+    creatorShareCents: 0,
+    platformShareCents: 0,
+    createdAt: pastDate(4400),
+  });
+  await assertSucceeds(referralBatch.commit());
+
+  // Cannot re-claim already claimed referral bonus
+  await assertFails(
+    bobDb.collection("referrals").doc(BOB_UID).update({
+      bonusClaimed: true,
+      updatedAt: pastDate(4300),
+    })
+  );
+
+  // 4) Mutual Talk Streaks in 1-on-1 DM Threads
+  const streakThreadId = `${ALICE_UID}_${BOB_UID}`;
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(streakThreadId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      isGroup: false,
+      groupName: "",
+      participantNamesById: { [ALICE_UID]: "Alice", [BOB_UID]: "Bob" },
+      kickedUserIds: [],
+      blockedByUserIds: [],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Hey!",
+      lastMessageSenderId: ALICE_UID,
+      unreadByUserIds: [BOB_UID],
+      talkStreakCount: 2,
+      talkStreakLastMutualDay: "2026-11-23",
+      lastMessageDayByUserId: { [ALICE_UID]: "2026-11-24" },
+      createdAt: pastDate(4200),
+      updatedAt: pastDate(4200),
+    })
+  );
+  // Bob responds on 2026-11-24 -> mutual talk streak advances to 3!
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(streakThreadId).update({
+      talkStreakCount: 3,
+      talkStreakLastMutualDay: "2026-11-24",
+      lastMessageDayByUserId: { [ALICE_UID]: "2026-11-24", [BOB_UID]: "2026-11-24" },
+      updatedAt: pastDate(4100),
+    })
+  );
+});
+
+
+
+
 
 
 

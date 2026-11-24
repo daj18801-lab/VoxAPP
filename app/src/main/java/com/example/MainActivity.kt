@@ -22,11 +22,13 @@ import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -44,6 +46,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -80,8 +83,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.ui.text.font.FontWeight
 import com.example.auth.AuthScreen
 import com.example.auth.TrialSession
 import com.example.auth.TrialSessionManager
@@ -89,6 +96,7 @@ import com.example.auth.authStateFlow
 import com.example.auth.signOutFromVoxStage
 import com.example.billing.PlayBillingEvent
 import com.example.billing.PlayBillingManager
+import com.example.data.AlertSeverity
 import com.example.data.AppConfig
 import com.example.data.DirectThread
 import com.example.data.UiState
@@ -101,18 +109,25 @@ import com.example.ui.screens.FriendsScreen
 import com.example.ui.screens.IncomingAlertModalDialog
 import com.example.ui.screens.LobbyScreen
 import com.example.ui.screens.ProfileScreen
+import com.example.ui.screens.ReelsScreen
 import com.example.ui.screens.RoomScreen
 import com.example.ui.screens.SafetyScreen
 import com.example.ui.screens.TrialVoxStageApp
 import com.example.ui.components.AgeVerificationDialog
 import com.example.ui.components.FloatingPttOverlayBubble
+import com.example.ui.components.LocalProUserIds
+import com.example.ui.components.LocalSpotlightFrameByUserId
 import com.example.ui.components.TopSnackbarOverlay
+import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.showTopMessage
 import com.example.ui.screens.UserProfileScreen
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.VoxStageTheme
 import com.example.media.LivePttSessionManager
 import com.example.notifications.DirectMessageNotificationHelper
+import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
 import com.example.viewmodel.DirectChatViewModel
 import com.example.viewmodel.MainViewModel
@@ -127,6 +142,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 const val ROUTE_CHATS = "chats"
+const val ROUTE_REELS = "reels"
 const val ROUTE_DISCOVER_USERS = "discover_users"
 const val ROUTE_FRIENDS = "friends"
 const val ROUTE_DISCOVER = "discover"
@@ -146,6 +162,7 @@ private data class TopDestination(
 
 private val topDestinations = listOf(
     TopDestination(ROUTE_CHATS, "Chats", Icons.Rounded.ChatBubble, Icons.Outlined.ChatBubbleOutline, "nav_chats"),
+    TopDestination(ROUTE_REELS, "Reels", Icons.Rounded.VideoLibrary, Icons.Outlined.VideoLibrary, "nav_reels"),
     TopDestination(ROUTE_DISCOVER_USERS, "Discover", Icons.Rounded.Explore, Icons.Outlined.Explore, "nav_discover_users"),
     TopDestination(ROUTE_DISCOVER, "Rooms", Icons.Rounded.GraphicEq, Icons.Outlined.GraphicEq, "nav_discover"),
     TopDestination(ROUTE_SAFETY, "Safety", Icons.Rounded.Shield, Icons.Outlined.Shield, "nav_safety"),
@@ -371,11 +388,17 @@ private fun AuthenticatedVoxStageApp(
     val myFollowers by mainViewModel.myFollowersState.collectAsStateWithLifecycle()
     val myFollowing by mainViewModel.myFollowingState.collectAsStateWithLifecycle()
     val appConfig by mainViewModel.appConfigState.collectAsStateWithLifecycle()
+    val appBroadcasts by mainViewModel.appBroadcastsState.collectAsStateWithLifecycle()
+    val followerCountsByUserId by mainViewModel.followerCountsByUserId.collectAsStateWithLifecycle()
     val pendingRoomTransfer by mainViewModel.pendingRoomTransferState.collectAsStateWithLifecycle()
     val searchQuery by mainViewModel.searchQuery.collectAsStateWithLifecycle()
     val selectedCategory by mainViewModel.selectedCategory.collectAsStateWithLifecycle()
     val showOnlyMyRooms by mainViewModel.showOnlyMyRooms.collectAsStateWithLifecycle()
     val isCreatingRoom by mainViewModel.isCreatingRoom.collectAsStateWithLifecycle()
+    val reelsState by mainViewModel.reelsState.collectAsStateWithLifecycle()
+    val isUploadingReel by mainViewModel.isUploadingReel.collectAsStateWithLifecycle()
+    val incomingReferral by mainViewModel.incomingReferralState.collectAsStateWithLifecycle()
+    val invitedReferrals by mainViewModel.invitedReferralsState.collectAsStateWithLifecycle()
 
     // Google Play Store Billing client for buying points
     val playBillingManager = remember(context) { PlayBillingManager(context) }
@@ -405,6 +428,12 @@ private fun AuthenticatedVoxStageApp(
         mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context))
     }
     var dismissedInAppFloatingPttThreadId by remember { mutableStateOf<String?>(null) }
+    var dismissedBroadcastIds by remember(currentUserId) {
+        mutableStateOf(DirectMessageNotificationPrefs.getDismissedBroadcastIds(context, currentUserId))
+    }
+    val nextUnreadAppBroadcast = remember(appBroadcasts, dismissedBroadcastIds) {
+        appBroadcasts.firstOrNull { it.id.isNotBlank() && it.id !in dismissedBroadcastIds }
+    }
     val appLifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(appLifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
@@ -441,6 +470,34 @@ private fun AuthenticatedVoxStageApp(
     val directoryPhotoByUid = remember(directoryEntries) {
         directoryEntries.associate { it.userId to it.photoBase64 }
     }
+    val proUserIds = remember(directoryEntries, userProfile?.proMember, userProfile?.proExpiresAtMillis, currentUserId) {
+        buildSet {
+            directoryEntries.forEach { entry ->
+                if (entry.isProActive()) add(entry.userId)
+            }
+            if (userProfile?.isProSubscriberOnly() == true) {
+                add(currentUserId)
+            }
+        }
+    }
+    val activeSpotlightFramesByUserId = remember(
+        directoryEntries,
+        userProfile?.spotlightFrameUntilMillis,
+        userProfile?.spotlightFrameColorHex,
+        currentUserId
+    ) {
+        val nowMs = System.currentTimeMillis()
+        buildMap {
+            directoryEntries.forEach { entry ->
+                entry.activeSpotlightColorHex(nowMs)?.let { hex ->
+                    put(entry.userId, hex)
+                }
+            }
+            userProfile?.activeSpotlightColorHex(nowMs)?.let { myHex ->
+                put(currentUserId, myHex)
+            }
+        }
+    }
 
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -448,6 +505,7 @@ private fun AuthenticatedVoxStageApp(
     val currentRoute = backStackEntry?.destination?.route
     val showTopNav = currentRoute in listOf(
         ROUTE_CHATS,
+        ROUTE_REELS,
         ROUTE_DISCOVER_USERS,
         ROUTE_FRIENDS,
         ROUTE_DISCOVER,
@@ -511,20 +569,49 @@ private fun AuthenticatedVoxStageApp(
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
+    val foregroundSessionStartMs = remember(currentUserId) {
+        java.util.concurrent.atomic.AtomicLong(0L)
+    }
+
+    fun flushForegroundAppTime(keepRunning: Boolean) {
+        val start = foregroundSessionStartMs.get()
+        if (start <= 0L) return
+        val now = System.currentTimeMillis()
+        val elapsedSec = ((now - start) / 1_000L).coerceAtLeast(0L)
+        if (elapsedSec >= 5L) {
+            foregroundSessionStartMs.set(if (keepRunning) now else 0L)
+            mainViewModel.recordAppTimeSpent(elapsedSec)
+        } else if (!keepRunning) {
+            foregroundSessionStartMs.set(0L)
+        }
+    }
+
     DisposableEffect(lifecycleOwner, currentUserId) {
         if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
             mainViewModel.setOnlinePresence(true)
         }
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            foregroundSessionStartMs.compareAndSet(0L, System.currentTimeMillis())
+        }
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> mainViewModel.setOnlinePresence(true)
-                Lifecycle.Event.ON_STOP -> mainViewModel.setOnlinePresence(false)
+                Lifecycle.Event.ON_START -> mainViewModel.setOnlinePresence(true)
+                Lifecycle.Event.ON_RESUME -> {
+                    mainViewModel.setOnlinePresence(true)
+                    foregroundSessionStartMs.compareAndSet(0L, System.currentTimeMillis())
+                }
+                Lifecycle.Event.ON_PAUSE -> flushForegroundAppTime(keepRunning = false)
+                Lifecycle.Event.ON_STOP -> {
+                    flushForegroundAppTime(keepRunning = false)
+                    mainViewModel.setOnlinePresence(false)
+                }
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            flushForegroundAppTime(keepRunning = false)
             mainViewModel.setOnlinePresence(false)
         }
     }
@@ -534,6 +621,9 @@ private fun AuthenticatedVoxStageApp(
             delay(60_000L)
             if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                 mainViewModel.setOnlinePresence(true)
+            }
+            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                flushForegroundAppTime(keepRunning = true)
             }
         }
     }
@@ -570,19 +660,47 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
+    // Keep Live PTT clip duration synchronized with Free (5s) vs Pro/Staff (60s)
+    LaunchedEffect(userProfile?.proMember, userProfile?.proExpiresAtMillis, staffCapabilities.tier) {
+        val maxSec = (userProfile ?: UserProfile()).pttMaxDurationSeconds(staffCapabilities.tier)
+        LivePttSessionManager.setMaxDurationSeconds(maxSec)
+    }
+
+    // Keep Live PTT floating button theme & walkie chirp audio synchronized with equipped user items
+    LaunchedEffect(userProfile?.selectedPttTheme, userProfile?.selectedPttChirp) {
+        val profile = userProfile ?: UserProfile()
+        LivePttSessionManager.setPttCustomization(
+            theme = profile.selectedPttThemeEnum(),
+            chirp = profile.selectedPttChirpEnum()
+        )
+    }
+
+    LaunchedEffect(Unit) {
+        LivePttSessionManager.limitReachedEvents.collect { msg ->
+            snackbarHostState.showTopMessage(msg)
+        }
+    }
+
     LaunchedEffect(Unit) {
         mainViewModel.snackbarEvents.collect { msg ->
             snackbarHostState.showTopMessage(msg)
         }
     }
 
-    // Credit points in Firestore ONLY after Google Play Store verifies & consumes the purchase
+    // Credit points or Pro membership in Firestore ONLY after Google Play Store verifies purchase
     LaunchedEffect(playBillingManager) {
         playBillingManager.events.collect { event ->
             when (event) {
                 is PlayBillingEvent.PurchaseVerifiedAndConsumed -> {
                     mainViewModel.buyPoints(
                         pointsToBuy = event.points,
+                        playOrderId = event.orderId,
+                        playProductId = event.productId
+                    )
+                }
+                is PlayBillingEvent.ProSubscriptionVerified -> {
+                    mainViewModel.activateProMembership(
+                        paidWithPoints = false,
                         playOrderId = event.orderId,
                         playProductId = event.productId
                     )
@@ -594,12 +712,26 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
-    // Automatically navigate user when an Admin sends them to a different room
-    LaunchedEffect(pendingRoomTransfer?.targetRoomId, pendingRoomTransfer?.createdAt) {
+    // Automatically navigate user when an Admin sends them to a room or a Support member's private chat
+    LaunchedEffect(
+        pendingRoomTransfer?.transferType,
+        pendingRoomTransfer?.targetRoomId,
+        pendingRoomTransfer?.targetThreadId,
+        pendingRoomTransfer?.createdAt
+    ) {
         val transfer = pendingRoomTransfer ?: return@LaunchedEffect
-        if (transfer.targetRoomId.isNotBlank()) {
+        val note = if (transfer.reason.isNotBlank()) " (${transfer.reason})" else ""
+        if (transfer.isSupportDmTransfer() && transfer.targetThreadId.isNotBlank()) {
             mainViewModel.consumeRoomTransfer()
-            val note = if (transfer.reason.isNotBlank()) " (${transfer.reason})" else ""
+            val supportLabel = transfer.targetSupportName.ifBlank { "Support" }
+            snackbarHostState.showTopMessage(
+                "${transfer.movedByAdminName} connected you with $supportLabel for support chat$note"
+            )
+            navController.navigate("dm/${transfer.targetThreadId}") {
+                launchSingleTop = true
+            }
+        } else if (transfer.targetRoomId.isNotBlank()) {
+            mainViewModel.consumeRoomTransfer()
             snackbarHostState.showTopMessage(
                 "${transfer.movedByAdminName} moved you to \"${transfer.targetRoomTitle}\"$note"
             )
@@ -624,6 +756,10 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
+    CompositionLocalProvider(
+        LocalProUserIds provides proUserIds,
+        LocalSpotlightFrameByUserId provides activeSpotlightFramesByUserId
+    ) {
     VoxStageTheme(darkTheme = nightModeEnabled) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val useRail = maxWidth >= 600.dp
@@ -676,7 +812,14 @@ private fun AuthenticatedVoxStageApp(
                                             )
                                         }
                                     },
-                                    label = { Text(dest.label) },
+                                    label = {
+                                        Text(
+                                            text = dest.label,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    },
                                     modifier = Modifier.testTag(dest.testTag)
                                 )
                             }
@@ -775,6 +918,46 @@ private fun AuthenticatedVoxStageApp(
                                 )
                             }
 
+                            composable(ROUTE_REELS) {
+                                val effectiveProfile = userProfile ?: UserProfile(
+                                    userId = currentUserId,
+                                    displayName = initialDisplayName.ifBlank { "Studio Host" },
+                                    handle = "studio"
+                                )
+                                ReelsScreen(
+                                    reelsState = reelsState,
+                                    currentUserId = currentUserId,
+                                    myProfile = effectiveProfile,
+                                    staffCapabilities = staffCapabilities,
+                                    isUploadingReel = isUploadingReel,
+                                    onUploadReel = { prepared, caption, boostToTop, onUploaded ->
+                                        mainViewModel.uploadReel(
+                                            preparedVideo = prepared,
+                                            caption = caption,
+                                            boostToTop = boostToTop,
+                                            onUploaded = onUploaded
+                                        )
+                                    },
+                                    onLoadReelChunks = mainViewModel::loadReelChunks,
+                                    onToggleLikeReel = mainViewModel::toggleLikeReel,
+                                    onBoostReel = { reel ->
+                                        mainViewModel.boostReelToTop(reel) {
+                                            openProfileBuyPoints()
+                                        }
+                                    },
+                                    onDeleteReel = mainViewModel::deleteReel,
+                                    onObserveReelComments = mainViewModel::observeReelComments,
+                                    onAddReelComment = mainViewModel::addReelComment,
+                                    onDeleteReelComment = mainViewModel::deleteReelComment,
+                                    onIncrementReelShareCount = mainViewModel::incrementReelShareCount,
+                                    onOpenUserProfile = ::openUserProfile,
+                                    onOpenUpgradeToPro = ::openProfileBuyPoints,
+                                    onShowMessage = { msg ->
+                                        scope.launch { snackbarHostState.showTopMessage(msg) }
+                                    }
+                                )
+                            }
+
                             composable(ROUTE_DISCOVER_USERS) {
                                 DiscoverUsersScreen(
                                     currentUserId = currentUserId,
@@ -817,7 +1000,11 @@ private fun AuthenticatedVoxStageApp(
                                     supportTickets = supportTickets,
                                     onCreateSupportTicket = mainViewModel::createSupportTicket,
                                     onRespondToSupportTicket = mainViewModel::respondToSupportTicket,
-                                    onCloseSupportTicket = mainViewModel::closeMySupportTicket
+                                    onCloseSupportTicket = mainViewModel::closeMySupportTicket,
+                                    myUserProfile = userProfile,
+                                    isPublishingPost = isPublishingPost,
+                                    onCreateDiscoveryPhotoPost = mainViewModel::createProfilePost,
+                                    followerCountsByUserId = followerCountsByUserId
                                 )
                             }
 
@@ -826,6 +1013,7 @@ private fun AuthenticatedVoxStageApp(
                                     currentUserId = currentUserId,
                                     friendships = friendships,
                                     directoryEntries = directoryEntries,
+                                    viewerIsStaff = staffCapabilities.isStaff,
                                     onSendFriendRequest = mainViewModel::sendFriendRequest,
                                     onAcceptFriendRequest = mainViewModel::acceptFriendRequest,
                                     onRemoveOrDeclineFriendship = mainViewModel::removeOrDeclineFriendship,
@@ -912,7 +1100,19 @@ private fun AuthenticatedVoxStageApp(
                                     onAdminEditAlert = mainViewModel::adminEditAlert,
                                     onAdminDeleteAlert = mainViewModel::adminDeleteAlert,
                                     onUpdateAppConfig = mainViewModel::updateAppConfig,
-                                    onSendUserToRoom = mainViewModel::sendUserToRoom
+                                    onSendUserToRoom = mainViewModel::sendUserToRoom,
+                                    directoryEntries = directoryEntries,
+                                    onSendUserToSupportChat = { target, support, reason, onSent ->
+                                        mainViewModel.sendUserToSupportChat(
+                                            targetUser = target,
+                                            supportMember = support,
+                                            reason = reason,
+                                            onSent = onSent
+                                        )
+                                    },
+                                    appBroadcasts = appBroadcasts,
+                                    onSendAppBroadcast = mainViewModel::sendAppBroadcastToAllUsers,
+                                    onDeleteAppBroadcast = mainViewModel::deleteAppBroadcast
                                 )
                             }
 
@@ -955,14 +1155,37 @@ private fun AuthenticatedVoxStageApp(
                                             }
                                         }
                                     },
+                                    onUpgradeToProPlay = {
+                                        val hostActivity = context as? Activity
+                                        if (hostActivity != null) {
+                                            playBillingManager.launchProSubscription(hostActivity)
+                                        } else {
+                                            scope.launch {
+                                                snackbarHostState.showTopMessage("Unable to open Google Play Pro checkout.")
+                                            }
+                                        }
+                                    },
+                                    onActivateProWithPoints = {
+                                        mainViewModel.activateProMembership(paidWithPoints = true)
+                                    },
+                                    onBoostMyProfile = mainViewModel::boostMyProfile,
+                                    onSelectOrBuyPttTheme = mainViewModel::purchaseOrSelectPttTheme,
+                                    onSelectOrBuyPttChirp = mainViewModel::purchaseOrSelectPttChirp,
+                                    onBuySpotlightFrame = mainViewModel::buySpotlightFrame,
+                                    incomingReferral = incomingReferral,
+                                    invitedReferrals = invitedReferrals,
+                                    userEmailVerified = initialEmailVerified,
+                                    onRedeemReferralCode = mainViewModel::redeemReferralCode,
                                     playBillingManager = playBillingManager,
                                     onSetDmPolicy = mainViewModel::setDmPolicy,
                                     onKickPaidDmMember = mainViewModel::kickPaidDmMember,
                                     onRequestAgeVerification = { showAgeVerificationDialog = true },
                                     onSaveProfile = mainViewModel::updateProfile,
                                     onSaveBio = mainViewModel::updateBio,
+                                    onChangeAppearanceStatus = mainViewModel::setAppearanceStatus,
                                     onSignOut = {
                                         scope.launch {
+                                            flushForegroundAppTime(keepRunning = false)
                                             mainViewModel.setOnlinePresenceNow(false)
                                             signOutFromVoxStage(
                                                 credentialManager = credentialManager,
@@ -1032,7 +1255,18 @@ private fun AuthenticatedVoxStageApp(
                                     onSharePostToFeed = mainViewModel::shareProfilePostToFeed,
                                     onExternalSharePost = mainViewModel::recordExternalPostShare,
                                     onSubscribeCreator = mainViewModel::subscribeToCreator,
-                                    onOpenBuyPoints = ::openProfileBuyPoints
+                                    onOpenBuyPoints = ::openProfileBuyPoints,
+                                    supportStaffMembers = remember(directoryEntries) {
+                                        directoryEntries.filter { it.tierEnum().isStaff() }
+                                    },
+                                    onAdminSendToSupportChat = { target, support, reason, onSent ->
+                                        mainViewModel.sendUserToSupportChat(
+                                            targetUser = target,
+                                            supportMember = support,
+                                            reason = reason,
+                                            onSent = onSent
+                                        )
+                                    }
                                 )
                             }
 
@@ -1174,6 +1408,7 @@ private fun AuthenticatedVoxStageApp(
                         LivePttSessionManager.setTransmitting(context, false)
                         dismissedInAppFloatingPttThreadId = activePttTid
                     },
+                    pttTheme = userProfile?.selectedPttThemeEnum() ?: com.example.data.PttThemeStyle.CLASSIC,
                     modifier = Modifier.align(Alignment.BottomEnd)
                 )
             }
@@ -1186,14 +1421,92 @@ private fun AuthenticatedVoxStageApp(
                 )
             }
 
-            // Global $10 Paid Private Message Unlock Prompt ($5 user / $5 app owner)
+            // Global real-time Admin App-Wide Broadcast Message to All Users
+            if (unreadAlerts.isEmpty()) {
+                nextUnreadAppBroadcast?.let { broadcast ->
+                    val severityColor = when (broadcast.severityEnum()) {
+                        AlertSeverity.URGENT -> LiveCoral
+                        AlertSeverity.WARNING -> ModAmber
+                        AlertSeverity.INFO -> MaterialTheme.colorScheme.primary
+                    }
+                    AlertDialog(
+                        onDismissRequest = {
+                            DirectMessageNotificationPrefs.markBroadcastDismissed(context, currentUserId, broadcast.id)
+                            dismissedBroadcastIds = dismissedBroadcastIds + broadcast.id
+                        },
+                        title = {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = severityColor.copy(alpha = 0.16f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Campaign,
+                                            contentDescription = "App announcement",
+                                            tint = severityColor
+                                        )
+                                        Text(
+                                            text = "APP ANNOUNCEMENT · ${broadcast.severityEnum().name}",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                            color = severityColor
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = broadcast.title,
+                                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                                )
+                            }
+                        },
+                        text = {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.testTag("app_broadcast_modal_dialog")
+                            ) {
+                                Text(
+                                    text = broadcast.message,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "From ${broadcast.senderName} (App Admin) · ${formatTimestampShort(broadcast.createdAt)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    DirectMessageNotificationPrefs.markBroadcastDismissed(context, currentUserId, broadcast.id)
+                                    dismissedBroadcastIds = dismissedBroadcastIds + broadcast.id
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = severityColor,
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier.testTag("app_broadcast_dismiss_button")
+                            ) {
+                                Text("Got It")
+                            }
+                        }
+                    )
+                }
+            }
+
+            // Global $5 Paid Private Message Unlock Prompt (100% to app owner; recipient earns +1 usable in-app point)
             pendingPaidDmTarget?.let { target ->
                 AlertDialog(
                     onDismissRequest = mainViewModel::dismissPaidDmPrompt,
-                    title = { Text("Unlock Private Messages (\$10)") },
+                    title = { Text("Unlock Private Messages (\$5)") },
                     text = {
                         Text(
-                            "${target.displayName} has private messages locked to paid users. Pay \$10 to unlock private messaging with them (\$5 goes to ${target.displayName} and \$5 goes to the app owner). Note: ${target.displayName} can kick any paid member from messaging them at any time."
+                            "${target.displayName} has private messages locked to paid users. Pay \$5 to unlock private messaging with them (the full \$5 goes to the app owner and ${target.displayName} earns +1 usable in-app point). Note: ${target.displayName} can kick any paid member from messaging them at any time."
                         )
                     },
                     confirmButton = {
@@ -1204,9 +1517,9 @@ private fun AuthenticatedVoxStageApp(
                                 containerColor = ModAmber,
                                 contentColor = Color.White
                             ),
-                            modifier = Modifier.testTag("confirm_pay_10_dm_button")
+                            modifier = Modifier.testTag("confirm_pay_5_dm_button")
                         ) {
-                            Text(if (isProcessingWallet) "Processing…" else "Pay \$10 & Message")
+                            Text(if (isProcessingWallet) "Processing…" else "Pay \$5 & Message")
                         }
                     },
                     dismissButton = {
@@ -1336,6 +1649,7 @@ private fun AuthenticatedVoxStageApp(
                 )
             }
         }
+    }
     }
 }
 

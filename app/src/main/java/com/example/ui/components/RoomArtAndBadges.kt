@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -22,12 +23,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CellTower
+import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
@@ -35,19 +40,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.ParticipantRole
+import com.example.data.PresenceStatus
 import com.example.data.RoomCoverKey
 import com.example.data.StaffTier
 import com.example.ui.theme.AdminNameRedDark
@@ -57,6 +69,8 @@ import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.PresenceOfflineRed
 import com.example.ui.theme.PresenceOnlineGreen
+import com.example.ui.theme.RoomLeaderPurpleDark
+import com.example.ui.theme.RoomLeaderPurpleLight
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SupportNameGreenDark
 import com.example.ui.theme.SupportNameGreenLight
@@ -77,18 +91,63 @@ fun coverDrawableRes(coverKey: RoomCoverKey): Int = when (coverKey) {
 }
 
 /**
- * Role-coded username colors across the entire app:
- * - Regular Users: Blue
- * - Support Staff: Green
+ * App-wide CompositionLocal providing the set of user IDs who currently have an active
+ * VoxStage Pro ($9.99/mo) membership so usernames render in Blue everywhere automatically.
+ */
+val LocalProUserIds = compositionLocalOf<Set<String>> { emptySet() }
+
+/**
+ * App-wide CompositionLocal mapping userId -> neon spotlight hex color for users who
+ * currently have an active 24-Hour Spotlight Frame (5 pts).
+ */
+val LocalSpotlightFrameByUserId = compositionLocalOf<Map<String, String>> { emptyMap() }
+
+/**
+ * Role & Membership-coded username colors across the entire app:
  * - Administrators: Red
+ * - Support Staff: Green
+ * - Room Creators / Room Admins / Room Co-Admins: Purple
+ * - Pro Members ($9.99/mo): Blue
+ * - Free Members: White in Dark Theme, Black in Light Theme
  */
 @Composable
-fun usernameColor(tier: StaffTier): Color {
+fun usernameColor(
+    tier: StaffTier,
+    isPro: Boolean = false,
+    isRoomLeader: Boolean = false,
+    userId: String? = null
+): Color {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    return when (tier) {
-        StaffTier.ADMIN -> if (isDark) AdminNameRedDark else AdminNameRedLight
-        StaffTier.SUPPORT -> if (isDark) SupportNameGreenDark else SupportNameGreenLight
-        StaffTier.USER -> if (isDark) UserNameBlueDark else UserNameBlueLight
+    val proIds = LocalProUserIds.current
+    val resolvedPro = isPro || (userId != null && userId in proIds)
+    return when {
+        tier == StaffTier.ADMIN -> if (isDark) AdminNameRedDark else AdminNameRedLight
+        tier == StaffTier.SUPPORT -> if (isDark) SupportNameGreenDark else SupportNameGreenLight
+        isRoomLeader -> if (isDark) RoomLeaderPurpleDark else RoomLeaderPurpleLight
+        resolvedPro -> if (isDark) UserNameBlueDark else UserNameBlueLight
+        else -> if (isDark) Color.White else Color.Black
+    }
+}
+
+@Composable
+fun ProMemberBadge(
+    modifier: Modifier = Modifier
+) {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val tint = if (isDark) UserNameBlueDark else UserNameBlueLight
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = tint.copy(alpha = 0.16f),
+        border = BorderStroke(1.dp, tint.copy(alpha = 0.5f))
+    ) {
+        Text(
+            text = "PRO",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = tint,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
     }
 }
 
@@ -177,9 +236,11 @@ fun RolePillBadge(
     role: ParticipantRole,
     modifier: Modifier = Modifier
 ) {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val purpleTint = if (isDark) RoomLeaderPurpleDark else RoomLeaderPurpleLight
     val (bg, fg) = when (role) {
-        ParticipantRole.HOST -> ModAmber.copy(alpha = 0.22f) to ModAmber
-        ParticipantRole.MODERATOR -> SafetyEmerald.copy(alpha = 0.20f) to SafetyEmerald
+        ParticipantRole.HOST -> purpleTint.copy(alpha = 0.22f) to purpleTint
+        ParticipantRole.MODERATOR -> purpleTint.copy(alpha = 0.18f) to purpleTint
         ParticipantRole.SPEAKER -> VoiceCyan.copy(alpha = 0.18f) to VoiceCyan
         ParticipantRole.LISTENER -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
     }
@@ -238,9 +299,19 @@ fun SpeakingAvatarCircle(
     micActive: Boolean,
     size: Dp = 56.dp,
     photoBase64: String = "",
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    userId: String? = null,
+    spotlightColorHex: String? = null
 ) {
     val accent = parseHexColor(colorHex)
+    val spotlightMap = LocalSpotlightFrameByUserId.current
+    val resolvedSpotlightHex = spotlightColorHex?.takeIf { it.isNotBlank() }
+        ?: userId?.let { spotlightMap[it] }?.takeIf { it.isNotBlank() }
+    val hasSpotlight = !resolvedSpotlightHex.isNullOrBlank()
+    val spotlightColor = remember(resolvedSpotlightHex) {
+        if (resolvedSpotlightHex != null) parseHexColor(resolvedSpotlightHex, VoiceCyan) else VoiceCyan
+    }
+
     val ringColor = if (micActive && speakingLevel > 0.04f) {
         VoiceCyan
     } else if (micActive) {
@@ -261,12 +332,77 @@ fun SpeakingAvatarCircle(
         .ifBlank { "?" }
     val photoBitmap = rememberBase64ImageBitmap(photoBase64)
 
+    val spotlightModifier = if (hasSpotlight) {
+        val infiniteTransition = rememberInfiniteTransition(label = "spotlight_frame")
+        val sweepAngle by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 2600, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "spotlight_rotation"
+        )
+        val glowPulse by infiniteTransition.animateFloat(
+            initialValue = 0.52f,
+            targetValue = 0.96f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "spotlight_pulse"
+        )
+        val hotCore = lerp(spotlightColor, Color.White, 0.52f)
+        val deepEdge = lerp(spotlightColor, Color.Black, 0.12f)
+        Modifier.drawBehind {
+            val haloRadius = (this.size.minDimension / 2f) + 5.dp.toPx()
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        spotlightColor.copy(alpha = 0.58f * glowPulse),
+                        spotlightColor.copy(alpha = 0.22f * glowPulse),
+                        Color.Transparent
+                    ),
+                    center = center,
+                    radius = haloRadius
+                ),
+                radius = haloRadius,
+                center = center
+            )
+            val strokePx = if (size >= 52.dp) 3.dp.toPx() else 2.4.dp.toPx()
+            rotate(degrees = sweepAngle, pivot = center) {
+                drawCircle(
+                    brush = Brush.sweepGradient(
+                        colors = listOf(
+                            spotlightColor,
+                            hotCore,
+                            spotlightColor,
+                            deepEdge,
+                            hotCore,
+                            spotlightColor
+                        ),
+                        center = center
+                    ),
+                    radius = (this.size.minDimension / 2f) - (strokePx / 2f),
+                    style = Stroke(width = strokePx)
+                )
+            }
+        }
+    } else {
+        Modifier.border(ringWidth, ringColor, CircleShape)
+    }
+
     Box(
         modifier = modifier
             .size(size)
-            .clip(CircleShape)
-            .border(ringWidth, ringColor, CircleShape)
-            .padding(if (photoBitmap != null) 3.dp else 4.dp)
+            .then(spotlightModifier)
+            .padding(
+                if (hasSpotlight) {
+                    if (size >= 52.dp) 4.dp else 3.dp
+                } else {
+                    if (photoBitmap != null) 3.dp else 4.dp
+                }
+            )
             .clip(CircleShape)
             .background(accent.copy(alpha = 0.24f)),
         contentAlignment = Alignment.Center
@@ -283,6 +419,64 @@ fun SpeakingAvatarCircle(
                 text = initials,
                 style = if (size >= 52.dp) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelLarge,
                 color = accent
+            )
+        }
+    }
+}
+
+/**
+ * Mutual DM "Talk Streak" badge shown beside friends whenever both users have exchanged
+ * at least one PTT clip or message for 3+ consecutive days.
+ */
+@Composable
+fun TalkStreakBadge(
+    streakDays: Int,
+    expiringToday: Boolean = false,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    if (streakDays < 3) return
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val flameTint = if (expiringToday) ModAmber else LiveCoral
+    val towerTint = if (isDark) VoiceCyan else ElectricIndigoBright
+    val bgColor = flameTint.copy(alpha = if (isDark) 0.20f else 0.13f)
+    val borderColor = flameTint.copy(alpha = if (expiringToday) 0.72f else 0.46f)
+    val a11yText = buildString {
+        append("$streakDays-day mutual Talk Streak")
+        if (expiringToday) append(". Send a message or PTT clip today to keep it alive")
+    }
+
+    Surface(
+        modifier = modifier.semantics { contentDescription = a11yText },
+        shape = RoundedCornerShape(999.dp),
+        color = bgColor,
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (compact) 6.dp else 8.dp,
+                vertical = if (compact) 2.dp else 3.dp
+            ),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.LocalFireDepartment,
+                contentDescription = null,
+                tint = flameTint,
+                modifier = Modifier.size(if (compact) 13.dp else 14.dp)
+            )
+            Icon(
+                imageVector = Icons.Rounded.CellTower,
+                contentDescription = null,
+                tint = towerTint,
+                modifier = Modifier.size(if (compact) 11.dp else 12.dp)
+            )
+            Spacer(modifier = Modifier.width(3.dp))
+            Text(
+                text = if (expiringToday && !compact) "${streakDays}d • Talk today" else "${streakDays}d",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.ExtraBold,
+                color = flameTint
             )
         }
     }
@@ -341,6 +535,33 @@ fun OnlinePresenceDot(
             .background(dotColor)
             .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape)
             .semantics { contentDescription = statusLabel }
+    )
+}
+
+/**
+ * 3-state presence indicator dot:
+ * - Online: Emerald Green
+ * - Idle: Warm Amber
+ * - Offline: Muted Red
+ */
+@Composable
+fun PresenceStatusDot(
+    status: PresenceStatus,
+    modifier: Modifier = Modifier,
+    size: Dp = 10.dp
+) {
+    val dotColor = when (status) {
+        PresenceStatus.ONLINE -> PresenceOnlineGreen
+        PresenceStatus.IDLE -> ModAmber
+        PresenceStatus.OFFLINE -> PresenceOfflineRed
+    }
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(dotColor)
+            .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape)
+            .semantics { contentDescription = status.label }
     )
 }
 

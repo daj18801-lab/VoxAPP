@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,10 +66,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.font.FontWeight
 import com.example.R
 import com.example.data.AlertSeverity
+import com.example.data.AppBroadcast
 import com.example.data.AppConfig
 import com.example.data.ChatRoom
+import com.example.data.DirectoryEntry
+import com.example.data.PresenceStatus
 import com.example.data.ReportStatus
 import com.example.data.SafetyReport
 import com.example.data.StaffCapabilities
@@ -78,11 +87,14 @@ import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserAlert
 import com.example.data.UserProfile
+import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.formatTimestampShort
+import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
+import com.example.ui.theme.PresenceOnlineGreen
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.VoiceCyan
 
@@ -123,12 +135,34 @@ fun SafetyScreen(
     onAdminEditAlert: (alertId: String, title: String, message: String, severity: AlertSeverity, reopenForUser: Boolean) -> Unit,
     onAdminDeleteAlert: (alertId: String) -> Unit,
     onUpdateAppConfig: (bannerTitle: String, bannerMessage: String, bannerEnabled: Boolean, trialLoginsEnabled: Boolean) -> Unit = { _, _, _, _ -> },
-    onSendUserToRoom: (targetUserId: String, targetName: String, targetRoom: ChatRoom, fromRoomId: String, reason: String) -> Unit = { _, _, _, _, _ -> }
+    onSendUserToRoom: (targetUserId: String, targetName: String, targetRoom: ChatRoom, fromRoomId: String, reason: String) -> Unit = { _, _, _, _, _ -> },
+    directoryEntries: List<DirectoryEntry> = emptyList(),
+    onSendUserToSupportChat: (
+        targetUser: DirectoryEntry,
+        supportMember: DirectoryEntry,
+        reason: String,
+        onSent: () -> Unit
+    ) -> Unit = { _, _, _, _ -> },
+    appBroadcasts: List<AppBroadcast> = emptyList(),
+    onSendAppBroadcast: (
+        title: String,
+        message: String,
+        severity: AlertSeverity,
+        onSent: () -> Unit
+    ) -> Unit = { _, _, _, _ -> },
+    onDeleteAppBroadcast: (String) -> Unit = {}
 ) {
     val reports = (reportsState as? UiState.Success)?.data.orEmpty()
     val openCount = reports.count { it.statusEnum() == ReportStatus.OPEN }
     val resolvedCount = reports.count { it.statusEnum() != ReportStatus.OPEN }
     val blockedUsers = userProfile?.blockedUserIds.orEmpty()
+    val nowMillis = rememberPresenceClockMillis()
+    val directoryByUid = remember(directoryEntries) {
+        directoryEntries.associateBy { it.userId }
+    }
+    val staffDirectoryMembers = remember(directoryEntries) {
+        directoryEntries.filter { it.tierEnum().isStaff() }
+    }
 
     val staffTierByUid = remember(staffRoles) {
         staffRoles.associate { it.userId to it.tierEnum() }
@@ -151,7 +185,9 @@ fun SafetyScreen(
     var userBeingSuspended by remember { mutableStateOf<UserProfile?>(null) }
     var userReceivingAlert by remember { mutableStateOf<UserProfile?>(null) }
     var userBeingTransferred by remember { mutableStateOf<UserProfile?>(null) }
+    var userBeingSentToSupport by remember { mutableStateOf<UserProfile?>(null) }
     var alertBeingEdited by remember { mutableStateOf<UserAlert?>(null) }
+    var showSendBroadcastDialog by remember { mutableStateOf(false) }
 
     val filteredUsers = remember(allUsers, userSearch, staffTierByUid) {
         val q = userSearch.trim()
@@ -642,12 +678,15 @@ fun SafetyScreen(
                             }
                             AdminUserDirectoryCard(
                                 profile = user,
+                                directoryEntry = directoryByUid[user.userId],
+                                nowMillis = nowMillis,
                                 tier = userTier,
                                 isSelf = user.userId == currentUserId,
                                 onEdit = { userBeingEdited = user },
                                 onSuspend = { userBeingSuspended = user },
                                 onAlert = { userReceivingAlert = user },
                                 onSendToRoom = { userBeingTransferred = user },
+                                onSendToSupport = { userBeingSentToSupport = user },
                                 onSetStaffTier = { nextTier ->
                                     onSetUserStaffTier(
                                         user.userId,
@@ -661,6 +700,164 @@ fun SafetyScreen(
                     }
 
                     2 -> {
+                        item(key = "admin_send_app_broadcast_card") {
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(40.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Campaign,
+                                                    contentDescription = "Broadcast app message",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "App Message to All Users",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "Deliver a real-time in-app announcement to every signed-in member.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    Button(
+                                        onClick = { showSendBroadcastDialog = true },
+                                        shape = RoundedCornerShape(999.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("admin_send_app_broadcast_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Campaign,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Send App Message to All Users",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (appBroadcasts.isNotEmpty()) {
+                            item(key = "admin_broadcasts_header") {
+                                Text(
+                                    text = "Sent App-Wide Messages (${appBroadcasts.size})",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onBackground
+                                )
+                            }
+                            items(appBroadcasts, key = { "bcast_${it.id}" }) { bcast ->
+                                val severityColor = when (bcast.severityEnum()) {
+                                    AlertSeverity.URGENT -> LiveCoral
+                                    AlertSeverity.WARNING -> ModAmber
+                                    AlertSeverity.INFO -> MaterialTheme.colorScheme.primary
+                                }
+                                Card(
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                    border = BorderStroke(1.dp, severityColor.copy(alpha = 0.4f)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("admin_broadcast_card_${bcast.id}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalAlignment = Alignment.Top,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    color = severityColor.copy(alpha = 0.16f)
+                                                ) {
+                                                    Text(
+                                                        text = bcast.severityEnum().name,
+                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                        color = severityColor,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                                Text(
+                                                    text = "ALL USERS",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                            Text(
+                                                text = bcast.title,
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = bcast.message,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "Sent by ${bcast.senderName} · ${formatTimestampShort(bcast.createdAt)}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteAppBroadcast(bcast.id) },
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .testTag("admin_delete_broadcast_${bcast.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Delete,
+                                                contentDescription = "Delete app broadcast",
+                                                tint = LiveCoral
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        item(key = "admin_direct_alerts_header") {
+                            Text(
+                                text = "Direct User Alerts (${allAlerts.size})",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                        }
+
                         if (allAlerts.isEmpty()) {
                             item(key = "alerts_empty") {
                                 Surface(
@@ -670,7 +867,7 @@ fun SafetyScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
-                                        text = "No alerts sent yet. Send alerts from any room or the Users tab above.",
+                                        text = "No direct user alerts sent yet. Send individual alerts from any room or the Users tab above.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(16.dp)
@@ -1108,6 +1305,130 @@ fun SafetyScreen(
         )
     }
 
+    userBeingSentToSupport?.let { target ->
+        val eligibleSupport = remember(staffDirectoryMembers, target.userId, nowMillis) {
+            staffDirectoryMembers
+                .filter { it.userId != target.userId }
+                .sortedWith(
+                    compareByDescending<DirectoryEntry> { it.tierEnum() == StaffTier.SUPPORT }
+                        .thenByDescending { it.isCurrentlyOnline(nowMillis) }
+                        .thenBy { it.displayName.lowercase() }
+                )
+        }
+        var selectedSupportId by remember(eligibleSupport) {
+            mutableStateOf(eligibleSupport.firstOrNull()?.userId.orEmpty())
+        }
+        var reasonDraft by remember(target.userId) { mutableStateOf("") }
+        var isSending by remember(target.userId) { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isSending) userBeingSentToSupport = null },
+            title = {
+                Text("Send ${target.displayName} to Support Chat")
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Choose a Support or Admin team member to open a live private support chat with ${target.displayName}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (eligibleSupport.isEmpty()) {
+                        Text(
+                            text = "No Support or Admin members available.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            eligibleSupport.take(8).forEach { staff ->
+                                val selected = selectedSupportId == staff.userId
+                                val online = staff.isCurrentlyOnline(nowMillis)
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                    },
+                                    border = BorderStroke(
+                                        width = if (selected) 1.5.dp else 1.dp,
+                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable { selectedSupportId = staff.userId }
+                                        .testTag("safety_pick_support_${staff.userId}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        PresenceStatusDot(
+                                            status = if (online) PresenceStatus.ONLINE else PresenceStatus.OFFLINE
+                                        )
+                                        Text(
+                                            text = staff.displayName,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = usernameColor(staff.tierEnum()),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        StaffTierBadge(tier = staff.tierEnum())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = reasonDraft,
+                        onValueChange = { reasonDraft = it.take(180) },
+                        label = { Text("Note / Topic (optional)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("safety_support_handoff_reason")
+                    )
+                }
+            },
+            confirmButton = {
+                val chosenSupport = eligibleSupport.firstOrNull { it.userId == selectedSupportId }
+                Button(
+                    onClick = {
+                        if (chosenSupport != null) {
+                            val targetEntry = directoryByUid[target.userId] ?: DirectoryEntry(
+                                userId = target.userId,
+                                displayName = target.displayName,
+                                handle = target.handle,
+                                bio = target.bio,
+                                avatarColorHex = target.avatarColorHex,
+                                staffTier = (staffTierByUid[target.userId] ?: StaffTier.USER).name
+                            )
+                            isSending = true
+                            onSendUserToSupportChat(targetEntry, chosenSupport, reasonDraft) {
+                                isSending = false
+                                userBeingSentToSupport = null
+                            }
+                        }
+                    },
+                    enabled = chosenSupport != null && !isSending,
+                    modifier = Modifier.testTag("safety_confirm_send_support_button")
+                ) {
+                    Text(if (isSending) "Sending…" else "Send Now")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { userBeingSentToSupport = null },
+                    enabled = !isSending
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     alertBeingEdited?.let { existing ->
         SendOrEditAlertDialog(
             existingAlert = existing,
@@ -1119,17 +1440,121 @@ fun SafetyScreen(
             onDismiss = { alertBeingEdited = null }
         )
     }
+
+    if (showSendBroadcastDialog) {
+        var broadcastTitle by remember { mutableStateOf("") }
+        var broadcastBody by remember { mutableStateOf("") }
+        var broadcastSeverity by remember { mutableStateOf(AlertSeverity.INFO) }
+        var isSendingBroadcast by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isSendingBroadcast) showSendBroadcastDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Campaign,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Send App Message to All Users",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "This announcement will appear live for every signed-in user across VoxStage.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AlertSeverity.entries.forEach { sev ->
+                            val sevColor = when (sev) {
+                                AlertSeverity.URGENT -> LiveCoral
+                                AlertSeverity.WARNING -> ModAmber
+                                AlertSeverity.INFO -> MaterialTheme.colorScheme.primary
+                            }
+                            FilterChip(
+                                selected = broadcastSeverity == sev,
+                                onClick = { broadcastSeverity = sev },
+                                label = { Text(sev.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = sevColor,
+                                    selectedLabelColor = Color.White
+                                ),
+                                modifier = Modifier.testTag("admin_broadcast_severity_${sev.name}")
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = broadcastTitle,
+                        onValueChange = { broadcastTitle = it.take(80) },
+                        label = { Text("Headline") },
+                        placeholder = { Text("e.g., New Feature or Maintenance Notice") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_broadcast_title_input")
+                    )
+                    OutlinedTextField(
+                        value = broadcastBody,
+                        onValueChange = { broadcastBody = it.take(500) },
+                        label = { Text("Message to all users") },
+                        placeholder = { Text("Write the announcement you want every user to see…") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_broadcast_body_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isSendingBroadcast = true
+                        onSendAppBroadcast(broadcastTitle, broadcastBody, broadcastSeverity) {
+                            isSendingBroadcast = false
+                            showSendBroadcastDialog = false
+                        }
+                    },
+                    enabled = broadcastTitle.trim().isNotEmpty() &&
+                        broadcastBody.trim().isNotEmpty() &&
+                        !isSendingBroadcast,
+                    modifier = Modifier.testTag("admin_confirm_send_broadcast_button")
+                ) {
+                    Text(if (isSendingBroadcast) "Sending…" else "Send to All Users")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showSendBroadcastDialog = false },
+                    enabled = !isSendingBroadcast
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
 private fun AdminUserDirectoryCard(
     profile: UserProfile,
+    directoryEntry: DirectoryEntry?,
+    nowMillis: Long,
     tier: StaffTier,
     isSelf: Boolean,
     onEdit: () -> Unit,
     onSuspend: () -> Unit,
     onAlert: () -> Unit,
     onSendToRoom: () -> Unit,
+    onSendToSupport: () -> Unit,
     onSetStaffTier: (StaffTier) -> Unit
 ) {
     val badges = buildList {
@@ -1151,10 +1576,15 @@ private fun AdminUserDirectoryCard(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            val trueOnline = directoryEntry?.isCurrentlyOnline(nowMillis) == true
+            val appearingStatus = profile.appearanceStatusEnum()
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                PresenceStatusDot(
+                    status = if (trueOnline) PresenceStatus.ONLINE else PresenceStatus.OFFLINE
+                )
                 Text(
                     text = if (isSelf) "${profile.displayName} (You)" else profile.displayName,
                     style = MaterialTheme.typography.titleSmall,
@@ -1163,11 +1593,21 @@ private fun AdminUserDirectoryCard(
                 StaffTierBadge(tier = tier)
             }
             Text(
-                text = if (tier == StaffTier.ADMIN) {
-                    profile.bio.ifBlank { "Administrator" }
-                } else {
-                    "@${profile.handle} · ${profile.bio.ifBlank { "No bio" }}"
+                text = buildString {
+                    if (tier != StaffTier.ADMIN) {
+                        append("@${profile.handle} · ")
+                    }
+                    append("App Time: ${profile.formattedTimeSpent()} · ")
+                    append(if (trueOnline) "True: Online" else "True: Offline")
+                    if (trueOnline && appearingStatus != PresenceStatus.ONLINE) {
+                        append(" (Appearing ${appearingStatus.label})")
+                    }
                 },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (trueOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = profile.bio.ifBlank { if (tier == StaffTier.ADMIN) "Administrator" else "No bio" },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1261,6 +1701,15 @@ private fun AdminUserDirectoryCard(
                         Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = VoiceCyan, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Send to Room", style = MaterialTheme.typography.labelSmall, color = VoiceCyan)
+                    }
+                    OutlinedButton(
+                        onClick = onSendToSupport,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("admin_send_support_${profile.userId}")
+                    ) {
+                        Icon(Icons.Rounded.SupportAgent, contentDescription = null, tint = SafetyEmerald, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Send to Support", style = MaterialTheme.typography.labelSmall, color = SafetyEmerald)
                     }
                 }
             }

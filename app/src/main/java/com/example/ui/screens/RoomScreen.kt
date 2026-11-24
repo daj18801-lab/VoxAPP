@@ -70,6 +70,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -1119,10 +1120,12 @@ private fun StageSection(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
+                                        val isRoomLeader = p.roleEnum() == ParticipantRole.HOST ||
+                                            p.roleEnum() == ParticipantRole.MODERATOR
                                         Text(
                                             text = if (isSelf) "${p.displayName} (You)" else p.displayName,
                                             style = MaterialTheme.typography.labelMedium,
-                                            color = usernameColor(tier),
+                                            color = usernameColor(tier, isRoomLeader = isRoomLeader, userId = p.userId),
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
@@ -1199,10 +1202,16 @@ private fun ChatTimelineSection(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(messages, key = { it.id }) { msg ->
+                    val msgRole = ParticipantRole.fromRaw(msg.senderRole)
+                    val isSenderRoomLeader = msgRole == ParticipantRole.HOST ||
+                        msgRole == ParticipantRole.MODERATOR ||
+                        msg.senderId == room.hostId ||
+                        room.moderatorIds.contains(msg.senderId)
                     ChatMessageBubble(
                         message = msg,
                         currentUserId = currentUserId,
                         isMine = msg.senderId == currentUserId,
+                        isSenderRoomLeader = isSenderRoomLeader,
                         onClick = { onTapMessage(msg) },
                         onToggleReaction = { emoji -> onToggleReaction(msg, emoji) }
                     )
@@ -1218,6 +1227,7 @@ private fun ChatMessageBubble(
     message: ChatMessage,
     currentUserId: String,
     isMine: Boolean,
+    isSenderRoomLeader: Boolean = false,
     onClick: () -> Unit,
     onToggleReaction: (String) -> Unit
 ) {
@@ -1283,7 +1293,7 @@ private fun ChatMessageBubble(
                     Text(
                         text = if (isMine) "${message.senderName} (You)" else message.senderName,
                         style = MaterialTheme.typography.labelLarge,
-                        color = usernameColor(senderTier),
+                        color = usernameColor(senderTier, isRoomLeader = isSenderRoomLeader, userId = message.senderId),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1460,6 +1470,21 @@ private fun RoomBottomDock(
     }
     val micAllowed = micBlockedReason == null
     val camAllowed = room.videoEnabled && !isCurrentlyInvisible && (staffCapabilities.isAdmin || !userProfile.disableVideo)
+    val maxPttSec = userProfile.pttMaxDurationSeconds(staffCapabilities.tier)
+    var pttHeldSeconds by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(isMicActive, pushToTalkMode, maxPttSec) {
+        if (isMicActive && pushToTalkMode) {
+            pttHeldSeconds = 0
+            while (pttHeldSeconds < maxPttSec) {
+                kotlinx.coroutines.delay(1000L)
+                pttHeldSeconds += 1
+            }
+            onMicStateChange(false)
+        } else {
+            pttHeldSeconds = 0
+        }
+    }
 
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -1669,10 +1694,11 @@ private fun RoomBottomDock(
                         Text(
                             text = when {
                                 micBlockedReason != null -> micBlockedReason
+                                isMicActive && pushToTalkMode -> "PTT (${pttHeldSeconds}s/${maxPttSec}s)"
                                 isMicActive && staffCapabilities.isAdmin && isCurrentlyInvisible -> "Admin Mic (Ghost)"
                                 isMicActive && staffCapabilities.isAdmin -> "Admin Priority Mic"
                                 isMicActive -> "Live Mic"
-                                pushToTalkMode -> "Hold to Talk"
+                                pushToTalkMode -> "Hold to Talk (${maxPttSec}s ${if (maxPttSec >= 60) "Pro" else "Free"})"
                                 else -> "Tap to Speak"
                             },
                             style = MaterialTheme.typography.labelLarge,

@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.DirectMessage
 import com.example.data.DirectThread
+import com.example.data.ReportCategory
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.VoxStageRepository
@@ -186,10 +187,103 @@ class DirectChatViewModel(
                 imageBase64 = cleanImage,
                 audioBase64 = cleanAudio,
                 audioDurationSec = audioDurationSec
-            ).onFailure { err ->
+            ).onSuccess {
+                if (cleanAudio.isNotEmpty()) {
+                    repository.completeReferralBonusOnFirstPttClip(senderName)
+                        .onSuccess { award ->
+                            if (award != null) {
+                                _snackbarEvents.tryEmit(
+                                    "Invite bonus unlocked! You and ${award.inviterName} each earned +${award.bonusPointsEach} points!"
+                                )
+                            }
+                        }
+                }
+            }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not send message")
             }
             _isSending.value = false
+        }
+    }
+
+    fun toggleMessageReaction(message: DirectMessage, emoji: String) {
+        if (message.id.isBlank()) return
+        viewModelScope.launch {
+            repository.toggleDirectMessageReaction(
+                threadId = threadId,
+                messageId = message.id,
+                currentReactions = message.reactionsByUserId,
+                emoji = emoji
+            ).onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update reaction")
+            }
+        }
+    }
+
+    fun sendScreenshotNotice(userName: String, senderTier: StaffTier) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        val safeName = userName.trim().ifBlank { "Someone" }
+        viewModelScope.launch {
+            repository.sendDirectMessage(
+                thread = thread,
+                senderName = safeName,
+                senderTier = senderTier,
+                text = "$safeName took a screenshot of this chat",
+                messageType = DirectMessage.TYPE_SCREENSHOT
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Screenshot detected — the other user was notified.")
+            }
+        }
+    }
+
+    fun reportMessage(
+        reporterName: String,
+        message: DirectMessage,
+        category: ReportCategory,
+        details: String,
+        onReported: () -> Unit = {}
+    ) {
+        val peerTitle = currentPeerTitle()
+        viewModelScope.launch {
+            repository.reportDirectMessage(
+                threadId = threadId,
+                peerTitle = peerTitle,
+                reporterName = reporterName,
+                message = message,
+                category = category,
+                extraDetails = details
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Message reported to Admin & Support Safety Center.")
+                onReported()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not submit message report")
+            }
+        }
+    }
+
+    fun pinMessage(message: DirectMessage, pinnedByName: String) {
+        if (message.id.isBlank() || message.isSystemNotice()) return
+        viewModelScope.launch {
+            repository.pinDirectMessage(
+                threadId = threadId,
+                message = message,
+                pinnedByName = pinnedByName
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Message pinned to the top of this chat.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not pin message")
+            }
+        }
+    }
+
+    fun unpinMessage() {
+        viewModelScope.launch {
+            repository.unpinDirectMessage(threadId)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Pinned message removed.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not unpin message")
+                }
         }
     }
 

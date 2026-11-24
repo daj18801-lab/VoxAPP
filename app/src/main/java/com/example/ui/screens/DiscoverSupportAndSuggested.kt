@@ -52,11 +52,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.DirectoryEntry
+import com.example.data.PresenceStatus
 import com.example.data.StaffTier
 import com.example.data.SupportTicket
 import com.example.data.SupportTicketCategory
 import com.example.data.SupportTicketStatus
-import com.example.ui.components.OnlinePresenceDot
+import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.usernameColor
@@ -76,7 +77,7 @@ internal data class SuggestedFriend(
 @Composable
 internal fun SuggestedFriendCard(
     suggestion: SuggestedFriend,
-    isOnline: Boolean,
+    presenceStatus: PresenceStatus,
     onClickProfile: () -> Unit,
     onSendFriendRequest: () -> Unit,
     onMessageUser: () -> Unit
@@ -115,7 +116,8 @@ internal fun SuggestedFriendCard(
                     speakingLevel = 0f,
                     micActive = false,
                     size = 54.dp,
-                    photoBase64 = entry.photoBase64
+                    photoBase64 = entry.photoBase64,
+                    userId = entry.userId
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(
@@ -126,14 +128,14 @@ internal fun SuggestedFriendCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        OnlinePresenceDot(
-                            isOnline = isOnline,
+                        PresenceStatusDot(
+                            status = presenceStatus,
                             modifier = Modifier.testTag("discover_suggested_presence_${entry.userId}")
                         )
                         Text(
                             text = entry.displayName,
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = usernameColor(tier),
+                            color = usernameColor(tier, isPro = entry.isProActive(), userId = entry.userId),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -232,7 +234,7 @@ internal fun SuggestedFriendCard(
 @Composable
 internal fun SupportStaffMemberCard(
     entry: DirectoryEntry,
-    isOnline: Boolean,
+    presenceStatus: PresenceStatus,
     isSelf: Boolean,
     onClickProfile: () -> Unit,
     onMessageStaff: () -> Unit,
@@ -266,7 +268,8 @@ internal fun SupportStaffMemberCard(
                     speakingLevel = 0f,
                     micActive = false,
                     size = 52.dp,
-                    photoBase64 = entry.photoBase64
+                    photoBase64 = entry.photoBase64,
+                    userId = entry.userId
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(
@@ -277,14 +280,14 @@ internal fun SupportStaffMemberCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        OnlinePresenceDot(
-                            isOnline = isOnline,
+                        PresenceStatusDot(
+                            status = presenceStatus,
                             modifier = Modifier.testTag("discover_staff_presence_${entry.userId}")
                         )
                         Text(
                             text = entry.displayName,
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = usernameColor(tier),
+                            color = usernameColor(tier, isPro = entry.isProActive(), userId = entry.userId),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -296,10 +299,20 @@ internal fun SupportStaffMemberCard(
                             if (tier != StaffTier.ADMIN && entry.handle.isNotBlank()) {
                                 append("@${entry.handle} · ")
                             }
-                            append(if (isOnline) "Online now" else "Offline")
+                            append(
+                                when (presenceStatus) {
+                                    PresenceStatus.ONLINE -> "Online now"
+                                    PresenceStatus.IDLE -> "Idle"
+                                    PresenceStatus.OFFLINE -> "Offline"
+                                }
+                            )
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (isOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                        color = when (presenceStatus) {
+                            PresenceStatus.ONLINE -> PresenceOnlineGreen
+                            PresenceStatus.IDLE -> ModAmber
+                            PresenceStatus.OFFLINE -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                     )
                     if (entry.bio.isNotBlank()) {
                         Text(

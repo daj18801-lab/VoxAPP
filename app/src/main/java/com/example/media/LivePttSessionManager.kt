@@ -9,14 +9,21 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.example.data.PttChirpStyle
+import com.example.data.PttThemeStyle
 import com.example.notifications.DirectMessageNotificationPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -40,6 +47,7 @@ object LivePttSessionManager {
     private var liveKitManager: LiveKitRoomManager? = null
     private var speakerCollectorJob: Job? = null
     private var connectedCollectorJob: Job? = null
+    private var transmitLimitJob: Job? = null
 
     private val _activeThreadId = MutableStateFlow<String?>(null)
     val activeThreadId: StateFlow<String?> = _activeThreadId.asStateFlow()
@@ -56,11 +64,40 @@ object LivePttSessionManager {
     private val _isTransmitting = MutableStateFlow(false)
     val isTransmitting: StateFlow<Boolean> = _isTransmitting.asStateFlow()
 
+    /** Max PTT clip duration: 5s for Free members, 60s for Pro members & Staff. */
+    private val _maxPttSeconds = MutableStateFlow(5)
+    val maxPttSeconds: StateFlow<Int> = _maxPttSeconds.asStateFlow()
+
+    private val _transmittingElapsedSec = MutableStateFlow(0)
+    val transmittingElapsedSec: StateFlow<Int> = _transmittingElapsedSec.asStateFlow()
+
+    private val _limitReachedEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val limitReachedEvents: SharedFlow<String> = _limitReachedEvents.asSharedFlow()
+
+    /** Emits threadId whenever the user completes a live PTT transmission clip. */
+    private val _completedPttThreadEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val completedPttThreadEvents: SharedFlow<String> = _completedPttThreadEvents.asSharedFlow()
+
     private val _remoteSpeakingName = MutableStateFlow<String?>(null)
     val remoteSpeakingName: StateFlow<String?> = _remoteSpeakingName.asStateFlow()
 
     private val _isAppInBackground = MutableStateFlow(false)
     val isAppInBackground: StateFlow<Boolean> = _isAppInBackground.asStateFlow()
+
+    private val _activePttTheme = MutableStateFlow(PttThemeStyle.CLASSIC)
+    val activePttTheme: StateFlow<PttThemeStyle> = _activePttTheme.asStateFlow()
+
+    private val _activePttChirp = MutableStateFlow(PttChirpStyle.STANDARD)
+    val activePttChirp: StateFlow<PttChirpStyle> = _activePttChirp.asStateFlow()
+
+    fun setMaxDurationSeconds(seconds: Int) {
+        _maxPttSeconds.value = seconds.coerceIn(5, 60)
+    }
+
+    fun setPttCustomization(theme: PttThemeStyle, chirp: PttChirpStyle) {
+        _activePttTheme.value = theme
+        _activePttChirp.value = chirp
+    }
 
     /**
      * Optional foreground hardware-key PTT target (e.g., an active Voice Room in Hold-to-Talk
@@ -342,7 +379,11 @@ object LivePttSessionManager {
                     false
                 }
                 if (!ready) return@launch
+                if (!_isTransmitting.value) {
+                    PttChirpSoundEngine.playKeyDown(_activePttChirp.value)
+                }
                 _isTransmitting.value = true
+                _transmittingElapsedSec.value = 0
                 liveKitManager?.setMicEnabled(true)
                 PrivateCallForegroundService.startPtt(
                     context = appContext,
@@ -351,9 +392,48 @@ object LivePttSessionManager {
                     isTransmitting = true,
                     showFloatingOverlay = true
                 )
+                transmitLimitJob?.cancel()
+                val limitSec = _maxPttSeconds.value.coerceIn(5, 60)
+                transmitLimitJob = scope.launch {
+                    for (elapsed in 1..limitSec) {
+                        delay(1_000L)
+                        if (!isActive || !_isTransmitting.value) return@launch
+                        _transmittingElapsedSec.value = elapsed
+                    }
+                    if (isActive && _isTransmitting.value) {
+                        _isTransmitting.value = false
+                        _transmittingElapsedSec.value = 0
+                        liveKitManager?.setMicEnabled(false)
+                        PttChirpSoundEngine.playKeyUp(_activePttChirp.value)
+                        if (_isConnected.value) {
+                            PrivateCallForegroundService.startPtt(
+                                context = appContext,
+                                threadId = targetThreadId,
+                                peerName = targetPeer,
+                                isTransmitting = false,
+                                showFloatingOverlay = true
+                            )
+                        }
+                        val msg = if (limitSec <= 5) {
+                            "Free PTT 5-second limit reached. Upgrade to Pro (\$9.99/mo) for 1-minute PTT clips!"
+                        } else {
+                            "Pro PTT 1-minute clip limit reached. Release and press again to continue."
+                        }
+                        _completedPttThreadEvents.tryEmit(targetThreadId)
+                        _limitReachedEvents.tryEmit(msg)
+                    }
+                }
             } else {
+                val wasTx = _isTransmitting.value
+                transmitLimitJob?.cancel()
+                transmitLimitJob = null
                 _isTransmitting.value = false
+                _transmittingElapsedSec.value = 0
                 liveKitManager?.setMicEnabled(false)
+                if (wasTx) {
+                    PttChirpSoundEngine.playKeyUp(_activePttChirp.value)
+                    _completedPttThreadEvents.tryEmit(targetThreadId)
+                }
                 if (_isConnected.value) {
                     PrivateCallForegroundService.startPtt(
                         context = appContext,
@@ -379,6 +459,8 @@ object LivePttSessionManager {
     }
 
     private fun disconnectInternal(appContext: Context, stopService: Boolean) {
+        transmitLimitJob?.cancel()
+        transmitLimitJob = null
         speakerCollectorJob?.cancel()
         speakerCollectorJob = null
         connectedCollectorJob?.cancel()
@@ -387,6 +469,7 @@ object LivePttSessionManager {
         liveKitManager = null
         runCatching { manager?.disconnect() }
         _isTransmitting.value = false
+        _transmittingElapsedSec.value = 0
         _isConnected.value = false
         _isConnecting.value = false
         _remoteSpeakingName.value = null

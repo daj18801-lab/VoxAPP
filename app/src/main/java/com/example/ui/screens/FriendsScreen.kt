@@ -55,13 +55,15 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.DirectoryEntry
 import com.example.data.Friendship
+import com.example.data.PresenceStatus
 import com.example.data.StaffTier
-import com.example.ui.components.OnlinePresenceDot
+import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
+import com.example.ui.theme.ModAmber
 import com.example.ui.theme.PresenceOnlineGreen
 
 @Composable
@@ -69,6 +71,7 @@ fun FriendsScreen(
     currentUserId: String,
     friendships: List<Friendship>,
     directoryEntries: List<DirectoryEntry>,
+    viewerIsStaff: Boolean = false,
     onSendFriendRequest: (DirectoryEntry) -> Unit,
     onAcceptFriendRequest: (Friendship) -> Unit,
     onRemoveOrDeclineFriendship: (Friendship) -> Unit,
@@ -235,19 +238,22 @@ fun FriendsScreen(
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
+                                val presenceStatus = directoryByUid[otherId]?.displayedStatusFor(
+                                    viewerIsStaff = viewerIsStaff,
+                                    nowMillis = nowMillis
+                                ) ?: PresenceStatus.OFFLINE
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    OnlinePresenceDot(
-                                        isOnline = isOnline,
+                                    PresenceStatusDot(
+                                        status = presenceStatus,
                                         modifier = Modifier.testTag("friend_request_presence_$otherId")
                                     )
                                     Text(
                                         text = name,
                                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                        color = usernameColor(tier),
+                                        color = usernameColor(tier, userId = otherId),
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f, fill = false)
@@ -355,20 +361,23 @@ fun FriendsScreen(
                                 photoBase64 = directoryPhotoByUid[otherId].orEmpty()
                             )
                             Spacer(modifier = Modifier.width(12.dp))
-                            val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
+                            val presenceStatus = directoryByUid[otherId]?.displayedStatusFor(
+                                viewerIsStaff = viewerIsStaff,
+                                nowMillis = nowMillis
+                            ) ?: PresenceStatus.OFFLINE
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    OnlinePresenceDot(
-                                        isOnline = isOnline,
+                                    PresenceStatusDot(
+                                        status = presenceStatus,
                                         modifier = Modifier.testTag("friend_presence_$otherId")
                                     )
                                     Text(
                                         text = name,
                                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                        color = usernameColor(tier),
+                                        color = usernameColor(tier, userId = otherId),
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f, fill = false)
@@ -376,14 +385,17 @@ fun FriendsScreen(
                                     StaffTierBadge(tier = tier)
                                 }
                                 Text(
-                                    text = when {
-                                        tier == StaffTier.ADMIN && isOnline -> "Online"
-                                        tier == StaffTier.ADMIN -> "Offline"
-                                        isOnline -> "@$handle · Online"
-                                        else -> "@$handle · Offline"
+                                    text = if (tier == StaffTier.ADMIN) {
+                                        presenceStatus.label
+                                    } else {
+                                        "@$handle · ${presenceStatus.label}"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = if (isOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = when (presenceStatus) {
+                                        PresenceStatus.ONLINE -> PresenceOnlineGreen
+                                        PresenceStatus.IDLE -> ModAmber
+                                        PresenceStatus.OFFLINE -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
                                 )
                             }
                             Button(
@@ -427,7 +439,10 @@ fun FriendsScreen(
                     val handle = req.otherHandle(currentUserId)
                     val color = req.otherColorHex(currentUserId)
                     val tier = req.otherTier(currentUserId)
-                    val isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true
+                    val presenceStatus = directoryByUid[otherId]?.displayedStatusFor(
+                        viewerIsStaff = viewerIsStaff,
+                        nowMillis = nowMillis
+                    ) ?: PresenceStatus.OFFLINE
 
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -453,14 +468,14 @@ fun FriendsScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    OnlinePresenceDot(
-                                        isOnline = isOnline,
+                                    PresenceStatusDot(
+                                        status = presenceStatus,
                                         modifier = Modifier.testTag("outgoing_friend_presence_$otherId")
                                     )
                                     Text(
                                         text = name,
                                         style = MaterialTheme.typography.titleSmall,
-                                        color = usernameColor(tier),
+                                        color = usernameColor(tier, userId = otherId),
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -536,20 +551,23 @@ fun FriendsScreen(
                                 photoBase64 = person.photoBase64
                             )
                             Spacer(modifier = Modifier.width(12.dp))
-                            val isOnline = person.isCurrentlyOnline(nowMillis)
+                            val presenceStatus = person.displayedStatusFor(
+                                viewerIsStaff = viewerIsStaff,
+                                nowMillis = nowMillis
+                            )
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    OnlinePresenceDot(
-                                        isOnline = isOnline,
+                                    PresenceStatusDot(
+                                        status = presenceStatus,
                                         modifier = Modifier.testTag("directory_presence_${person.userId}")
                                     )
                                     Text(
                                         text = person.displayName,
                                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                        color = usernameColor(tier),
+                                        color = usernameColor(tier, isPro = person.isProActive(), userId = person.userId),
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f, fill = false)
@@ -558,13 +576,17 @@ fun FriendsScreen(
                                 }
                                 Text(
                                     text = if (tier == StaffTier.ADMIN) {
-                                        if (isOnline) "Online" else "Offline"
+                                        presenceStatus.label
                                     } else {
                                         "@${person.handle}"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = if (tier == StaffTier.ADMIN && isOnline) {
-                                        PresenceOnlineGreen
+                                    color = if (tier == StaffTier.ADMIN) {
+                                        when (presenceStatus) {
+                                            PresenceStatus.ONLINE -> PresenceOnlineGreen
+                                            PresenceStatus.IDLE -> ModAmber
+                                            PresenceStatus.OFFLINE -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
                                     } else {
                                         MaterialTheme.colorScheme.onSurfaceVariant
                                     }

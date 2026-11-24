@@ -188,7 +188,8 @@ fun ProfilePostCard(
                     speakingLevel = 0f,
                     micActive = false,
                     size = 42.dp,
-                    photoBase64 = effectiveAvatarPhoto
+                    photoBase64 = effectiveAvatarPhoto,
+                    userId = post.authorId
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -199,7 +200,7 @@ fun ProfilePostCard(
                         Text(
                             text = post.authorName,
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                            color = usernameColor(tier),
+                            color = usernameColor(tier, userId = post.authorId),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )

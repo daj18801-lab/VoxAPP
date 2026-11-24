@@ -71,14 +71,16 @@ import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
 import com.example.data.DmPolicy
 import com.example.data.Friendship
+import com.example.data.PresenceStatus
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
-import com.example.ui.components.OnlinePresenceDot
+import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.QuickCreatePostSheet
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.TalkStreakBadge
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.parseHexColor
 import com.example.ui.components.rememberPresenceClockMillis
@@ -212,7 +214,8 @@ fun ChatsHomeScreen(
                                     speakingLevel = 0f,
                                     micActive = false,
                                     size = 42.dp,
-                                    photoBase64 = userProfile?.photoBase64.orEmpty()
+                                    photoBase64 = userProfile?.photoBase64.orEmpty(),
+                                    userId = currentUserId
                                 )
                                 if (staffCapabilities.effectiveCanEnterInvisible && userProfile?.invisibleModePreferred == true) {
                                     Box(
@@ -308,32 +311,6 @@ fun ChatsHomeScreen(
                                     }
                                 }
                             }
-
-                            Surface(
-                                shape = RoundedCornerShape(999.dp),
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .clickable(onClick = onOpenRoomsTab)
-                                    .testTag("chats_open_rooms_pill")
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.GraphicEq,
-                                        contentDescription = "Open live chat rooms",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = if (liveRoomsCount > 0) "Rooms ($liveRoomsCount)" else "Rooms",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = Color.White
-                                    )
-                                }
-                            }
                         }
                     }
 
@@ -421,11 +398,15 @@ fun ChatsHomeScreen(
                                     val otherColor = friendship.otherColorHex(currentUserId)
                                     val otherTier = friendship.otherTier(currentUserId)
                                     QuickFriendCircleItem(
+                                        userId = otherId,
                                         name = otherName,
                                         colorHex = otherColor,
                                         photoBase64 = directoryPhotoByUid[otherId].orEmpty(),
                                         tier = otherTier,
-                                        isOnline = directoryByUid[otherId]?.isCurrentlyOnline(nowMillis) == true,
+                                        presenceStatus = directoryByUid[otherId]?.displayedStatusFor(
+                                            viewerIsStaff = staffCapabilities.isStaff,
+                                            nowMillis = nowMillis
+                                        ) ?: PresenceStatus.OFFLINE,
                                         onClick = {
                                             onStartChatWithUser(otherId, otherName, otherColor, otherTier)
                                         }
@@ -540,29 +521,14 @@ fun ChatsHomeScreen(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                         Spacer(modifier = Modifier.height(6.dp))
-                                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                            Button(
-                                                onClick = { showNewChatSheet = true },
-                                                shape = RoundedCornerShape(999.dp),
-                                                modifier = Modifier.testTag("empty_new_chat_button")
-                                            ) {
-                                                Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text("New Chat")
-                                            }
-                                            Button(
-                                                onClick = onOpenRoomsTab,
-                                                shape = RoundedCornerShape(999.dp),
-                                                colors = ButtonDefaults.buttonColors(
-                                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                                    contentColor = MaterialTheme.colorScheme.primary
-                                                ),
-                                                modifier = Modifier.testTag("empty_open_rooms_button")
-                                            ) {
-                                                Icon(Icons.Rounded.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text("Browse Rooms")
-                                            }
+                                        Button(
+                                            onClick = { showNewChatSheet = true },
+                                            shape = RoundedCornerShape(999.dp),
+                                            modifier = Modifier.testTag("empty_new_chat_button")
+                                        ) {
+                                            Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("New Chat")
                                         }
                                     }
                                 }
@@ -574,7 +540,14 @@ fun ChatsHomeScreen(
                                     thread = thread,
                                     currentUserId = currentUserId,
                                     otherPhotoBase64 = if (thread.isGroup) "" else directoryPhotoByUid[otherUid].orEmpty(),
-                                    isOtherOnline = !thread.isGroup && directoryByUid[otherUid]?.isCurrentlyOnline(nowMillis) == true,
+                                    otherStatus = if (thread.isGroup) {
+                                        PresenceStatus.OFFLINE
+                                    } else {
+                                        directoryByUid[otherUid]?.displayedStatusFor(
+                                            viewerIsStaff = staffCapabilities.isStaff,
+                                            nowMillis = nowMillis
+                                        ) ?: PresenceStatus.OFFLINE
+                                    },
                                     onClick = { onOpenThread(thread.id) },
                                     onAvatarClick = {
                                         if (thread.isGroup) onOpenThread(thread.id)
@@ -642,6 +615,7 @@ fun ChatsHomeScreen(
                 directoryUsers = otherDirectoryUsers,
                 directoryByUid = directoryByUid,
                 currentUserId = currentUserId,
+                viewerIsStaff = staffCapabilities.isStaff,
                 nowMillis = nowMillis,
                 onSelectUser = { uid, name, color, tier ->
                     showNewChatSheet = false
@@ -670,11 +644,12 @@ fun ChatsHomeScreen(
 
 @Composable
 private fun QuickFriendCircleItem(
+    userId: String,
     name: String,
     colorHex: String,
     photoBase64: String,
     tier: StaffTier,
-    isOnline: Boolean,
+    presenceStatus: PresenceStatus,
     onClick: () -> Unit
 ) {
     Column(
@@ -697,7 +672,8 @@ private fun QuickFriendCircleItem(
                 speakingLevel = 0f,
                 micActive = false,
                 size = 50.dp,
-                photoBase64 = photoBase64
+                photoBase64 = photoBase64,
+                userId = userId
             )
         }
         Spacer(modifier = Modifier.height(5.dp))
@@ -705,14 +681,14 @@ private fun QuickFriendCircleItem(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            OnlinePresenceDot(
-                isOnline = isOnline,
+            PresenceStatusDot(
+                status = presenceStatus,
                 size = 8.dp
             )
             Text(
                 text = name.substringBefore(" "),
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = usernameColor(tier),
+                color = usernameColor(tier, userId = userId),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -725,7 +701,7 @@ private fun SnapChatFeedRow(
     thread: DirectThread,
     currentUserId: String,
     otherPhotoBase64: String,
-    isOtherOnline: Boolean,
+    otherStatus: PresenceStatus,
     onClick: () -> Unit,
     onAvatarClick: () -> Unit
 ) {
@@ -771,6 +747,7 @@ private fun SnapChatFeedRow(
                     )
                 }
             } else {
+                val otherUidAvatar = thread.otherUserId(currentUserId)
                 SpeakingAvatarCircle(
                     displayName = title,
                     colorHex = otherColorHex,
@@ -778,6 +755,7 @@ private fun SnapChatFeedRow(
                     micActive = isUnread,
                     size = 50.dp,
                     photoBase64 = otherPhotoBase64,
+                    userId = otherUidAvatar,
                     modifier = Modifier.clickable(onClick = onAvatarClick)
                 )
             }
@@ -788,17 +766,18 @@ private fun SnapChatFeedRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     if (!isGroup) {
-                        OnlinePresenceDot(
-                            isOnline = isOtherOnline,
+                        PresenceStatusDot(
+                            status = otherStatus,
                             modifier = Modifier.testTag("chat_row_presence_${thread.id}")
                         )
                     }
+                    val otherUid = if (isGroup) null else thread.otherUserId(currentUserId)
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = if (isUnread) FontWeight.ExtraBold else FontWeight.SemiBold
                         ),
-                        color = if (isGroup) MaterialTheme.colorScheme.onSurface else usernameColor(otherTier),
+                        color = if (isGroup) MaterialTheme.colorScheme.onSurface else usernameColor(otherTier, userId = otherUid),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
@@ -817,6 +796,15 @@ private fun SnapChatFeedRow(
                         }
                     } else {
                         StaffTierBadge(tier = otherTier)
+                        val talkStreak = thread.activeTalkStreakCount()
+                        if (talkStreak >= 3) {
+                            TalkStreakBadge(
+                                streakDays = talkStreak,
+                                expiringToday = thread.isTalkStreakExpiringToday(),
+                                compact = true,
+                                modifier = Modifier.testTag("chat_talk_streak_${thread.id}")
+                            )
+                        }
                     }
                 }
 
@@ -906,6 +894,7 @@ private fun NewPrivateChatSheetContent(
     directoryUsers: List<DirectoryEntry>,
     directoryByUid: Map<String, DirectoryEntry>,
     currentUserId: String,
+    viewerIsStaff: Boolean,
     nowMillis: Long,
     onSelectUser: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit
 ) {
@@ -974,11 +963,15 @@ private fun NewPrivateChatSheetContent(
                     val color = f.otherColorHex(currentUserId)
                     val tier = f.otherTier(currentUserId)
                     NewChatPickerRow(
+                        userId = uid,
                         name = name,
                         handle = handle,
                         colorHex = color,
                         tier = tier,
-                        isOnline = directoryByUid[uid]?.isCurrentlyOnline(nowMillis) == true,
+                        presenceStatus = directoryByUid[uid]?.displayedStatusFor(
+                            viewerIsStaff = viewerIsStaff,
+                            nowMillis = nowMillis
+                        ) ?: PresenceStatus.OFFLINE,
                         dmPolicy = directoryByUid[uid]?.dmPolicyEnum() ?: DmPolicy.OPEN,
                         onClick = { onSelectUser(uid, name, color, tier) }
                     )
@@ -995,11 +988,15 @@ private fun NewPrivateChatSheetContent(
                 }
                 items(filteredOthers, key = { "sd_${it.userId}" }) { entry ->
                     NewChatPickerRow(
+                        userId = entry.userId,
                         name = entry.displayName,
                         handle = entry.handle,
                         colorHex = entry.avatarColorHex,
                         tier = entry.tierEnum(),
-                        isOnline = entry.isCurrentlyOnline(nowMillis),
+                        presenceStatus = entry.displayedStatusFor(
+                            viewerIsStaff = viewerIsStaff,
+                            nowMillis = nowMillis
+                        ),
                         dmPolicy = entry.dmPolicyEnum(),
                         onClick = {
                             onSelectUser(entry.userId, entry.displayName, entry.avatarColorHex, entry.tierEnum())
@@ -1024,11 +1021,12 @@ private fun NewPrivateChatSheetContent(
 
 @Composable
 private fun NewChatPickerRow(
+    userId: String,
     name: String,
     handle: String,
     colorHex: String,
     tier: StaffTier,
-    isOnline: Boolean = false,
+    presenceStatus: PresenceStatus = PresenceStatus.OFFLINE,
     dmPolicy: DmPolicy = DmPolicy.OPEN,
     onClick: () -> Unit
 ) {
@@ -1048,7 +1046,8 @@ private fun NewChatPickerRow(
                 colorHex = colorHex,
                 speakingLevel = 0f,
                 micActive = false,
-                size = 42.dp
+                size = 42.dp,
+                userId = userId
             )
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -1056,11 +1055,11 @@ private fun NewChatPickerRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    OnlinePresenceDot(isOnline = isOnline)
+                    PresenceStatusDot(status = presenceStatus)
                     Text(
                         text = name,
                         style = MaterialTheme.typography.titleSmall,
-                        color = usernameColor(tier),
+                        color = usernameColor(tier, userId = userId),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
@@ -1093,7 +1092,7 @@ private fun NewChatPickerRow(
                                 modifier = Modifier.size(14.dp)
                             )
                             Text(
-                                text = "\$10 DM",
+                                text = "\$5 DM",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                 color = ModAmber
                             )

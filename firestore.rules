@@ -32,6 +32,14 @@ service cloud.firestore {
       return c is string && c.size() == 7 && c.matches('^#[0-9A-Fa-f]{6}$');
     }
 
+    function isValidDayKey(s) {
+      return s is string && (s == '' || (s.size() == 10 && s.matches('^20[2-9][0-9]-[0-1][0-9]-[0-3][0-9]$')));
+    }
+
+    function isValidReferralCode(s) {
+      return s is string && (s == '' || (s.size() >= 4 && s.size() <= 24 && s.matches('^[A-Z0-9\\-]+$')));
+    }
+
     // Bootstrapped primary administrator (strictly requires verified email)
     function isBootstrappedAdmin() {
       return isSignedIn() &&
@@ -169,8 +177,7 @@ service cloud.firestore {
              (arr.size() < 2 || (arr[arr.size() - 1] is int && arr[arr.size() - 1] >= arr[0] && arr[arr.size() - 1] <= request.time.toMillis() + 60000));
     }
 
-    function canUpdatePictureUploadTimestamps(newData, oldData) {
-      let diffKeys = newData.diff(oldData).affectedKeys();
+    function canUpdatePictureUploadTimestamps(newData, oldData, diffKeys) {
       return !('pictureUploadTimestamps' in diffKeys) ||
              !('pictureUploadTimestamps' in oldData) ||
              oldData.pictureUploadTimestamps.size() == 0 ||
@@ -189,6 +196,80 @@ service cloud.firestore {
              p.pictureUploadTimestamps[0] <= request.time.toMillis() - 600000;
     }
 
+    function isValidDiscoveryPhotoTimestampList(arr) {
+      return arr is list &&
+             arr.size() <= 2 &&
+             (arr.size() == 0 || (arr[0] is int && arr[0] > 0 && arr[0] <= request.time.toMillis() + 60000)) &&
+             (arr.size() < 2 || (arr[arr.size() - 1] is int && arr[arr.size() - 1] >= arr[0] && arr[arr.size() - 1] <= request.time.toMillis() + 60000));
+    }
+
+    function canUpdateDiscoveryPhotoTimestamps(newData, oldData, diffKeys) {
+      return !('discoveryPhotoTimestamps' in diffKeys) ||
+             !('discoveryPhotoTimestamps' in oldData) ||
+             oldData.discoveryPhotoTimestamps.size() == 0 ||
+             oldData.discoveryPhotoTimestamps[0] <= request.time.toMillis() - 604800000 ||
+             (newData.discoveryPhotoTimestamps.size() >= oldData.discoveryPhotoTimestamps.size() &&
+              newData.discoveryPhotoTimestamps[0] == oldData.discoveryPhotoTimestamps[0]);
+    }
+
+    function isProProfileData(p) {
+      return ('proMember' in p) && p.proMember == true &&
+             existingInt(p, 'proExpiresAtMillis') > request.time.toMillis();
+    }
+
+    function isProCaller() {
+      return isAdminOrSupport() ||
+             (callerProfileExists() && isProProfileData(callerProfile()));
+    }
+
+    function isAllowedProDirectoryClaim(data) {
+      return !('proMember' in data) ||
+             data.proMember == false ||
+             isProCaller() ||
+             (existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+              isProProfileData(getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data));
+    }
+
+    function isAllowedBoostedProfileDirectoryClaim(data) {
+      let claimed = existingInt(data, 'profileBoostedUntilMillis');
+      return claimed == 0 ||
+             isAdmin() ||
+             (callerProfileExists() && existingInt(callerProfile(), 'profileBoostedUntilMillis') >= claimed) ||
+             (existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+              existingInt(getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data, 'profileBoostedUntilMillis') >= claimed);
+    }
+
+    function isAllowedSpotlightFrameDirectoryClaim(data) {
+      let claimed = existingInt(data, 'spotlightFrameUntilMillis');
+      return claimed == 0 ||
+             isAdmin() ||
+             (callerProfileExists() && existingInt(callerProfile(), 'spotlightFrameUntilMillis') >= claimed) ||
+             (existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+              existingInt(getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data, 'spotlightFrameUntilMillis') >= claimed);
+    }
+
+    function isPaidProfileData(p) {
+      return existingInt(p, 'totalSpentCents') > 0 ||
+             existingInt(p, 'pointsBalance') > 0 ||
+             isProProfileData(p);
+    }
+
+    function isUnderWeeklyDiscoveryPhotoLimit(p) {
+      return !('discoveryPhotoTimestamps' in p) ||
+             p.discoveryPhotoTimestamps.size() < 2 ||
+             p.discoveryPhotoTimestamps[0] <= request.time.toMillis() - 604800000;
+    }
+
+    function callerCanUploadPostImage() {
+      return !callerProfileExists() ||
+             callerProfilePassesImageLimits(callerProfile());
+    }
+
+    function callerProfilePassesImageLimits(p) {
+      return isUnderPicLimit(p) &&
+             (isPaidProfileData(p) || isUnderWeeklyDiscoveryPhotoLimit(p) || isAdminOrSupport());
+    }
+
     function isValidUserProfile(data) {
       return data.keys().hasAll([
                'userId', 'displayName', 'handle', 'bio', 'avatarColorHex',
@@ -200,9 +281,15 @@ service cloud.firestore {
                'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled', 'invisibleModePreferred',
                'globallyBanned', 'disableCreateRoom', 'disableEnterRoom',
                'disableMic', 'disableVideo', 'suspendedUntilMillis', 'suspensionReason',
-               'pointsBalance', 'creatorEarningsCents', 'totalSpentCents', 'dmPolicy',
-               'adultVerified', 'birthYear',
-               'blockedUserIds', 'pictureUploadTimestamps', 'createdAt', 'updatedAt'
+               'pointsBalance', 'halfPointsBalance', 'creatorEarnedPoints', 'creatorEarningsCents', 'totalSpentCents',
+               'proMember', 'proExpiresAtMillis', 'profileBoostedUntilMillis',
+               'spotlightFrameUntilMillis', 'spotlightFrameColorHex',
+               'loginStreakDays', 'lastLoginDayKey', 'lastStreakRewardDayKey',
+               'referralCode', 'referredByUserId', 'referralBonusClaimed', 'referralEarnedPoints',
+               'ownedPttThemes', 'selectedPttTheme', 'ownedPttChirps', 'selectedPttChirp',
+               'dmPolicy',
+               'adultVerified', 'birthYear', 'sex', 'age', 'totalTimeSpentSec', 'appearanceStatus',
+               'blockedUserIds', 'pictureUploadTimestamps', 'discoveryPhotoTimestamps', 'createdAt', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 40 &&
@@ -222,14 +309,37 @@ service cloud.firestore {
              (!('suspendedUntilMillis' in data) || (data.suspendedUntilMillis is int && data.suspendedUntilMillis >= 0)) &&
              (!('suspensionReason' in data) || (data.suspensionReason is string && data.suspensionReason.size() <= 200)) &&
              (!('pointsBalance' in data) || (data.pointsBalance is int && data.pointsBalance >= 0 && data.pointsBalance <= 1000000)) &&
+             (!('halfPointsBalance' in data) || (data.halfPointsBalance is int && data.halfPointsBalance in [0, 1])) &&
+             (!('creatorEarnedPoints' in data) || (data.creatorEarnedPoints is int && data.creatorEarnedPoints >= 0 && data.creatorEarnedPoints <= 10000000)) &&
              (!('creatorEarningsCents' in data) || (data.creatorEarningsCents is int && data.creatorEarningsCents >= 0 && data.creatorEarningsCents <= 1000000000)) &&
              (!('totalSpentCents' in data) || (data.totalSpentCents is int && data.totalSpentCents >= 0 && data.totalSpentCents <= 1000000000)) &&
+             (!('proMember' in data) || data.proMember is bool) &&
+             (!('proExpiresAtMillis' in data) || (data.proExpiresAtMillis is int && data.proExpiresAtMillis >= 0)) &&
+             (!('profileBoostedUntilMillis' in data) || (data.profileBoostedUntilMillis is int && data.profileBoostedUntilMillis >= 0)) &&
+             (!('spotlightFrameUntilMillis' in data) || (data.spotlightFrameUntilMillis is int && data.spotlightFrameUntilMillis >= 0)) &&
+             (!('spotlightFrameColorHex' in data) || isValidHexColor(data.spotlightFrameColorHex)) &&
+             (!('loginStreakDays' in data) || (data.loginStreakDays is int && data.loginStreakDays >= 0 && data.loginStreakDays <= 36500)) &&
+             (!('lastLoginDayKey' in data) || isValidDayKey(data.lastLoginDayKey)) &&
+             (!('lastStreakRewardDayKey' in data) || isValidDayKey(data.lastStreakRewardDayKey)) &&
+             (!('referralCode' in data) || isValidReferralCode(data.referralCode)) &&
+             (!('referredByUserId' in data) || (data.referredByUserId is string && data.referredByUserId.size() <= 128)) &&
+             (!('referralBonusClaimed' in data) || data.referralBonusClaimed is bool) &&
+             (!('referralEarnedPoints' in data) || (data.referralEarnedPoints is int && data.referralEarnedPoints >= 0 && data.referralEarnedPoints <= 10000000)) &&
+             (!('ownedPttThemes' in data) || (data.ownedPttThemes is list && data.ownedPttThemes.size() <= 20)) &&
+             (!('selectedPttTheme' in data) || data.selectedPttTheme in ['CLASSIC', 'NEON_MAGENTA', 'TACTICAL_CYAN', 'SOLAR_GOLD', 'ROYAL_PURPLE', 'INFERNO_CRIMSON']) &&
+             (!('ownedPttChirps' in data) || (data.ownedPttChirps is list && data.ownedPttChirps.size() <= 20)) &&
+             (!('selectedPttChirp' in data) || data.selectedPttChirp in ['STANDARD', 'ROGER_BEEP', 'TACTICAL_SQUAWK', 'RETRO_POLICE', 'SCIFI_PULSE']) &&
              (!('dmPolicy' in data) || data.dmPolicy in ['OPEN', 'PAID', 'DISABLED']) &&
              (!('adultVerified' in data) || data.adultVerified is bool) &&
              (!('birthYear' in data) || (data.birthYear is int && (data.birthYear == 0 || (data.birthYear >= 1900 && data.birthYear <= request.time.year())))) &&
              (!('adultVerified' in data) || !data.adultVerified || isAdultVerifiedProfile(data)) &&
+             (!('sex' in data) || data.sex in ['UNSPECIFIED', 'MALE', 'FEMALE']) &&
+             (!('age' in data) || (data.age is int && (data.age == 0 || (data.age >= 18 && data.age <= 120)))) &&
+             (!('totalTimeSpentSec' in data) || (data.totalTimeSpentSec is int && data.totalTimeSpentSec >= 0 && data.totalTimeSpentSec <= 100000000)) &&
+             (!('appearanceStatus' in data) || data.appearanceStatus in ['ONLINE', 'IDLE', 'OFFLINE']) &&
              isBoundedStringList(data.blockedUserIds, 100) &&
              (!('pictureUploadTimestamps' in data) || isValidPictureTimestampList(data.pictureUploadTimestamps)) &&
+             (!('discoveryPhotoTimestamps' in data) || isValidDiscoveryPhotoTimestampList(data.discoveryPhotoTimestamps)) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
@@ -243,9 +353,27 @@ service cloud.firestore {
              (!('suspendedUntilMillis' in data) || data.suspendedUntilMillis == 0) &&
              (!('suspensionReason' in data) || data.suspensionReason == '') &&
              (!('pointsBalance' in data) || data.pointsBalance == 0) &&
+             (!('halfPointsBalance' in data) || data.halfPointsBalance == 0) &&
+             (!('creatorEarnedPoints' in data) || data.creatorEarnedPoints == 0) &&
              (!('creatorEarningsCents' in data) || data.creatorEarningsCents == 0) &&
              (!('totalSpentCents' in data) || data.totalSpentCents == 0) &&
-             (!('pictureUploadTimestamps' in data) || data.pictureUploadTimestamps.size() == 0);
+             (!('proMember' in data) || data.proMember == false) &&
+             (!('proExpiresAtMillis' in data) || data.proExpiresAtMillis == 0) &&
+             (!('profileBoostedUntilMillis' in data) || data.profileBoostedUntilMillis == 0) &&
+             (!('spotlightFrameUntilMillis' in data) || data.spotlightFrameUntilMillis == 0) &&
+             (!('loginStreakDays' in data) || data.loginStreakDays == 0) &&
+             (!('lastLoginDayKey' in data) || data.lastLoginDayKey == '') &&
+             (!('lastStreakRewardDayKey' in data) || data.lastStreakRewardDayKey == '') &&
+             (!('referredByUserId' in data) || data.referredByUserId == '') &&
+             (!('referralBonusClaimed' in data) || data.referralBonusClaimed == false) &&
+             (!('referralEarnedPoints' in data) || data.referralEarnedPoints == 0) &&
+             (!('ownedPttThemes' in data) || data.ownedPttThemes.size() == 0) &&
+             (!('selectedPttTheme' in data) || data.selectedPttTheme == 'CLASSIC') &&
+             (!('ownedPttChirps' in data) || data.ownedPttChirps.size() == 0) &&
+             (!('selectedPttChirp' in data) || data.selectedPttChirp == 'STANDARD') &&
+             (!('pictureUploadTimestamps' in data) || data.pictureUploadTimestamps.size() == 0) &&
+             (!('discoveryPhotoTimestamps' in data) || data.discoveryPhotoTimestamps.size() == 0) &&
+             (!('totalTimeSpentSec' in data) || data.totalTimeSpentSec == 0);
     }
 
     function isValidStaffRole(data) {
@@ -449,7 +577,7 @@ service cloud.firestore {
              ]) &&
              data.reporterId is string && data.reporterId.size() >= 1 && data.reporterId.size() <= 128 &&
              data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 40 &&
-             data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 128 &&
+             data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 260 &&
              data.roomTitle is string && data.roomTitle.size() >= 1 && data.roomTitle.size() <= 60 &&
              data.roomHostId is string && data.roomHostId.size() >= 1 && data.roomHostId.size() <= 128 &&
              data.targetUserId is string && data.targetUserId.size() >= 1 && data.targetUserId.size() <= 128 &&
@@ -468,8 +596,10 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'userId', 'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
-               'staffTier', 'postCount', 'dmPolicy', 'online', 'lastActiveAt',
-               'acceptedFriendIds', 'updatedAt'
+               'staffTier', 'proMember', 'proExpiresAtMillis', 'profileBoostedUntilMillis',
+               'spotlightFrameUntilMillis', 'spotlightFrameColorHex', 'referralCode',
+               'postCount', 'dmPolicy', 'sex', 'age', 'online', 'appearanceStatus',
+               'totalTimeSpentSec', 'lastActiveAt', 'acceptedFriendIds', 'updatedAt'
              ]) &&
              data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 40 &&
@@ -478,10 +608,20 @@ service cloud.firestore {
              isValidHexColor(data.avatarColorHex) &&
              (!('photoBase64' in data) || (data.photoBase64 is string && data.photoBase64.size() <= 140000)) &&
              data.staffTier in ['USER', 'SUPPORT', 'ADMIN'] &&
+             (!('proMember' in data) || data.proMember is bool) &&
+             (!('proExpiresAtMillis' in data) || (data.proExpiresAtMillis is int && data.proExpiresAtMillis >= 0)) &&
+             (!('profileBoostedUntilMillis' in data) || (data.profileBoostedUntilMillis is int && data.profileBoostedUntilMillis >= 0)) &&
+             (!('spotlightFrameUntilMillis' in data) || (data.spotlightFrameUntilMillis is int && data.spotlightFrameUntilMillis >= 0)) &&
+             (!('spotlightFrameColorHex' in data) || isValidHexColor(data.spotlightFrameColorHex)) &&
+             (!('referralCode' in data) || isValidReferralCode(data.referralCode)) &&
              (!('postCount' in data) || (data.postCount is int && data.postCount >= 0 && data.postCount <= 100000)) &&
              (!('acceptedFriendIds' in data) || isBoundedStringList(data.acceptedFriendIds, 200)) &&
              (!('dmPolicy' in data) || data.dmPolicy in ['OPEN', 'PAID', 'DISABLED']) &&
+             (!('sex' in data) || data.sex in ['UNSPECIFIED', 'MALE', 'FEMALE']) &&
+             (!('age' in data) || (data.age is int && (data.age == 0 || (data.age >= 18 && data.age <= 120)))) &&
              (!('online' in data) || data.online is bool) &&
+             (!('appearanceStatus' in data) || data.appearanceStatus in ['ONLINE', 'IDLE', 'OFFLINE']) &&
+             (!('totalTimeSpentSec' in data) || (data.totalTimeSpentSec is int && data.totalTimeSpentSec >= 0 && data.totalTimeSpentSec <= 100000000)) &&
              (!('lastActiveAt' in data) || (data.lastActiveAt is timestamp && data.lastActiveAt <= request.time)) &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
@@ -592,6 +732,9 @@ service cloud.firestore {
                'blockedByUserIds', 'pttEnabledUserIds',
                'disappearingDurationSec', 'readReceiptsDisabledByUserIds', 'readTimestampsByUserId',
                'lastAlertSenderId', 'lastAlertSenderName', 'lastAlertAtMillis',
+               'pinnedMessageId', 'pinnedMessageText', 'pinnedMessageSenderName',
+               'pinnedByUserId', 'pinnedByName', 'pinnedAtMillis',
+               'talkStreakCount', 'talkStreakLastMutualDay', 'lastMessageDayByUserId',
                'userAId', 'userAName', 'userAColorHex', 'userATier',
                'userBId', 'userBName', 'userBColorHex', 'userBTier',
                'lastMessageText', 'lastMessageSenderId', 'unreadByUserIds',
@@ -610,6 +753,15 @@ service cloud.firestore {
              (!('lastAlertSenderId' in data) || (data.lastAlertSenderId is string && data.lastAlertSenderId.size() <= 128)) &&
              (!('lastAlertSenderName' in data) || (data.lastAlertSenderName is string && data.lastAlertSenderName.size() <= 40)) &&
              (!('lastAlertAtMillis' in data) || (data.lastAlertAtMillis is int && data.lastAlertAtMillis >= 0)) &&
+             (!('pinnedMessageId' in data) || (data.pinnedMessageId is string && data.pinnedMessageId.size() <= 128)) &&
+             (!('pinnedMessageText' in data) || (data.pinnedMessageText is string && data.pinnedMessageText.size() <= 300)) &&
+             (!('pinnedMessageSenderName' in data) || (data.pinnedMessageSenderName is string && data.pinnedMessageSenderName.size() <= 40)) &&
+             (!('pinnedByUserId' in data) || (data.pinnedByUserId is string && data.pinnedByUserId.size() <= 128)) &&
+             (!('pinnedByName' in data) || (data.pinnedByName is string && data.pinnedByName.size() <= 40)) &&
+             (!('pinnedAtMillis' in data) || (data.pinnedAtMillis is int && data.pinnedAtMillis >= 0)) &&
+             (!('talkStreakCount' in data) || (data.talkStreakCount is int && data.talkStreakCount >= 0 && data.talkStreakCount <= 10000)) &&
+             (!('talkStreakLastMutualDay' in data) || isValidDayKey(data.talkStreakLastMutualDay)) &&
+             (!('lastMessageDayByUserId' in data) || (data.lastMessageDayByUserId is map && data.lastMessageDayByUserId.size() <= 15)) &&
              data.userAId is string && data.userAId.size() >= 1 && data.userAId.size() <= 128 &&
              data.userBId is string && data.userBId.size() >= 1 && data.userBId.size() <= 128 &&
              data.userAId != data.userBId &&
@@ -633,23 +785,35 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'threadId', 'participantIds', 'senderId', 'senderName', 'senderTier',
-               'text', 'imageBase64', 'audioBase64', 'audioDurationSec', 'expiresAtMillis', 'createdAt'
+               'text', 'imageBase64', 'audioBase64', 'audioDurationSec', 'expiresAtMillis',
+               'messageType', 'reactionsByUserId', 'createdAt'
              ]) &&
              data.threadId is string && data.threadId.size() >= 1 && data.threadId.size() <= 260 &&
              data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 15 &&
              data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
-             data.senderId in data.participantIds &&
+             (data.senderId in data.participantIds ||
+              (('messageType' in data) && data.messageType == 'SUPPORT_HANDOFF' && isAdmin())) &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 40 &&
              data.senderTier in ['USER', 'SUPPORT', 'ADMIN'] &&
              data.text is string && data.text.size() <= 500 &&
              (!('imageBase64' in data) || (data.imageBase64 is string && data.imageBase64.size() <= 460000)) &&
-             (!('audioBase64' in data) || (data.audioBase64 is string && data.audioBase64.size() <= 300000)) &&
+             (!('audioBase64' in data) || (data.audioBase64 is string && data.audioBase64.size() <= 360000)) &&
              (!('audioDurationSec' in data) || (data.audioDurationSec is int && data.audioDurationSec >= 0 && data.audioDurationSec <= 60)) &&
              (!('expiresAtMillis' in data) || (data.expiresAtMillis is int && data.expiresAtMillis >= 0)) &&
+             (!('messageType' in data) || data.messageType in ['TEXT', 'SCREENSHOT', 'SUPPORT_HANDOFF']) &&
+             (!('reactionsByUserId' in data) || (data.reactionsByUserId is map && data.reactionsByUserId.size() <= 20)) &&
              (data.text.size() >= 1 ||
               ('imageBase64' in data && data.imageBase64.size() >= 1) ||
               ('audioBase64' in data && data.audioBase64.size() >= 1)) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function canToggleDirectMessageReaction(newData, oldData) {
+      let oldMap = ('reactionsByUserId' in oldData) ? oldData.reactionsByUserId : {};
+      let newMap = ('reactionsByUserId' in newData) ? newData.reactionsByUserId : {};
+      return newMap.diff(oldMap).affectedKeys().hasOnly([request.auth.uid]) &&
+             (!(request.auth.uid in newMap) ||
+              newMap[request.auth.uid] in ['❤️', '👍', '😂', '😮', '😢', '🔥']);
     }
 
     function isValidSupportTicket(data) {
@@ -707,8 +871,8 @@ service cloud.firestore {
              data.recipientId is string && data.recipientId.size() >= 1 && data.recipientId.size() <= 128 &&
              data.recipientName is string && data.recipientName.size() >= 1 && data.recipientName.size() <= 40 &&
              data.senderId != data.recipientId &&
-             data.priceCents is int && data.priceCents == 1000 &&
-             data.creatorShareCents is int && data.creatorShareCents == 500 &&
+             data.priceCents is int && data.priceCents == 500 &&
+             data.creatorShareCents is int && data.creatorShareCents == 0 &&
              data.platformShareCents is int && data.platformShareCents == 500 &&
              data.active is bool &&
              data.kicked is bool &&
@@ -781,8 +945,8 @@ service cloud.firestore {
              data.subscriberId != data.creatorId &&
              data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 40 &&
              data.priceCents is int && data.priceCents == 1500 &&
-             data.creatorShareCents is int && data.creatorShareCents == 750 &&
-             data.platformShareCents is int && data.platformShareCents == 750 &&
+             data.creatorShareCents is int && data.creatorShareCents == 0 &&
+             data.platformShareCents is int && data.platformShareCents == 1500 &&
              data.active is bool &&
              data.expiresAtMillis is int && data.expiresAtMillis > request.time.toMillis() &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
@@ -799,7 +963,7 @@ service cloud.firestore {
                'pointsDelta', 'grossCents', 'creatorShareCents', 'platformShareCents',
                'playOrderId', 'playProductId', 'createdAt'
              ]) &&
-             data.type in ['BUY_POINTS', 'UNLOCK_PHOTO', 'SUBSCRIBE_CREATOR', 'BOOST_POST', 'UNLOCK_DM'] &&
+             data.type in ['BUY_POINTS', 'UNLOCK_PHOTO', 'SUBSCRIBE_CREATOR', 'BOOST_POST', 'BOOST_REEL', 'BOOST_PROFILE', 'BUY_PTT_ITEM', 'BUY_SPOTLIGHT_FRAME', 'DAILY_STREAK_BONUS', 'REFERRAL_BONUS', 'UNLOCK_DM', 'PRO_MEMBERSHIP'] &&
              data.buyerId is string && data.buyerId.size() >= 1 && data.buyerId.size() <= 128 &&
              data.buyerName is string && data.buyerName.size() >= 1 && data.buyerName.size() <= 40 &&
              data.creatorId is string && data.creatorId.size() <= 128 &&
@@ -822,16 +986,16 @@ service cloud.firestore {
                (data.type == 'UNLOCK_PHOTO' &&
                 data.pointsDelta == -2 &&
                 data.grossCents == 200 &&
-                data.creatorShareCents == 100 &&
-                data.platformShareCents == 100 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 200 &&
                 data.creatorId.size() >= 1 &&
                 data.creatorId != data.buyerId &&
                 data.postId.size() >= 1) ||
                (data.type == 'SUBSCRIBE_CREATOR' &&
                 data.pointsDelta == 0 &&
                 data.grossCents == 1500 &&
-                data.creatorShareCents == 750 &&
-                data.platformShareCents == 750 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 1500 &&
                 data.creatorId.size() >= 1 &&
                 data.creatorId != data.buyerId &&
                 data.postId == '') ||
@@ -843,13 +1007,69 @@ service cloud.firestore {
                 data.creatorId == '' &&
                 data.creatorName == '' &&
                 data.postId.size() >= 1) ||
+               (data.type == 'BOOST_REEL' &&
+                data.pointsDelta == -5 &&
+                data.grossCents == 500 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 500 &&
+                data.creatorId == '' &&
+                data.creatorName == '' &&
+                data.postId.size() >= 1) ||
+               (data.type == 'BOOST_PROFILE' &&
+                data.pointsDelta == -5 &&
+                data.grossCents == 500 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 500 &&
+                data.creatorId == '' &&
+                data.creatorName == '' &&
+                data.postId == '') ||
+               (data.type == 'BUY_PTT_ITEM' &&
+                data.pointsDelta in [-2, -3, -4] &&
+                data.grossCents == (-data.pointsDelta) * 100 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == data.grossCents &&
+                data.creatorId == '' &&
+                data.creatorName == '' &&
+                data.postId.size() >= 1) ||
+               (data.type == 'BUY_SPOTLIGHT_FRAME' &&
+                data.pointsDelta == -5 &&
+                data.grossCents == 500 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 500 &&
+                data.creatorId == '' &&
+                data.creatorName == '' &&
+                data.postId == '') ||
+               (data.type == 'DAILY_STREAK_BONUS' &&
+                data.pointsDelta in [0, 1] &&
+                data.grossCents == 0 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 0 &&
+                data.creatorId == '' &&
+                data.creatorName == '' &&
+                data.postId == '') ||
+               (data.type == 'REFERRAL_BONUS' &&
+                data.pointsDelta == 2 &&
+                data.grossCents == 0 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 0 &&
+                data.creatorId.size() >= 1 &&
+                data.creatorId != data.buyerId &&
+                data.postId == '') ||
                (data.type == 'UNLOCK_DM' &&
                 data.pointsDelta == 0 &&
-                data.grossCents == 1000 &&
-                data.creatorShareCents == 500 &&
+                data.grossCents == 500 &&
+                data.creatorShareCents == 0 &&
                 data.platformShareCents == 500 &&
                 data.creatorId.size() >= 1 &&
                 data.creatorId != data.buyerId &&
+                data.postId == '') ||
+               (data.type == 'PRO_MEMBERSHIP' &&
+                (data.pointsDelta == 0 || data.pointsDelta == -10) &&
+                data.grossCents == 999 &&
+                data.creatorShareCents == 0 &&
+                data.platformShareCents == 999 &&
+                data.creatorId == '' &&
+                data.creatorName == '' &&
                 data.postId == '')
              );
     }
@@ -878,32 +1098,93 @@ service cloud.firestore {
              ]) &&
              data.keys().hasOnly([
                'userId', 'targetRoomId', 'targetRoomTitle', 'fromRoomId',
-               'movedByAdminId', 'movedByAdminName', 'reason', 'consumed', 'createdAt'
+               'movedByAdminId', 'movedByAdminName', 'reason', 'consumed',
+               'transferType', 'targetThreadId', 'targetSupportUserId', 'targetSupportName',
+               'createdAt'
              ]) &&
              data.userId is string && data.userId == targetUid &&
-             data.targetRoomId is string && data.targetRoomId.size() >= 1 && data.targetRoomId.size() <= 128 &&
+             data.targetRoomId is string && data.targetRoomId.size() >= 1 && data.targetRoomId.size() <= 260 &&
              data.targetRoomTitle is string && data.targetRoomTitle.size() >= 1 && data.targetRoomTitle.size() <= 60 &&
              data.fromRoomId is string && data.fromRoomId.size() <= 128 &&
              data.movedByAdminId is string && data.movedByAdminId.size() >= 1 && data.movedByAdminId.size() <= 128 &&
              data.movedByAdminName is string && data.movedByAdminName.size() >= 1 && data.movedByAdminName.size() <= 40 &&
              data.reason is string && data.reason.size() <= 200 &&
+             (!('transferType' in data) || data.transferType in ['ROOM', 'SUPPORT_DM']) &&
+             (!('targetThreadId' in data) || (data.targetThreadId is string && data.targetThreadId.size() <= 260)) &&
+             (!('targetSupportUserId' in data) || (data.targetSupportUserId is string && data.targetSupportUserId.size() <= 128)) &&
+             (!('targetSupportName' in data) || (data.targetSupportName is string && data.targetSupportName.size() <= 40)) &&
              data.consumed is bool &&
              data.createdAt is timestamp && data.createdAt <= request.time;
     }
 
-    function isValidOwnerWalletUpdate(newData, oldData) {
-      let oldPts = existingInt(oldData, 'pointsBalance');
+    function isValidAppBroadcast(data) {
+      return data.keys().hasAll([
+               'title', 'message', 'severity', 'senderId', 'senderName', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'title', 'message', 'severity', 'senderId', 'senderName', 'createdAt'
+             ]) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 80 &&
+             data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+             data.severity in ['INFO', 'WARNING', 'URGENT'] &&
+             data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 40 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidPttShopPurchase(newData, oldData, diffKeys) {
+      let oldThemes = ('ownedPttThemes' in oldData) ? oldData.ownedPttThemes : [];
+      let newThemes = ('ownedPttThemes' in newData) ? newData.ownedPttThemes : [];
+      let oldChirps = ('ownedPttChirps' in oldData) ? oldData.ownedPttChirps : [];
+      let newChirps = ('ownedPttChirps' in newData) ? newData.ownedPttChirps : [];
+      return (newThemes.size() == oldThemes.size() + 1 &&
+              newThemes.hasAll(oldThemes) &&
+              newChirps == oldChirps &&
+              (!('selectedPttTheme' in diffKeys) || newData.selectedPttTheme in newThemes)) ||
+             (newChirps.size() == oldChirps.size() + 1 &&
+              newChirps.hasAll(oldChirps) &&
+              newThemes == oldThemes &&
+              (!('selectedPttChirp' in diffKeys) || newData.selectedPttChirp in newChirps));
+    }
+
+    function isValidOwnerWalletUpdate(newData, oldData, diffKeys) {
       let newPts = existingInt(newData, 'pointsBalance');
+      let ptsDelta = newPts - existingInt(oldData, 'pointsBalance');
       let oldSpent = existingInt(oldData, 'totalSpentCents');
       let newSpent = existingInt(newData, 'totalSpentCents');
-      let ptsDelta = newPts - oldPts;
-      return newPts >= 0 &&
-             canUpdatePictureUploadTimestamps(newData, oldData) &&
-             newData.diff(oldData).affectedKeys().hasOnly(['pointsBalance', 'totalSpentCents', 'pictureUploadTimestamps', 'updatedAt']) && (
-        (ptsDelta >= 2 && ptsDelta <= 500 && newSpent == oldSpent + (ptsDelta * 100)) ||
-        (ptsDelta == -2 && newSpent == oldSpent) ||
-        (ptsDelta == -5 && newSpent == oldSpent) ||
-        (ptsDelta == 0 && (newSpent == oldSpent + 1500 || newSpent == oldSpent + 1000))
+      let touchingPro = ('proMember' in diffKeys) || ('proExpiresAtMillis' in diffKeys);
+      let touchingProfileBoost = 'profileBoostedUntilMillis' in diffKeys;
+      let touchingPttShop = ('ownedPttThemes' in diffKeys) || ('ownedPttChirps' in diffKeys) ||
+                            ('selectedPttTheme' in diffKeys) || ('selectedPttChirp' in diffKeys);
+      return diffKeys.hasOnly([
+               'pointsBalance', 'totalSpentCents', 'proMember', 'proExpiresAtMillis',
+               'profileBoostedUntilMillis', 'ownedPttThemes', 'selectedPttTheme',
+               'ownedPttChirps', 'selectedPttChirp',
+               'pictureUploadTimestamps', 'discoveryPhotoTimestamps', 'updatedAt'
+             ]) &&
+             newPts >= 0 &&
+             canUpdatePictureUploadTimestamps(newData, oldData, diffKeys) &&
+             canUpdateDiscoveryPhotoTimestamps(newData, oldData, diffKeys) && (
+        (!touchingPro && !touchingProfileBoost && !touchingPttShop && (
+          (ptsDelta >= 2 && ptsDelta <= 500 && newSpent == oldSpent + (ptsDelta * 100)) ||
+          (ptsDelta == -2 && newSpent == oldSpent) ||
+          (ptsDelta == -5 && newSpent == oldSpent) ||
+          (ptsDelta == 0 && (newSpent == oldSpent + 1500 || newSpent == oldSpent + 500))
+        )) ||
+        (touchingPro && !touchingProfileBoost && !touchingPttShop &&
+         newData.proMember == true &&
+         newData.proExpiresAtMillis > request.time.toMillis() &&
+         newData.proExpiresAtMillis <= request.time.toMillis() + 2764800000 && (
+           (ptsDelta == 0 && newSpent == oldSpent + 999) ||
+           (ptsDelta == -10 && newSpent == oldSpent)
+         )) ||
+        (touchingProfileBoost && !touchingPro && !touchingPttShop &&
+         ptsDelta == -5 && newSpent == oldSpent &&
+         newData.profileBoostedUntilMillis > request.time.toMillis() &&
+         newData.profileBoostedUntilMillis <= request.time.toMillis() + 86700000) ||
+        (touchingPttShop && !touchingPro && !touchingProfileBoost &&
+         ptsDelta in [-2, -3, -4] && newSpent == oldSpent &&
+         isValidPttShopPurchase(newData, oldData, diffKeys))
       );
     }
 
@@ -923,11 +1204,192 @@ service cloud.firestore {
              data.boostedUntilMillis <= request.time.toMillis() + 86700000;
     }
 
-    function isValidCreatorEarningsCredit(newData, oldData) {
-      let oldEarn = existingInt(oldData, 'creatorEarningsCents');
-      let newEarn = existingInt(newData, 'creatorEarningsCents');
-      return newData.diff(oldData).affectedKeys().hasOnly(['creatorEarningsCents', 'updatedAt']) &&
-             (newEarn == oldEarn + 100 || newEarn == oldEarn + 500 || newEarn == oldEarn + 750);
+    function isValidCreatorEarningsCredit(newData, oldData, diffKeys) {
+      let ptsDelta = existingInt(newData, 'pointsBalance') - existingInt(oldData, 'pointsBalance');
+      let earnPtsDelta = existingInt(newData, 'creatorEarnedPoints') - existingInt(oldData, 'creatorEarnedPoints');
+      return diffKeys.hasOnly(['pointsBalance', 'creatorEarnedPoints', 'updatedAt']) &&
+             ptsDelta == earnPtsDelta &&
+             ptsDelta in [1, 8];
+    }
+
+    function isValidOwnerSpotlightFramePurchase(newData, oldData, diffKeys) {
+      let newPts = existingInt(newData, 'pointsBalance');
+      let ptsDelta = newPts - existingInt(oldData, 'pointsBalance');
+      return diffKeys.hasOnly(['pointsBalance', 'spotlightFrameUntilMillis', 'spotlightFrameColorHex', 'updatedAt']) &&
+             newPts >= 0 &&
+             ptsDelta == -5 &&
+             newData.spotlightFrameUntilMillis > request.time.toMillis() &&
+             newData.spotlightFrameUntilMillis <= request.time.toMillis() + 86700000;
+    }
+
+    function isValidOwnerDailyLoginStreakUpdate(newData, oldData, diffKeys) {
+      let oldStreak = existingInt(oldData, 'loginStreakDays');
+      let newStreak = existingInt(newData, 'loginStreakDays');
+      let oldLastDay = ('lastLoginDayKey' in oldData) ? oldData.lastLoginDayKey : '';
+      let oldRewardDay = ('lastStreakRewardDayKey' in oldData) ? oldData.lastStreakRewardDayKey : '';
+      let oldHalf = existingInt(oldData, 'halfPointsBalance');
+      let newHalf = existingInt(newData, 'halfPointsBalance');
+      let ptsDelta = existingInt(newData, 'pointsBalance') - existingInt(oldData, 'pointsBalance');
+      let claimingReward = ('halfPointsBalance' in diffKeys) || ('pointsBalance' in diffKeys) || ('lastStreakRewardDayKey' in diffKeys);
+      return diffKeys.hasOnly([
+               'loginStreakDays', 'lastLoginDayKey', 'lastStreakRewardDayKey',
+               'halfPointsBalance', 'pointsBalance', 'updatedAt'
+             ]) &&
+             ('lastLoginDayKey' in diffKeys) &&
+             newData.lastLoginDayKey != '' &&
+             newData.lastLoginDayKey != oldLastDay &&
+             (newStreak == 1 || newStreak == oldStreak + 1) && (
+               !claimingReward ||
+               (!isProProfileData(oldData) &&
+                newStreak >= 7 &&
+                (newStreak % 7) == 0 &&
+                newData.lastStreakRewardDayKey == newData.lastLoginDayKey &&
+                newData.lastStreakRewardDayKey != oldRewardDay &&
+                ((oldHalf == 0 && newHalf == 1 && ptsDelta == 0) ||
+                 (oldHalf == 1 && newHalf == 0 && ptsDelta == 1)))
+             );
+    }
+
+    function isValidOwnerReferralUpdate(userId, newData, oldData, diffKeys) {
+      let oldClaimed = ('referralBonusClaimed' in oldData) && oldData.referralBonusClaimed == true;
+      let ptsDelta = existingInt(newData, 'pointsBalance') - existingInt(oldData, 'pointsBalance');
+      return (diffKeys.hasOnly(['referralCode', 'referredByUserId', 'updatedAt']) &&
+              (!('referralCode' in diffKeys) || !('referralCode' in oldData) || oldData.referralCode == '') &&
+              (!('referredByUserId' in diffKeys) ||
+               ((!('referredByUserId' in oldData) || oldData.referredByUserId == '') &&
+                newData.referredByUserId != userId))) ||
+             (diffKeys.hasOnly(['pointsBalance', 'referralBonusClaimed', 'referredByUserId', 'updatedAt']) &&
+              hasVerifiedEmail() &&
+              !oldClaimed &&
+              newData.referralBonusClaimed == true &&
+              ptsDelta == 2 &&
+              exists(/databases/$(database)/documents/referrals/$(request.auth.uid)) &&
+              get(/databases/$(database)/documents/referrals/$(request.auth.uid)).data.bonusClaimed == false &&
+              getAfter(/databases/$(database)/documents/referrals/$(request.auth.uid)).data.bonusClaimed == true);
+    }
+
+    function isValidInviterReferralCredit(inviterUid, newData, oldData, diffKeys) {
+      let ptsDelta = existingInt(newData, 'pointsBalance') - existingInt(oldData, 'pointsBalance');
+      let refDelta = existingInt(newData, 'referralEarnedPoints') - existingInt(oldData, 'referralEarnedPoints');
+      return diffKeys.hasOnly(['pointsBalance', 'referralEarnedPoints', 'updatedAt']) &&
+             hasVerifiedEmail() &&
+             ptsDelta == 2 &&
+             refDelta == 2 &&
+             exists(/databases/$(database)/documents/referrals/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/referrals/$(request.auth.uid)).data.inviterId == inviterUid &&
+             get(/databases/$(database)/documents/referrals/$(request.auth.uid)).data.bonusClaimed == false &&
+             getAfter(/databases/$(database)/documents/referrals/$(request.auth.uid)).data.bonusClaimed == true;
+    }
+
+    function isValidReferralRecord(data, inviteeId) {
+      return data.keys().hasAll([
+               'inviteeId', 'inviteeName', 'inviterId', 'inviterName', 'referralCode',
+               'accountVerified', 'firstPttSent', 'bonusClaimed', 'bonusPointsEach',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'inviteeId', 'inviteeName', 'inviterId', 'inviterName', 'referralCode',
+               'accountVerified', 'firstPttSent', 'bonusClaimed', 'bonusPointsEach',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.inviteeId is string && data.inviteeId == inviteeId &&
+             data.inviteeName is string && data.inviteeName.size() >= 1 && data.inviteeName.size() <= 40 &&
+             data.inviterId is string && data.inviterId.size() >= 1 && data.inviterId.size() <= 128 &&
+             data.inviterId != data.inviteeId &&
+             data.inviterName is string && data.inviterName.size() >= 1 && data.inviterName.size() <= 40 &&
+             isValidReferralCode(data.referralCode) && data.referralCode.size() >= 4 &&
+             data.accountVerified is bool &&
+             data.firstPttSent is bool &&
+             data.bonusClaimed is bool &&
+             data.bonusPointsEach is int && data.bonusPointsEach == 2 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidReel(data) {
+      return data.keys().hasAll([
+               'authorId', 'authorName', 'authorHandle', 'authorColorHex', 'authorTier',
+               'caption', 'thumbnailBase64', 'durationSec', 'chunkCount', 'mimeType',
+               'likedByUserIds', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'authorId', 'authorName', 'authorHandle', 'authorColorHex', 'authorPhotoBase64',
+               'authorTier', 'caption', 'thumbnailBase64', 'durationSec', 'chunkCount', 'mimeType',
+               'boostedAtMillis', 'boostedUntilMillis', 'likedByUserIds',
+               'commentCount', 'shareCount', 'createdAt', 'updatedAt'
+             ]) &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 40 &&
+             data.authorHandle is string && data.authorHandle.size() >= 2 && data.authorHandle.size() <= 30 &&
+             isValidHexColor(data.authorColorHex) &&
+             (!('authorPhotoBase64' in data) || (data.authorPhotoBase64 is string && data.authorPhotoBase64.size() <= 140000)) &&
+             data.authorTier in ['USER', 'SUPPORT', 'ADMIN'] &&
+             data.caption is string && data.caption.size() <= 300 &&
+             data.thumbnailBase64 is string && data.thumbnailBase64.size() <= 140000 &&
+             data.durationSec is int && data.durationSec >= 1 && data.durationSec <= 30 &&
+             data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 16 &&
+             data.mimeType == 'video/mp4' &&
+             (!('boostedAtMillis' in data) || (data.boostedAtMillis is int && data.boostedAtMillis >= 0)) &&
+             (!('boostedUntilMillis' in data) || (data.boostedUntilMillis is int && data.boostedUntilMillis >= 0)) &&
+             isBoundedStringList(data.likedByUserIds, 500) &&
+             (!('commentCount' in data) || (data.commentCount is int && data.commentCount >= 0 && data.commentCount <= 100000)) &&
+             (!('shareCount' in data) || (data.shareCount is int && data.shareCount >= 0 && data.shareCount <= 100000)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidReelChunk(data, reelId) {
+      return data.keys().hasAll(['reelId', 'authorId', 'chunkIndex', 'dataBase64', 'createdAt']) &&
+             data.keys().hasOnly(['reelId', 'authorId', 'chunkIndex', 'dataBase64', 'createdAt']) &&
+             data.reelId is string && data.reelId == reelId &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.chunkIndex is int && data.chunkIndex >= 0 && data.chunkIndex <= 15 &&
+             data.dataBase64 is string && data.dataBase64.size() >= 1 && data.dataBase64.size() <= 680000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidReelComment(data, reelId) {
+      return data.keys().hasAll([
+               'reelId', 'authorId', 'authorName', 'authorHandle',
+               'authorColorHex', 'authorTier', 'text', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'reelId', 'authorId', 'authorName', 'authorHandle',
+               'authorColorHex', 'authorTier', 'text', 'createdAt', 'updatedAt'
+             ]) &&
+             data.reelId is string && data.reelId == reelId &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 40 &&
+             data.authorHandle is string && data.authorHandle.size() >= 2 && data.authorHandle.size() <= 30 &&
+             isValidHexColor(data.authorColorHex) &&
+             data.authorTier in ['USER', 'SUPPORT', 'ADMIN'] &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 400 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function canUpdateReel(newData, oldData) {
+      let diffKeys = newData.diff(oldData).affectedKeys();
+      let isAuthor = oldData.authorId == request.auth.uid;
+      return (isAuthor && diffKeys.hasOnly([
+                'caption', 'authorName', 'authorHandle', 'authorColorHex', 'authorPhotoBase64', 'updatedAt'
+              ])) ||
+             (diffKeys.hasOnly(['likedByUserIds', 'updatedAt']) && (
+               (request.auth.uid in newData.likedByUserIds &&
+                !(request.auth.uid in oldData.likedByUserIds) &&
+                newData.likedByUserIds.size() == oldData.likedByUserIds.size() + 1) ||
+               (!(request.auth.uid in newData.likedByUserIds) &&
+                request.auth.uid in oldData.likedByUserIds &&
+                newData.likedByUserIds.size() == oldData.likedByUserIds.size() - 1)
+             )) ||
+             (isAuthor && diffKeys.hasOnly(['boostedAtMillis', 'boostedUntilMillis', 'updatedAt']) &&
+              isValidBoostWindow(newData) && callerPaidFivePointsInBatch()) ||
+             (diffKeys.hasOnly(['commentCount', 'updatedAt']) &&
+              (newData.commentCount == existingInt(oldData, 'commentCount') + 1 ||
+               (existingInt(oldData, 'commentCount') > 0 &&
+                newData.commentCount == existingInt(oldData, 'commentCount') - 1))) ||
+             (diffKeys.hasOnly(['shareCount', 'updatedAt']) &&
+              newData.shareCount == existingInt(oldData, 'shareCount') + 1);
     }
 
     function canUpdateProfilePost(newData, oldData) {
@@ -981,42 +1443,42 @@ service cloud.firestore {
     function canUpdateDirectThread(threadId, newData, oldData) {
       let diffKeys = newData.diff(oldData).affectedKeys();
       let wasGroup = isThreadGroup(oldData);
-      let nowGroup = isThreadGroup(newData);
-      return wasGroup == nowGroup && (
+      let sameParticipants = newData.participantIds == oldData.participantIds;
+      let notBlocked = !hasAnyThreadBlock(oldData);
+      let notKicked = !isKickedFromThread(oldData, request.auth.uid);
+      return wasGroup == isThreadGroup(newData) && (
         // Action 1: Normal messaging preview / unread / participant display updates (disallowed for new messages if blocked)
-        (newData.participantIds == oldData.participantIds &&
-         !isKickedFromThread(oldData, request.auth.uid) &&
-         (
-           (!hasAnyThreadBlock(oldData) &&
-            diffKeys.hasOnly([
-              'userAName', 'userAColorHex', 'userATier',
-              'userBName', 'userBColorHex', 'userBTier',
-              'lastMessageText', 'lastMessageSenderId',
-              'unreadByUserIds', 'readTimestampsByUserId', 'updatedAt'
-            ])) ||
-           (hasAnyThreadBlock(oldData) &&
-            diffKeys.hasOnly(['unreadByUserIds', 'updatedAt']))
-         )) ||
+        (sameParticipants &&
+         notKicked &&
+         ((notBlocked &&
+           diffKeys.hasOnly([
+             'userAName', 'userAColorHex', 'userATier',
+             'userBName', 'userBColorHex', 'userBTier',
+             'lastMessageText', 'lastMessageSenderId',
+             'unreadByUserIds', 'readTimestampsByUserId',
+             'talkStreakCount', 'talkStreakLastMutualDay', 'lastMessageDayByUserId',
+             'updatedAt'
+           ])) ||
+          (!notBlocked &&
+           diffKeys.hasOnly(['unreadByUserIds', 'updatedAt'])))) ||
         // Action 2: Add new members or update group name in an existing group chat
         (wasGroup &&
-         !isKickedFromThread(oldData, request.auth.uid) &&
-         newData.participantIds.hasAll(oldData.participantIds) &&
-         newData.participantIds.size() <= 15 &&
          diffKeys.hasOnly([
            'participantIds', 'participantNamesById', 'groupName',
            'lastMessageText', 'lastMessageSenderId', 'unreadByUserIds', 'updatedAt'
-         ])) ||
+         ]) &&
+         notKicked &&
+         newData.participantIds.hasAll(oldData.participantIds) &&
+         newData.participantIds.size() <= 15) ||
         // Action 3: Recipient kicks a paid DM member from messaging them
         (!wasGroup &&
-         newData.participantIds == oldData.participantIds &&
-         !isKickedFromThread(newData, request.auth.uid) &&
-         diffKeys.hasOnly([
-           'kickedUserIds', 'lastMessageText', 'lastMessageSenderId', 'updatedAt'
-         ])) ||
+         diffKeys.hasOnly(['kickedUserIds', 'lastMessageText', 'lastMessageSenderId', 'updatedAt']) &&
+         sameParticipants &&
+         !isKickedFromThread(newData, request.auth.uid)) ||
         // Action 4: 1-on-1 participant blocks or unblocks contact in this chat (stops incoming messages)
         (!wasGroup &&
-         newData.participantIds == oldData.participantIds &&
          diffKeys.hasOnly(['blockedByUserIds', 'unreadByUserIds', 'updatedAt']) &&
+         sameParticipants &&
          (
            (request.auth.uid in newData.blockedByUserIds &&
             (!('blockedByUserIds' in oldData)
@@ -1032,10 +1494,8 @@ service cloud.firestore {
          )) ||
         // Action 5: Friend Attention Alert (1-on-1 accepted friends only, max 1 alert every 5 minutes)
         (!wasGroup &&
-         newData.participantIds == oldData.participantIds &&
-         !hasAnyThreadBlock(oldData) &&
-         !isKickedFromThread(oldData, request.auth.uid) &&
          diffKeys.hasOnly(['lastAlertSenderId', 'lastAlertSenderName', 'lastAlertAtMillis', 'updatedAt']) &&
+         sameParticipants && notBlocked && notKicked &&
          newData.lastAlertSenderId == request.auth.uid &&
          newData.lastAlertAtMillis > 0 &&
          newData.lastAlertAtMillis <= request.time.toMillis() + 60000 &&
@@ -1047,15 +1507,9 @@ service cloud.firestore {
           (request.time.toMillis() - oldData.lastAlertAtMillis) >= 300000)) ||
         // Action 6: Participant toggles their own UID in pttEnabledUserIds for live walkie-talkie PTT
         // (Admins automatically enable/disable PTT for all participants in the private chat)
-        (newData.participantIds == oldData.participantIds &&
-         !hasAnyThreadBlock(oldData) &&
-         !isKickedFromThread(oldData, request.auth.uid) &&
-         diffKeys.hasOnly(['pttEnabledUserIds', 'updatedAt']) &&
+        (diffKeys.hasOnly(['pttEnabledUserIds', 'updatedAt']) &&
+         sameParticipants && notBlocked && notKicked &&
          (
-           (isAdmin() &&
-            ((newData.pttEnabledUserIds.size() == oldData.participantIds.size() &&
-              newData.pttEnabledUserIds.hasAll(oldData.participantIds)) ||
-             newData.pttEnabledUserIds.size() == 0)) ||
            (request.auth.uid in newData.pttEnabledUserIds &&
             (!('pttEnabledUserIds' in oldData)
               ? newData.pttEnabledUserIds.size() == 1
@@ -1066,18 +1520,18 @@ service cloud.firestore {
             ('pttEnabledUserIds' in oldData) &&
             (request.auth.uid in oldData.pttEnabledUserIds) &&
             newData.pttEnabledUserIds.size() == oldData.pttEnabledUserIds.size() - 1 &&
-            oldData.pttEnabledUserIds.hasAll(newData.pttEnabledUserIds))
+            oldData.pttEnabledUserIds.hasAll(newData.pttEnabledUserIds)) ||
+           (isAdmin() &&
+            ((newData.pttEnabledUserIds.size() == oldData.participantIds.size() &&
+              newData.pttEnabledUserIds.hasAll(oldData.participantIds)) ||
+             newData.pttEnabledUserIds.size() == 0))
          )) ||
         // Action 7: Participant updates disappearing messages timer for this chat
-        (newData.participantIds == oldData.participantIds &&
-         !hasAnyThreadBlock(oldData) &&
-         !isKickedFromThread(oldData, request.auth.uid) &&
-         diffKeys.hasOnly(['disappearingDurationSec', 'updatedAt'])) ||
+        (diffKeys.hasOnly(['disappearingDurationSec', 'updatedAt']) &&
+         sameParticipants && notBlocked && notKicked) ||
         // Action 8: Participant toggles their own UID in readReceiptsDisabledByUserIds
-        (newData.participantIds == oldData.participantIds &&
-         !hasAnyThreadBlock(oldData) &&
-         !isKickedFromThread(oldData, request.auth.uid) &&
-         diffKeys.hasOnly(['readReceiptsDisabledByUserIds', 'updatedAt']) &&
+        (diffKeys.hasOnly(['readReceiptsDisabledByUserIds', 'updatedAt']) &&
+         sameParticipants && notBlocked && notKicked &&
          (
            (request.auth.uid in newData.readReceiptsDisabledByUserIds &&
             (!('readReceiptsDisabledByUserIds' in oldData)
@@ -1090,7 +1544,33 @@ service cloud.firestore {
             (request.auth.uid in oldData.readReceiptsDisabledByUserIds) &&
             newData.readReceiptsDisabledByUserIds.size() == oldData.readReceiptsDisabledByUserIds.size() - 1 &&
             oldData.readReceiptsDisabledByUserIds.hasAll(newData.readReceiptsDisabledByUserIds))
-         ))
+         )) ||
+        // Action 9: Admin routes a user to a Support member's 1-on-1 private chat
+        (!wasGroup &&
+         diffKeys.hasOnly(['lastMessageText', 'lastMessageSenderId', 'unreadByUserIds', 'updatedAt']) &&
+         sameParticipants &&
+         isAdmin()) ||
+        // Action 10: Participant pins or unpins a message in this private chat
+        (diffKeys.hasOnly([
+          'pinnedMessageId', 'pinnedMessageText', 'pinnedMessageSenderName',
+          'pinnedByUserId', 'pinnedByName', 'pinnedAtMillis', 'updatedAt'
+        ]) &&
+         sameParticipants && notBlocked && notKicked &&
+         (
+           (newData.pinnedMessageId == '' &&
+            newData.pinnedMessageText == '' &&
+            newData.pinnedMessageSenderName == '' &&
+            newData.pinnedByUserId == '' &&
+            newData.pinnedByName == '' &&
+            newData.pinnedAtMillis == 0) ||
+           (newData.pinnedMessageId.size() >= 1 &&
+            newData.pinnedByUserId == request.auth.uid &&
+            newData.pinnedAtMillis > 0)
+         )) ||
+        // Action 11: Update mutual talk streak after live PTT clip exchange in 1-on-1 DM
+        (!wasGroup &&
+         diffKeys.hasOnly(['talkStreakCount', 'talkStreakLastMutualDay', 'lastMessageDayByUserId', 'updatedAt']) &&
+         sameParticipants && notBlocked && notKicked)
       );
     }
 
@@ -1098,6 +1578,88 @@ service cloud.firestore {
       return request.auth.uid in threadData.participantIds &&
              !isKickedFromThread(threadData, request.auth.uid) &&
              (isThreadGroup(threadData) || (!hasAnyThreadBlock(threadData) && canMessageUser(otherOneOnOneUid(threadData))));
+    }
+
+    function isValidUserProfileDiff(data, diffKeys) {
+      return data.updatedAt is timestamp && data.updatedAt <= request.time &&
+             (!('displayName' in diffKeys) || (data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 40)) &&
+             (!('handle' in diffKeys) || (data.handle is string && data.handle.size() >= 2 && data.handle.size() <= 30)) &&
+             (!('bio' in diffKeys) || (data.bio is string && data.bio.size() <= 200)) &&
+             (!('avatarColorHex' in diffKeys) || isValidHexColor(data.avatarColorHex)) &&
+             (!('photoBase64' in diffKeys) || (data.photoBase64 is string && data.photoBase64.size() <= 140000)) &&
+             (!('dmPolicy' in diffKeys) || data.dmPolicy in ['OPEN', 'PAID', 'DISABLED']) &&
+             (!('sex' in diffKeys) || data.sex in ['UNSPECIFIED', 'MALE', 'FEMALE']) &&
+             (!('age' in diffKeys) || (data.age is int && (data.age == 0 || (data.age >= 18 && data.age <= 120)))) &&
+             (!('appearanceStatus' in diffKeys) || data.appearanceStatus in ['ONLINE', 'IDLE', 'OFFLINE']) &&
+             (!('adultVerified' in diffKeys) || !data.adultVerified || isAdultVerifiedProfile(data)) &&
+             (!('birthYear' in diffKeys) || (data.birthYear is int && (data.birthYear == 0 || (data.birthYear >= 1900 && data.birthYear <= request.time.year())))) &&
+             (!('pointsBalance' in diffKeys) || (data.pointsBalance is int && data.pointsBalance >= 0 && data.pointsBalance <= 1000000)) &&
+             (!('halfPointsBalance' in diffKeys) || (data.halfPointsBalance is int && data.halfPointsBalance in [0, 1])) &&
+             (!('creatorEarnedPoints' in diffKeys) || (data.creatorEarnedPoints is int && data.creatorEarnedPoints >= 0 && data.creatorEarnedPoints <= 10000000)) &&
+             (!('totalSpentCents' in diffKeys) || (data.totalSpentCents is int && data.totalSpentCents >= 0 && data.totalSpentCents <= 1000000000)) &&
+             (!('proMember' in diffKeys) || data.proMember is bool) &&
+             (!('proExpiresAtMillis' in diffKeys) || (data.proExpiresAtMillis is int && data.proExpiresAtMillis >= 0)) &&
+             (!('profileBoostedUntilMillis' in diffKeys) || (data.profileBoostedUntilMillis is int && data.profileBoostedUntilMillis >= 0)) &&
+             (!('spotlightFrameUntilMillis' in diffKeys) || (data.spotlightFrameUntilMillis is int && data.spotlightFrameUntilMillis >= 0)) &&
+             (!('spotlightFrameColorHex' in diffKeys) || isValidHexColor(data.spotlightFrameColorHex)) &&
+             (!('loginStreakDays' in diffKeys) || (data.loginStreakDays is int && data.loginStreakDays >= 0 && data.loginStreakDays <= 36500)) &&
+             (!('lastLoginDayKey' in diffKeys) || isValidDayKey(data.lastLoginDayKey)) &&
+             (!('lastStreakRewardDayKey' in diffKeys) || isValidDayKey(data.lastStreakRewardDayKey)) &&
+             (!('referralCode' in diffKeys) || isValidReferralCode(data.referralCode)) &&
+             (!('referredByUserId' in diffKeys) || (data.referredByUserId is string && data.referredByUserId.size() <= 128)) &&
+             (!('referralBonusClaimed' in diffKeys) || data.referralBonusClaimed is bool) &&
+             (!('referralEarnedPoints' in diffKeys) || (data.referralEarnedPoints is int && data.referralEarnedPoints >= 0 && data.referralEarnedPoints <= 10000000)) &&
+             (!('ownedPttThemes' in diffKeys) || (data.ownedPttThemes is list && data.ownedPttThemes.size() <= 20)) &&
+             (!('selectedPttTheme' in diffKeys) || data.selectedPttTheme in ['CLASSIC', 'NEON_MAGENTA', 'TACTICAL_CYAN', 'SOLAR_GOLD', 'ROYAL_PURPLE', 'INFERNO_CRIMSON']) &&
+             (!('ownedPttChirps' in diffKeys) || (data.ownedPttChirps is list && data.ownedPttChirps.size() <= 20)) &&
+             (!('selectedPttChirp' in diffKeys) || data.selectedPttChirp in ['STANDARD', 'ROGER_BEEP', 'TACTICAL_SQUAWK', 'RETRO_POLICE', 'SCIFI_PULSE']) &&
+             (!('blockedUserIds' in diffKeys) || isBoundedStringList(data.blockedUserIds, 100)) &&
+             (!('pictureUploadTimestamps' in diffKeys) || isValidPictureTimestampList(data.pictureUploadTimestamps)) &&
+             (!('discoveryPhotoTimestamps' in diffKeys) || isValidDiscoveryPhotoTimestampList(data.discoveryPhotoTimestamps)) &&
+             (!('suspendedUntilMillis' in diffKeys) || (data.suspendedUntilMillis is int && data.suspendedUntilMillis >= 0)) &&
+             (!('suspensionReason' in diffKeys) || (data.suspensionReason is string && data.suspensionReason.size() <= 200)) &&
+             (!('totalTimeSpentSec' in diffKeys) || (data.totalTimeSpentSec is int && data.totalTimeSpentSec >= 0 && data.totalTimeSpentSec <= 100000000));
+    }
+
+    function canUpdateUserDoc(userId, newData, oldData) {
+      let diffKeys = newData.diff(oldData).affectedKeys();
+      let isOwner = request.auth.uid == userId;
+      return isValidUserProfileDiff(newData, diffKeys) && (
+             (isOwner &&
+              diffKeys.hasOnly([
+                'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
+                'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled',
+                'invisibleModePreferred', 'dmPolicy', 'adultVerified', 'birthYear',
+                'sex', 'age', 'totalTimeSpentSec', 'appearanceStatus',
+                'selectedPttTheme', 'selectedPttChirp',
+                'blockedUserIds', 'pictureUploadTimestamps',
+                'discoveryPhotoTimestamps', 'updatedAt'
+              ]) &&
+              (!('invisibleModePreferred' in diffKeys) || !newData.invisibleModePreferred || canUseInvisibleMode()) &&
+              (!('selectedPttTheme' in diffKeys) || newData.selectedPttTheme == 'CLASSIC' || (('ownedPttThemes' in oldData) && newData.selectedPttTheme in oldData.ownedPttThemes)) &&
+              (!('selectedPttChirp' in diffKeys) || newData.selectedPttChirp == 'STANDARD' || (('ownedPttChirps' in oldData) && newData.selectedPttChirp in oldData.ownedPttChirps)) &&
+              canUpdatePictureUploadTimestamps(newData, oldData, diffKeys) &&
+              canUpdateDiscoveryPhotoTimestamps(newData, oldData, diffKeys) &&
+              (!('photoBase64' in diffKeys) || newData.photoBase64.size() == 0 || callerUnderPictureUploadLimit()) &&
+              (!('totalTimeSpentSec' in diffKeys) ||
+               (newData.totalTimeSpentSec >= existingInt(oldData, 'totalTimeSpentSec') &&
+                newData.totalTimeSpentSec <= existingInt(oldData, 'totalTimeSpentSec') + 86400))) ||
+             (isOwner && isValidOwnerWalletUpdate(newData, oldData, diffKeys)) ||
+             (isOwner && isValidOwnerSpotlightFramePurchase(newData, oldData, diffKeys)) ||
+             (isOwner && isValidOwnerDailyLoginStreakUpdate(newData, oldData, diffKeys)) ||
+             (isOwner && isValidOwnerReferralUpdate(userId, newData, oldData, diffKeys)) ||
+             (!isOwner && isValidCreatorEarningsCredit(newData, oldData, diffKeys)) ||
+             (!isOwner && isValidInviterReferralCredit(userId, newData, oldData, diffKeys)) ||
+             (diffKeys.hasOnly([
+                'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
+                'invisibleModePreferred', 'globallyBanned',
+                'disableCreateRoom', 'disableEnterRoom',
+                'disableMic', 'disableVideo', 'proMember', 'proExpiresAtMillis',
+                'suspendedUntilMillis', 'suspensionReason', 'updatedAt'
+              ]) && isAdmin()) ||
+             (diffKeys.hasOnly(['suspendedUntilMillis', 'suspensionReason', 'updatedAt']) &&
+              isSupport() && !isTargetAdmin(userId))
+      );
     }
 
     // --- 1. USERS COLLECTION ---
@@ -1118,44 +1680,9 @@ service cloud.firestore {
 
       allow update: if isSignedIn() &&
                        isValidId(userId) &&
-                       isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
-                       incoming().createdAt == existing().createdAt && (
-                          // Action 1: Owner updates their own preferences/profile (cannot bypass bans/suspensions/restrictions or picture upload rate limit)
-                         (request.auth.uid == userId &&
-                          (!('invisibleModePreferred' in incoming()) || !incoming().invisibleModePreferred || canUseInvisibleMode()) &&
-                          canUpdatePictureUploadTimestamps(incoming(), existing()) &&
-                          (!('photoBase64' in incoming().diff(existing()).affectedKeys()) ||
-                           incoming().photoBase64.size() == 0 ||
-                           callerUnderPictureUploadLimit()) &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
-                            'pushToTalkPreferred', 'darkThemePreferred', 'nightModeEnabled',
-                            'invisibleModePreferred', 'dmPolicy', 'adultVerified', 'birthYear',
-                            'blockedUserIds', 'pictureUploadTimestamps', 'updatedAt'
-                          ])) ||
-                         // Action 1b: Owner buys points (2..500 pts at $1/pt), spends 2 pts to unlock photo, or pays $15/mo subscription
-                         (request.auth.uid == userId &&
-                          isValidOwnerWalletUpdate(incoming(), existing())) ||
-                         // Action 2: Admin edits any user's profile, restrictions, global ban, or suspension
-                         (isAdmin() &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'displayName', 'handle', 'bio', 'avatarColorHex', 'photoBase64',
-                            'invisibleModePreferred', 'globallyBanned',
-                            'disableCreateRoom', 'disableEnterRoom',
-                            'disableMic', 'disableVideo',
-                            'suspendedUntilMillis', 'suspensionReason', 'updatedAt'
-                          ])) ||
-                         // Action 3: Support staff applies or updates timed suspension on non-admin users
-                         (isSupport() &&
-                          !isTargetAdmin(userId) &&
-                          incoming().diff(existing()).affectedKeys().hasOnly([
-                            'suspendedUntilMillis', 'suspensionReason', 'updatedAt'
-                          ])) ||
-                         // Action 4: Buyer credits creator's earnings share ($1.00 = 100c for 2-pt photo unlock, or $7.50 = 750c for $15 subscription)
-                         (request.auth.uid != userId &&
-                          isValidCreatorEarningsCredit(incoming(), existing()))
-                       );
+                       incoming().createdAt == existing().createdAt &&
+                       canUpdateUserDoc(userId, incoming(), existing());
 
       allow delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
     }
@@ -1520,16 +2047,20 @@ service cloud.firestore {
       allow list: if isSignedIn() &&
                      (resource.data.reporterId == request.auth.uid ||
                       resource.data.roomHostId == request.auth.uid ||
-                      isAdmin());
+                      isAdminOrSupport());
 
       allow create: if isSignedIn() &&
                        isValidId(reportId) &&
                        incoming().reporterId == request.auth.uid &&
                        incoming().status == 'OPEN' &&
                        incoming().resolutionNote == '' &&
-                       isValidSafetyReport(incoming()) &&
-                       roomExists(incoming().roomId) &&
-                       roomDoc(incoming().roomId).data.hostId == incoming().roomHostId;
+                       isValidSafetyReport(incoming()) && (
+                         (roomExists(incoming().roomId) &&
+                          roomDoc(incoming().roomId).data.hostId == incoming().roomHostId) ||
+                         (exists(/databases/$(database)/documents/directThreads/$(incoming().roomId)) &&
+                          request.auth.uid in get(/databases/$(database)/documents/directThreads/$(incoming().roomId)).data.participantIds &&
+                          incoming().roomHostId == request.auth.uid)
+                       );
 
       allow update: if isSignedIn() &&
                        isValidId(reportId) &&
@@ -1557,7 +2088,10 @@ service cloud.firestore {
                        incoming().userId == userId &&
                        isValidDirectoryEntry(incoming()) && (
                          (request.auth.uid == userId &&
-                          isAllowedStaffTierClaim(incoming().staffTier)) ||
+                          isAllowedStaffTierClaim(incoming().staffTier) &&
+                          isAllowedProDirectoryClaim(incoming()) &&
+                          isAllowedBoostedProfileDirectoryClaim(incoming()) &&
+                          isAllowedSpotlightFrameDirectoryClaim(incoming())) ||
                          isAdmin()
                        );
 
@@ -1566,7 +2100,10 @@ service cloud.firestore {
                        incoming().userId == existing().userId &&
                        isValidDirectoryEntry(incoming()) && (
                          (request.auth.uid == userId &&
-                          isAllowedStaffTierClaim(incoming().staffTier)) ||
+                          isAllowedStaffTierClaim(incoming().staffTier) &&
+                          isAllowedProDirectoryClaim(incoming()) &&
+                          isAllowedBoostedProfileDirectoryClaim(incoming()) &&
+                          isAllowedSpotlightFrameDirectoryClaim(incoming())) ||
                          isAdmin()
                        );
 
@@ -1618,15 +2155,18 @@ service cloud.firestore {
                      request.auth.uid in resource.data.participantIds;
 
       allow create: if isSignedIn() &&
-                       request.auth.uid in incoming().participantIds &&
                        callerPassesProfileChecks(false, false, false, false) &&
-                       isValidDirectThread(incoming()) &&
-                       (isThreadGroup(incoming()) ||
-                        (!isBlockedBetween(request.auth.uid, otherOneOnOneUid(incoming())) &&
-                         canMessageUser(otherOneOnOneUid(incoming()))));
+                       isValidDirectThread(incoming()) && (
+                         (request.auth.uid in incoming().participantIds &&
+                          (isThreadGroup(incoming()) ||
+                           (!isBlockedBetween(request.auth.uid, otherOneOnOneUid(incoming())) &&
+                            canMessageUser(otherOneOnOneUid(incoming()))))) ||
+                         (isAdmin() && !isThreadGroup(incoming()))
+                       );
 
       allow update: if isSignedIn() &&
-                       request.auth.uid in existing().participantIds &&
+                       (request.auth.uid in existing().participantIds ||
+                        (isAdmin() && !isThreadGroup(existing()))) &&
                        isValidDirectThread(incoming()) &&
                        incoming().userAId == existing().userAId &&
                        incoming().userBId == existing().userBId &&
@@ -1639,7 +2179,7 @@ service cloud.firestore {
       match /messages/{messageId} {
         allow get: if isSignedIn() &&
                       isValidId(messageId) &&
-                      request.auth.uid in existing().participantIds;
+                      (request.auth.uid in existing().participantIds || isAdmin());
 
         // Single-filter rule matching client whereArrayContains("participantIds", uid) — zero composite indexes!
         allow list: if isSignedIn() &&
@@ -1649,15 +2189,30 @@ service cloud.firestore {
                          isValidId(messageId) &&
                          incoming().threadId == threadId &&
                          incoming().senderId == request.auth.uid &&
-                         request.auth.uid in incoming().participantIds &&
                          isAllowedStaffTierClaim(incoming().senderTier) &&
                          callerPassesProfileChecks(false, false, false, false) &&
                          (!('imageBase64' in incoming()) || incoming().imageBase64.size() == 0 || callerUnderPictureUploadLimit()) &&
                          isValidDirectMessage(incoming()) &&
-                         exists(/databases/$(database)/documents/directThreads/$(threadId)) &&
-                         canSendMessageInThread(get(/databases/$(database)/documents/directThreads/$(threadId)).data);
+                         exists(/databases/$(database)/documents/directThreads/$(threadId)) && (
+                           (request.auth.uid in incoming().participantIds &&
+                            canSendMessageInThread(get(/databases/$(database)/documents/directThreads/$(threadId)).data)) ||
+                           (isAdmin() &&
+                            ('messageType' in incoming()) &&
+                            incoming().messageType == 'SUPPORT_HANDOFF' &&
+                            incoming().participantIds == get(/databases/$(database)/documents/directThreads/$(threadId)).data.participantIds)
+                         );
 
-        allow update: if false;
+        allow update: if isSignedIn() &&
+                         isValidId(messageId) &&
+                         request.auth.uid in existing().participantIds &&
+                         isValidDirectMessage(incoming()) &&
+                         incoming().threadId == existing().threadId &&
+                         incoming().participantIds == existing().participantIds &&
+                         incoming().senderId == existing().senderId &&
+                         incoming().text == existing().text &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['reactionsByUserId']) &&
+                         canToggleDirectMessageReaction(incoming(), existing());
 
         allow delete: if isSignedIn() &&
                          isValidId(messageId) &&
@@ -1665,7 +2220,7 @@ service cloud.firestore {
       }
     }
 
-    // --- 6b. PAID PRIVATE MESSAGE ACCESS PASSES ($10 = $5 user / $5 app owner, kickable by recipient) ---
+    // --- 6b. PAID PRIVATE MESSAGE ACCESS PASSES ($5 to app owner; recipient earns +1 usable point; kickable by recipient) ---
     match /dmAccessPasses/{passId} {
       allow get: if isSignedIn() &&
                     (resource == null ||
@@ -1729,7 +2284,7 @@ service cloud.firestore {
                          (isValidBoostWindow(incoming()) && callerPaidFivePointsInBatch())
                        ) &&
                        (!('locked' in incoming()) || incoming().locked == false || isAdultVerifiedCaller()) &&
-                       (incoming().imageBase64.size() == 0 || callerUnderPictureUploadLimit()) &&
+                       (incoming().imageBase64.size() == 0 || callerCanUploadPostImage()) &&
                        isAllowedStaffTierClaim(incoming().authorTier) &&
                        callerPassesProfileChecks(false, false, false, false) &&
                        isValidProfilePost(incoming());
@@ -1923,6 +2478,143 @@ service cloud.firestore {
 
       allow delete: if isSignedIn() &&
                        (existing().followerId == request.auth.uid || isAdmin());
+    }
+
+    // --- 14. APP-WIDE ADMIN BROADCASTS (Admin Messages to All Users) ---
+    match /appBroadcasts/{broadcastId} {
+      allow get, list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+                       isValidId(broadcastId) &&
+                       isAdmin() &&
+                       incoming().senderId == request.auth.uid &&
+                       isValidAppBroadcast(incoming());
+
+      allow update: if false;
+
+      allow delete: if isSignedIn() &&
+                       isValidId(broadcastId) &&
+                       isAdmin();
+    }
+
+    // --- 15. REELS (Pro-Only Vertical Short Videos up to 30s + $5 Boost + Likes/Comments/Shares) ---
+    match /reels/{reelId} {
+      allow get, list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+                       isValidId(reelId) &&
+                       isProCaller() &&
+                       incoming().authorId == request.auth.uid &&
+                       isAllowedStaffTierClaim(incoming().authorTier) &&
+                       incoming().likedByUserIds.size() == 0 &&
+                       (!('commentCount' in incoming()) || incoming().commentCount == 0) &&
+                       (!('shareCount' in incoming()) || incoming().shareCount == 0) &&
+                       (!('boostedAtMillis' in incoming()) ||
+                        incoming().boostedAtMillis == 0 ||
+                        (isValidBoostWindow(incoming()) && callerPaidFivePointsInBatch())) &&
+                       isValidReel(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(reelId) &&
+                       incoming().authorId == existing().authorId &&
+                       incoming().durationSec == existing().durationSec &&
+                       incoming().chunkCount == existing().chunkCount &&
+                       incoming().mimeType == existing().mimeType &&
+                       incoming().createdAt == existing().createdAt &&
+                       canUpdateReel(incoming(), existing()) &&
+                       isValidReel(incoming());
+
+      allow delete: if isSignedIn() &&
+                       isValidId(reelId) &&
+                       (existing().authorId == request.auth.uid || isAdminOrSupport());
+
+      match /chunks/{chunkId} {
+        allow get, list: if isSignedIn();
+
+        allow create: if isSignedIn() &&
+                         isValidId(chunkId) &&
+                         isProCaller() &&
+                         incoming().authorId == request.auth.uid &&
+                         exists(/databases/$(database)/documents/reels/$(reelId)) &&
+                         get(/databases/$(database)/documents/reels/$(reelId)).data.authorId == request.auth.uid &&
+                         isValidReelChunk(incoming(), reelId);
+
+        allow update: if false;
+
+        allow delete: if isSignedIn() &&
+                         isValidId(chunkId) &&
+                         (existing().authorId == request.auth.uid || isAdminOrSupport());
+      }
+
+      match /comments/{commentId} {
+        allow get, list: if isSignedIn();
+
+        allow create: if isSignedIn() &&
+                         isValidId(commentId) &&
+                         incoming().authorId == request.auth.uid &&
+                         isAllowedStaffTierClaim(incoming().authorTier) &&
+                         exists(/databases/$(database)/documents/reels/$(reelId)) &&
+                         isValidReelComment(incoming(), reelId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(commentId) &&
+                         existing().authorId == request.auth.uid &&
+                         incoming().reelId == existing().reelId &&
+                         incoming().authorId == existing().authorId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['text', 'updatedAt']) &&
+                         isValidReelComment(incoming(), reelId);
+
+        allow delete: if isSignedIn() &&
+                         isValidId(commentId) &&
+                         (existing().authorId == request.auth.uid ||
+                          (exists(/databases/$(database)/documents/reels/$(reelId)) &&
+                           get(/databases/$(database)/documents/reels/$(reelId)).data.authorId == request.auth.uid) ||
+                          isAdminOrSupport());
+      }
+    }
+
+    // --- 16. INVITE-A-FRIEND REFERRALS (+2 Points Each Upon Verified Account + First PTT Clip) ---
+    match /referrals/{inviteeId} {
+      allow get: if isSignedIn() &&
+                    isValidId(inviteeId) &&
+                    (resource == null ||
+                     existing().inviteeId == request.auth.uid ||
+                     existing().inviterId == request.auth.uid ||
+                     isAdmin());
+
+      allow list: if isSignedIn() &&
+                     (resource.data.inviteeId == request.auth.uid ||
+                      resource.data.inviterId == request.auth.uid ||
+                      isAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(inviteeId) &&
+                       inviteeId == request.auth.uid &&
+                       incoming().inviteeId == request.auth.uid &&
+                       incoming().inviterId != request.auth.uid &&
+                       incoming().bonusClaimed == false &&
+                       exists(/databases/$(database)/documents/userDirectory/$(incoming().inviterId)) &&
+                       isValidReferralRecord(incoming(), inviteeId);
+
+      allow update: if isSignedIn() &&
+                       isValidId(inviteeId) &&
+                       inviteeId == request.auth.uid &&
+                       existing().bonusClaimed == false &&
+                       incoming().inviteeId == existing().inviteeId &&
+                       incoming().inviterId == existing().inviterId &&
+                       incoming().referralCode == existing().referralCode &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'accountVerified', 'firstPttSent', 'bonusClaimed', 'updatedAt'
+                       ]) &&
+                       (!incoming().bonusClaimed ||
+                        (hasVerifiedEmail() &&
+                         incoming().accountVerified == true &&
+                         incoming().firstPttSent == true)) &&
+                       isValidReferralRecord(incoming(), inviteeId);
+
+      allow delete: if isSignedIn() && isValidId(inviteeId) && isAdmin();
     }
   }
 }

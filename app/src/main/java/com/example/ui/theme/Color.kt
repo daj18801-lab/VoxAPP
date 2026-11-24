@@ -38,13 +38,17 @@ val SafetyEmerald = Color(0xFF12A166)
 val PresenceOnlineGreen = Color(0xFF22C55E)
 val PresenceOfflineRed = Color(0xFFEF4444)
 
-// Role-Coded Username Colors (Users = Blue, Support = Green, Admins = Red)
+// Role-Coded Username Colors:
+// Free = White (Dark) / Black (Light), Pro = Blue, Support = Green, Admins = Red,
+// Room Creators / Room Admins / Room Co-Admins = Purple
 val UserNameBlueDark = Color(0xFF5CB0FF)
 val UserNameBlueLight = Color(0xFF1261D1)
 val SupportNameGreenDark = Color(0xFF2EE68A)
 val SupportNameGreenLight = Color(0xFF118748)
 val AdminNameRedDark = Color(0xFFFF5263)
 val AdminNameRedLight = Color(0xFFD31B2E)
+val RoomLeaderPurpleDark = Color(0xFFC084FC)
+val RoomLeaderPurpleLight = Color(0xFF7C3AED)
 
 // Text Colors (Dark)
 val TextPrimaryDark = Color(0xFFF2F7FF)

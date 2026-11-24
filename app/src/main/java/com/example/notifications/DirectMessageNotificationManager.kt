@@ -59,6 +59,7 @@ object DirectMessageNotificationPrefs {
     private const val KEY_LAST_NOTIFIED_PREFIX = "dm_last_"
     private const val KEY_LAST_FRIEND_ALERT_PREFIX = "dm_last_alert_"
     private const val KEY_LAST_SENT_ALERT_PREFIX = "dm_last_sent_alert_"
+    private const val KEY_DISMISSED_BROADCASTS_PREFIX = "dismissed_app_broadcasts_"
 
     const val FRIEND_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 
@@ -126,6 +127,22 @@ object DirectMessageNotificationPrefs {
 
     fun markBaselineSeeded(context: Context, uid: String) {
         prefs(context).edit().putBoolean("${KEY_SEEDED_PREFIX}$uid", true).apply()
+    }
+
+    fun getDismissedBroadcastIds(context: Context, uid: String): Set<String> {
+        if (uid.isBlank()) return emptySet()
+        return prefs(context)
+            .getStringSet("${KEY_DISMISSED_BROADCASTS_PREFIX}$uid", emptySet())
+            ?.toSet()
+            ?: emptySet()
+    }
+
+    fun markBroadcastDismissed(context: Context, uid: String, broadcastId: String) {
+        if (uid.isBlank() || broadcastId.isBlank()) return
+        val updated = getDismissedBroadcastIds(context, uid) + broadcastId
+        prefs(context).edit()
+            .putStringSet("${KEY_DISMISSED_BROADCASTS_PREFIX}$uid", updated)
+            .apply()
     }
 
     fun getLastNotifiedKey(context: Context, uid: String, threadId: String): String =

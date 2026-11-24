@@ -3,6 +3,7 @@ package com.example.billing
 import android.app.Activity
 import android.content.Context
 import android.util.Log
+import com.android.billingclient.api.AcknowledgePurchaseParams
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingClientStateListener
 import com.android.billingclient.api.BillingFlowParams
@@ -14,6 +15,7 @@ import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
 import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
+import com.android.billingclient.api.acknowledgePurchase
 import com.android.billingclient.api.consumePurchase
 import com.android.billingclient.api.queryProductDetails
 import com.android.billingclient.api.queryPurchasesAsync
@@ -53,6 +55,11 @@ sealed interface PlayBillingEvent {
         val orderId: String
     ) : PlayBillingEvent
 
+    data class ProSubscriptionVerified(
+        val productId: String,
+        val orderId: String
+    ) : PlayBillingEvent
+
     data class Message(val text: String) : PlayBillingEvent
 }
 
@@ -68,6 +75,9 @@ class PlayBillingManager(
 
     companion object {
         private const val TAG = "PlayBillingManager"
+
+        const val PRO_SUBSCRIPTION_PRODUCT_ID = "voxstage_pro_monthly"
+        const val PRO_FALLBACK_PRICE_LABEL = "$9.99/mo"
 
         val POINTS_CATALOG: List<PointsProductSku> = listOf(
             PointsProductSku(productId = "voxstage_points_2", points = 2L, fallbackPriceLabel = "$2.00"),
@@ -92,6 +102,9 @@ class PlayBillingManager(
 
     private val _productDetailsByPoints = MutableStateFlow<Map<Long, ProductDetails>>(emptyMap())
     val productDetailsByPoints: StateFlow<Map<Long, ProductDetails>> = _productDetailsByPoints.asStateFlow()
+
+    private val _proSubscriptionDetails = MutableStateFlow<ProductDetails?>(null)
+    val proSubscriptionDetails: StateFlow<ProductDetails?> = _proSubscriptionDetails.asStateFlow()
 
     private val _isPurchaseInFlight = MutableStateFlow(false)
     val isPurchaseInFlight: StateFlow<Boolean> = _isPurchaseInFlight.asStateFlow()
@@ -174,25 +187,99 @@ class PlayBillingManager(
             }
             _productDetailsByPoints.value = detailsMap
             if (detailsMap.isEmpty()) {
-                _statusBanner.value = "Connected to Google Play. Create in-app product IDs (voxstage_points_2..50) in Google Play Console to activate checkout."
+                _statusBanner.value = "Connected to Google Play. Create in-app product IDs (voxstage_points_2..50 & voxstage_pro_monthly) in Google Play Console to activate checkout."
             } else {
                 _statusBanner.value = null
             }
         } else {
             Log.w(TAG, "queryProductDetails failed: ${result.billingResult.responseCode} ${result.billingResult.debugMessage}")
         }
+
+        // Query Pro Monthly Subscription ($9.99/mo)
+        val subsProduct = QueryProductDetailsParams.Product.newBuilder()
+            .setProductId(PRO_SUBSCRIPTION_PRODUCT_ID)
+            .setProductType(BillingClient.ProductType.SUBS)
+            .build()
+        val subsParams = QueryProductDetailsParams.newBuilder()
+            .setProductList(listOf(subsProduct))
+            .build()
+        val subsResult = billingClient.queryProductDetails(subsParams)
+        if (subsResult.billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+            _proSubscriptionDetails.value = subsResult.productDetailsList
+                .orEmpty()
+                .firstOrNull { it.productId == PRO_SUBSCRIPTION_PRODUCT_ID }
+        }
     }
 
     private suspend fun reconcilePendingPurchases() {
         if (!billingClient.isReady) return
-        val params = QueryPurchasesParams.newBuilder()
+        val inAppParams = QueryPurchasesParams.newBuilder()
             .setProductType(BillingClient.ProductType.INAPP)
             .build()
-        val result = billingClient.queryPurchasesAsync(params)
-        if (result.billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-            result.purchasesList.forEach { purchase ->
+        val inAppResult = billingClient.queryPurchasesAsync(inAppParams)
+        if (inAppResult.billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+            inAppResult.purchasesList.forEach { purchase ->
                 handlePurchase(purchase)
             }
+        }
+        val subsParams = QueryPurchasesParams.newBuilder()
+            .setProductType(BillingClient.ProductType.SUBS)
+            .build()
+        val subsResult = billingClient.queryPurchasesAsync(subsParams)
+        if (subsResult.billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+            subsResult.purchasesList.forEach { purchase ->
+                handlePurchase(purchase)
+            }
+        }
+    }
+
+    fun formattedProPrice(): String {
+        val offer = _proSubscriptionDetails.value
+            ?.subscriptionOfferDetails
+            ?.firstOrNull()
+            ?.pricingPhases
+            ?.pricingPhaseList
+            ?.firstOrNull()
+        return offer?.formattedPrice?.let { "$it/mo" } ?: PRO_FALLBACK_PRICE_LABEL
+    }
+
+    fun launchProSubscription(activity: Activity) {
+        if (!billingClient.isReady) {
+            startConnection()
+            _events.tryEmit(
+                PlayBillingEvent.Message(
+                    "Connecting to Google Play Store… Please make sure Google Play is signed in and try again."
+                )
+            )
+            return
+        }
+        val details = _proSubscriptionDetails.value
+        val offerToken = details?.subscriptionOfferDetails?.firstOrNull()?.offerToken
+        if (details == null || offerToken.isNullOrBlank()) {
+            scope.launch { queryCatalogProducts() }
+            _events.tryEmit(
+                PlayBillingEvent.Message(
+                    "Google Play subscription '$PRO_SUBSCRIPTION_PRODUCT_ID' (\$9.99/mo) is not active in Play Console yet. You can also activate Pro with 10 points below."
+                )
+            )
+            return
+        }
+        val productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
+            .setProductDetails(details)
+            .setOfferToken(offerToken)
+            .build()
+        val flowParams = BillingFlowParams.newBuilder()
+            .setProductDetailsParamsList(listOf(productParams))
+            .build()
+        _isPurchaseInFlight.value = true
+        val launchResult = billingClient.launchBillingFlow(activity, flowParams)
+        if (launchResult.responseCode != BillingClient.BillingResponseCode.OK) {
+            _isPurchaseInFlight.value = false
+            _events.tryEmit(
+                PlayBillingEvent.Message(
+                    "Could not open Google Play subscription checkout: ${launchResult.debugMessage.ifBlank { "Error ${launchResult.responseCode}" }}"
+                )
+            )
         }
     }
 
@@ -302,6 +389,32 @@ class PlayBillingManager(
                 if (token.isBlank() || !processedTokens.add(token)) return
 
                 val productId = purchase.products.firstOrNull().orEmpty()
+                if (productId == PRO_SUBSCRIPTION_PRODUCT_ID) {
+                    val orderId = purchase.orderId.orEmpty().ifBlank { token.take(36) }
+                    if (!purchase.isAcknowledged) {
+                        val ackParams = AcknowledgePurchaseParams.newBuilder()
+                            .setPurchaseToken(token)
+                            .build()
+                        val ackResult = billingClient.acknowledgePurchase(ackParams)
+                        if (ackResult.responseCode != BillingClient.BillingResponseCode.OK) {
+                            processedTokens.remove(token)
+                            _events.tryEmit(
+                                PlayBillingEvent.Message(
+                                    "Could not confirm Pro subscription (${ackResult.debugMessage}). Please retry."
+                                )
+                            )
+                            return
+                        }
+                    }
+                    _events.tryEmit(
+                        PlayBillingEvent.ProSubscriptionVerified(
+                            productId = productId,
+                            orderId = orderId
+                        )
+                    )
+                    return
+                }
+
                 val points = pointsForProductId(productId)
                 if (points == null) {
                     Log.w(TAG, "Unknown productId purchased: $productId")

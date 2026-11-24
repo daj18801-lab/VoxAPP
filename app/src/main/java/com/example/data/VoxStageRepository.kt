@@ -9,13 +9,17 @@ import com.google.firebase.auth.auth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
@@ -673,6 +677,10 @@ class VoxStageRepository(
                     "dmPolicy" to DmPolicy.OPEN.name,
                     "adultVerified" to false,
                     "birthYear" to 0L,
+                    "sex" to UserSex.UNSPECIFIED.name,
+                    "age" to 0L,
+                    "totalTimeSpentSec" to 0L,
+                    "appearanceStatus" to PresenceStatus.ONLINE.name,
                     "blockedUserIds" to emptyList<String>(),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -692,6 +700,31 @@ class VoxStageRepository(
                 resolvedPhoto = snapshot.getString("photoBase64").orEmpty()
                 resolvedDmPolicy = DmPolicy.fromRaw(snapshot.getString("dmPolicy"))
             }
+            val resolvedSex = if (snapshot.exists()) {
+                UserSex.fromRaw(snapshot.getString("sex"))
+            } else {
+                UserSex.UNSPECIFIED
+            }
+            val resolvedAge = if (snapshot.exists()) {
+                val explicitAge = (snapshot.get("age") as? Number)?.toLong() ?: 0L
+                if (explicitAge in 18L..120L) {
+                    explicitAge
+                } else {
+                    val bYear = (snapshot.get("birthYear") as? Number)?.toLong() ?: 0L
+                    if (bYear >= 1900L) {
+                        val currYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+                        (currYear - bYear).takeIf { it in 18L..120L } ?: 0L
+                    } else 0L
+                }
+            } else 0L
+            val resolvedAppearance = if (snapshot.exists()) {
+                PresenceStatus.fromRaw(snapshot.getString("appearanceStatus"))
+            } else {
+                PresenceStatus.ONLINE
+            }
+            val resolvedTimeSpent = if (snapshot.exists()) {
+                (snapshot.get("totalTimeSpentSec") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            } else 0L
             syncUserDirectoryEntry(
                 userId = uid,
                 displayName = resolvedName,
@@ -700,7 +733,11 @@ class VoxStageRepository(
                 avatarColorHex = resolvedColor,
                 photoBase64 = resolvedPhoto,
                 staffTier = staffTier,
-                dmPolicy = resolvedDmPolicy
+                dmPolicy = resolvedDmPolicy,
+                sex = resolvedSex,
+                age = resolvedAge,
+                appearanceStatus = resolvedAppearance,
+                totalTimeSpentSec = resolvedTimeSpent
             )
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -719,7 +756,17 @@ class VoxStageRepository(
         avatarColorHex: String,
         photoBase64: String = "",
         staffTier: StaffTier,
-        dmPolicy: DmPolicy? = null
+        dmPolicy: DmPolicy? = null,
+        sex: UserSex? = null,
+        age: Long? = null,
+        appearanceStatus: PresenceStatus? = null,
+        totalTimeSpentSec: Long? = null,
+        proMember: Boolean? = null,
+        proExpiresAtMillis: Long? = null,
+        profileBoostedUntilMillis: Long? = null,
+        spotlightFrameUntilMillis: Long? = null,
+        spotlightFrameColorHex: String? = null,
+        referralCode: String? = null
     ) {
         val safeName = displayName.trim().ifBlank { "Member" }.take(40)
         val safeHandle = handle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
@@ -731,6 +778,30 @@ class VoxStageRepository(
             val existing = ref.get().await()
             val existingPostCount = (existing.get("postCount") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
             val effectivePolicy = dmPolicy ?: DmPolicy.fromRaw(existing.getString("dmPolicy"))
+            val effectiveSex = sex ?: UserSex.fromRaw(existing.getString("sex"))
+            val rawExistingAge = (existing.get("age") as? Number)?.toLong() ?: 0L
+            val candidateAge = age ?: rawExistingAge
+            val effectiveAge = if (candidateAge in 18L..120L) candidateAge else 0L
+            val effectiveAppearance = appearanceStatus ?: PresenceStatus.fromRaw(existing.getString("appearanceStatus"))
+            val existingTime = (existing.get("totalTimeSpentSec") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            val effectiveTimeSpent = maxOf(existingTime, (totalTimeSpentSec ?: existingTime).coerceAtLeast(0L))
+            val existingProMember = existing.getBoolean("proMember") == true
+            val existingProExpiry = (existing.get("proExpiresAtMillis") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            val effectiveProMember = proMember ?: existingProMember
+            val effectiveProExpiry = (proExpiresAtMillis ?: existingProExpiry).coerceAtLeast(0L)
+            val existingProfileBoost = (existing.get("profileBoostedUntilMillis") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            val effectiveProfileBoost = (profileBoostedUntilMillis ?: existingProfileBoost).coerceAtLeast(0L)
+            val existingSpotlightUntil = (existing.get("spotlightFrameUntilMillis") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            val effectiveSpotlightUntil = (spotlightFrameUntilMillis ?: existingSpotlightUntil).coerceAtLeast(0L)
+            val rawSpotlightHex = spotlightFrameColorHex ?: existing.getString("spotlightFrameColorHex") ?: SpotlightFrameColor.ELECTRIC_CYAN.primaryHex
+            val effectiveSpotlightHex = if (Regex("^#[0-9A-Fa-f]{6}$").matches(rawSpotlightHex)) rawSpotlightHex else SpotlightFrameColor.ELECTRIC_CYAN.primaryHex
+            val effectiveReferralCode = (referralCode ?: existing.getString("referralCode").orEmpty())
+                .trim()
+                .ifBlank { generateReferralCode(userId) }
+            val existingFriends = (existing.get("acceptedFriendIds") as? List<*>)
+                ?.mapNotNull { it as? String }
+                ?.take(200)
+                .orEmpty()
             val isSelfSync = auth.currentUser?.uid == userId
             val effectiveOnline = if (isSelfSync) true else (existing.getBoolean("online") == true)
             val payload = mutableMapOf<String, Any>(
@@ -741,9 +812,20 @@ class VoxStageRepository(
                 "avatarColorHex" to safeColor,
                 "photoBase64" to safePhoto,
                 "staffTier" to staffTier.name,
+                "proMember" to effectiveProMember,
+                "proExpiresAtMillis" to effectiveProExpiry,
+                "profileBoostedUntilMillis" to effectiveProfileBoost,
+                "spotlightFrameUntilMillis" to effectiveSpotlightUntil,
+                "spotlightFrameColorHex" to effectiveSpotlightHex,
+                "referralCode" to effectiveReferralCode,
                 "postCount" to existingPostCount,
                 "dmPolicy" to effectivePolicy.name,
+                "sex" to effectiveSex.name,
+                "age" to effectiveAge,
                 "online" to effectiveOnline,
+                "appearanceStatus" to effectiveAppearance.name,
+                "totalTimeSpentSec" to effectiveTimeSpent,
+                "acceptedFriendIds" to existingFriends,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             if (isSelfSync) {
@@ -752,6 +834,73 @@ class VoxStageRepository(
                 existing.getTimestamp("lastActiveAt")?.let { payload["lastActiveAt"] = it }
             }
             ref.set(payload).await()
+        }
+    }
+
+    suspend fun updateAppearanceStatus(status: PresenceStatus): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val batch = db.batch()
+            val userRef = db.collection("users").document(uid)
+            val dirRef = db.collection("userDirectory").document(uid)
+            batch.update(
+                userRef,
+                mapOf(
+                    "appearanceStatus" to status.name,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            val dirSnap = dirRef.get().await()
+            if (dirSnap.exists()) {
+                batch.update(
+                    dirRef,
+                    mapOf(
+                        "appearanceStatus" to status.name,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun incrementTimeSpentOnApp(deltaSeconds: Long) {
+        val uid = auth.currentUser?.uid ?: return
+        val safeDelta = deltaSeconds.coerceIn(1L, 3600L)
+        runCatching {
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            if (!userSnap.exists()) return@runCatching
+            val currentSec = (userSnap.get("totalTimeSpentSec") as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            val nextSec = (currentSec + safeDelta).coerceAtMost(100_000_000L)
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "totalTimeSpentSec" to nextSec,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            val dirRef = db.collection("userDirectory").document(uid)
+            val dirSnap = dirRef.get().await()
+            if (dirSnap.exists()) {
+                batch.update(
+                    dirRef,
+                    mapOf(
+                        "totalTimeSpentSec" to nextSec,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.commit().await()
         }
     }
 
@@ -818,13 +967,26 @@ class VoxStageRepository(
             require(currentYear - birthYear >= 18) {
                 "You must be 18 or older to lock photos or view locked photos."
             }
+            val derivedAge = (currentYear - birthYear).toLong().coerceIn(18L, 120L)
             db.collection("users").document(uid).update(
                 mapOf(
                     "adultVerified" to true,
                     "birthYear" to birthYear.toLong(),
+                    "age" to derivedAge,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            runCatching {
+                val dirRef = db.collection("userDirectory").document(uid)
+                if (dirRef.get().await().exists()) {
+                    dirRef.update(
+                        mapOf(
+                            "age" to derivedAge,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -842,6 +1004,8 @@ class VoxStageRepository(
         pushToTalkPreferred: Boolean,
         nightModeEnabled: Boolean,
         invisibleModePreferred: Boolean? = null,
+        sex: UserSex = UserSex.UNSPECIFIED,
+        age: Long = 0L,
         currentStaffTier: StaffTier = StaffTier.USER,
         currentPhotoBase64: String = "",
         currentDmPolicy: DmPolicy = DmPolicy.OPEN
@@ -856,6 +1020,7 @@ class VoxStageRepository(
             require(safeName.isNotEmpty()) { "Display name cannot be empty." }
             require(safeHandle.length >= 2) { "Handle must be at least 2 characters." }
             require(Regex("^#[0-9A-Fa-f]{6}$").matches(avatarColorHex)) { "Invalid color hex." }
+            require(age == 0L || age in 18L..120L) { "Age must be between 18 and 120 (or left blank)." }
 
             val updates = mutableMapOf<String, Any>(
                 "displayName" to safeName,
@@ -865,6 +1030,8 @@ class VoxStageRepository(
                 "pushToTalkPreferred" to pushToTalkPreferred,
                 "darkThemePreferred" to nightModeEnabled,
                 "nightModeEnabled" to nightModeEnabled,
+                "sex" to sex.name,
+                "age" to age,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             if (invisibleModePreferred != null) {
@@ -879,7 +1046,9 @@ class VoxStageRepository(
                 avatarColorHex = avatarColorHex,
                 photoBase64 = currentPhotoBase64,
                 staffTier = currentStaffTier,
-                dmPolicy = currentDmPolicy
+                dmPolicy = currentDmPolicy,
+                sex = sex,
+                age = age
             )
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -915,6 +1084,43 @@ class VoxStageRepository(
             )
         }
         return (activeTimestamps + nowMs).takeLast(UserProfile.MAX_PICTURES_PER_WINDOW)
+    }
+
+    /**
+     * Enforces the Discovery weekly photo limit for free members: max 2 pictures per 7-day rolling window.
+     * Paid members (who have purchased Points / subscriptions) and Staff have unlimited Discovery photos.
+     */
+    private suspend fun reserveWeeklyDiscoveryPhotoSlot(uid: String, myTier: StaffTier): List<Long>? {
+        if (myTier.isStaff()) return null
+        val userSnap = db.collection("users").document(uid).get().await()
+        val pointsBalance = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+        val totalSpentCents = (userSnap.get("totalSpentCents") as? Number)?.toLong() ?: 0L
+        if (pointsBalance > 0L || totalSpentCents > 0L) return null
+
+        val rawList = (userSnap.get("discoveryPhotoTimestamps") as? List<*>)
+            ?.mapNotNull { (it as? Number)?.toLong() }
+            .orEmpty()
+        val nowMs = System.currentTimeMillis()
+        val weekMs = UserProfile.DISCOVERY_PHOTO_WEEK_MS
+        val activeTimestamps = rawList
+            .filter { nowMs - it < weekMs && it <= nowMs + 60_000L }
+            .sorted()
+        if (activeTimestamps.size >= UserProfile.FREE_MAX_DISCOVERY_PHOTOS_PER_WEEK) {
+            val oldestMs = activeTimestamps.first()
+            val remainingMs = (weekMs - (nowMs - oldestMs)).coerceAtLeast(60_000L)
+            val days = remainingMs / 86_400_000L
+            val hours = (remainingMs % 86_400_000L) / 3_600_000L
+            val waitLabel = when {
+                days > 0L && hours > 0L -> "${days}d ${hours}h"
+                days > 0L -> "${days}d"
+                hours > 0L -> "${hours}h"
+                else -> "under 1 hour"
+            }
+            throw IllegalStateException(
+                "Weekly Discovery limit reached: Free members can post 2 pictures per week. Try again in $waitLabel or buy Points for unlimited Discovery photos."
+            )
+        }
+        return (activeTimestamps + nowMs).takeLast(UserProfile.FREE_MAX_DISCOVERY_PHOTOS_PER_WEEK)
     }
 
     suspend fun updateUserProfilePhoto(
@@ -2949,8 +3155,8 @@ class VoxStageRepository(
     }
 
     /**
-     * Pays $10 to unlock private messaging with a user whose DMs are locked to paid members.
-     * Split: $5 (500c) goes to the recipient user, $5 (500c) goes to the app owner.
+     * Pays $5 to unlock private messaging with a user whose DMs are locked to paid members.
+     * Full $5 (500c) goes to the app owner; the recipient earns +1 usable in-app point.
      */
     suspend fun unlockPaidDirectMessage(
         recipientId: String,
@@ -2992,8 +3198,8 @@ class VoxStageRepository(
                     "senderName" to safeBuyerName,
                     "recipientId" to recipientId,
                     "recipientName" to safeRecipientName,
-                    "priceCents" to 1000L,
-                    "creatorShareCents" to 500L,
+                    "priceCents" to 500L,
+                    "creatorShareCents" to 0L,
                     "platformShareCents" to 500L,
                     "active" to true,
                     "kicked" to false,
@@ -3004,14 +3210,15 @@ class VoxStageRepository(
             batch.update(
                 buyerRef,
                 mapOf(
-                    "totalSpentCents" to FieldValue.increment(1000L),
+                    "totalSpentCents" to FieldValue.increment(500L),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             )
             batch.update(
                 recipientRef,
                 mapOf(
-                    "creatorEarningsCents" to FieldValue.increment(500L),
+                    "pointsBalance" to FieldValue.increment(1L),
+                    "creatorEarnedPoints" to FieldValue.increment(1L),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             )
@@ -3025,8 +3232,8 @@ class VoxStageRepository(
                     "creatorName" to safeRecipientName,
                     "postId" to "",
                     "pointsDelta" to 0L,
-                    "grossCents" to 1000L,
-                    "creatorShareCents" to 500L,
+                    "grossCents" to 500L,
+                    "creatorShareCents" to 0L,
                     "platformShareCents" to 500L,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
@@ -3147,7 +3354,8 @@ class VoxStageRepository(
         text: String,
         imageBase64: String = "",
         audioBase64: String = "",
-        audioDurationSec: Long = 0L
+        audioDurationSec: Long = 0L,
+        messageType: String = DirectMessage.TYPE_TEXT
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -3169,6 +3377,12 @@ class VoxStageRepository(
             } else null
 
             val safeName = senderName.trim().ifBlank { "Member" }.take(40)
+            val safeType = if (messageType in setOf(
+                    DirectMessage.TYPE_TEXT,
+                    DirectMessage.TYPE_SCREENSHOT,
+                    DirectMessage.TYPE_SUPPORT_HANDOFF
+                )
+            ) messageType else DirectMessage.TYPE_TEXT
             val payload = mutableMapOf<String, Any>(
                 "threadId" to thread.id,
                 "participantIds" to thread.participantIds,
@@ -3176,6 +3390,7 @@ class VoxStageRepository(
                 "senderName" to safeName,
                 "senderTier" to senderTier.name,
                 "text" to cleanText,
+                "messageType" to safeType,
                 "createdAt" to FieldValue.serverTimestamp()
             )
             if (cleanImage.isNotEmpty()) {
@@ -3185,11 +3400,12 @@ class VoxStageRepository(
                 payload["audioBase64"] = cleanAudio
                 payload["audioDurationSec"] = safeAudioDuration.coerceAtLeast(1L)
             }
-            if (thread.disappearingDurationSec > 0L) {
+            if (thread.disappearingDurationSec > 0L && safeType == DirectMessage.TYPE_TEXT) {
                 payload["expiresAtMillis"] = System.currentTimeMillis() + (thread.disappearingDurationSec * 1000L)
             }
 
             val previewText = when {
+                safeType == DirectMessage.TYPE_SCREENSHOT -> "📸 $cleanText"
                 cleanAudio.isNotEmpty() && cleanText.isNotEmpty() -> "🎤 $cleanText"
                 cleanAudio.isNotEmpty() -> "🎤 Voice note (${safeAudioDuration.coerceAtLeast(1L)}s)"
                 cleanImage.isNotEmpty() && cleanText.isNotEmpty() -> "📷 $cleanText"
@@ -3198,16 +3414,21 @@ class VoxStageRepository(
             }.take(300)
 
             val unreadRecipients = thread.participantIds.filter { it != uid }
+            val threadUpdate = mutableMapOf<String, Any>(
+                "lastMessageText" to previewText,
+                "lastMessageSenderId" to uid,
+                "unreadByUserIds" to unreadRecipients,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!thread.isGroup && safeType == DirectMessage.TYPE_TEXT) {
+                val streakFields = computeNextTalkStreakUpdate(thread, uid)
+                threadUpdate.putAll(streakFields)
+            }
             val batch = db.batch()
             batch.set(msgRef, payload)
             batch.update(
                 db.collection("directThreads").document(thread.id),
-                mapOf(
-                    "lastMessageText" to previewText,
-                    "lastMessageSenderId" to uid,
-                    "unreadByUserIds" to unreadRecipients,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
+                threadUpdate
             )
             if (updatedPicTimestamps != null) {
                 batch.update(
@@ -3219,6 +3440,90 @@ class VoxStageRepository(
                 )
             }
             batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun toggleDirectMessageReaction(
+        threadId: String,
+        messageId: String,
+        currentReactions: Map<String, String>,
+        emoji: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (emoji !in DirectMessage.ALLOWED_REACTIONS) {
+            return Result.failure(IllegalArgumentException("Unsupported reaction"))
+        }
+        val msgRef = db.collection("directThreads").document(threadId)
+            .collection("messages").document(messageId)
+        val path = msgRef.path
+        return try {
+            val next = currentReactions.toMutableMap()
+            if (next[uid] == emoji) {
+                next.remove(uid)
+            } else {
+                next[uid] = emoji
+            }
+            msgRef.update("reactionsByUserId", next).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun reportDirectMessage(
+        threadId: String,
+        peerTitle: String,
+        reporterName: String,
+        message: DirectMessage,
+        category: ReportCategory,
+        extraDetails: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val ref = db.collection("safetyReports").document()
+        val path = ref.path
+        return try {
+            val excerpt = when {
+                message.text.isNotBlank() -> "\"${message.text.trim().take(160)}\""
+                message.imageBase64.isNotBlank() -> "[Private photo snap]"
+                message.audioBase64.isNotBlank() -> "[Private voice note]"
+                else -> "[Private message]"
+            }
+            val note = extraDetails.trim()
+            val combinedDetails = buildString {
+                append("Reported DM: ")
+                append(excerpt)
+                if (note.isNotEmpty()) {
+                    append(" — ")
+                    append(note)
+                }
+            }.take(400)
+            val payload = mapOf(
+                "reporterId" to uid,
+                "reporterName" to reporterName.trim().ifBlank { "Member" }.take(40),
+                "roomId" to threadId.take(260),
+                "roomTitle" to "Private Chat: ${peerTitle.ifBlank { "DM" }}".take(60),
+                "roomHostId" to uid,
+                "targetUserId" to message.senderId.ifBlank { uid }.take(128),
+                "targetName" to message.senderName.trim().ifBlank { "Member" }.take(40),
+                "category" to category.name,
+                "details" to combinedDetails,
+                "status" to ReportStatus.OPEN.name,
+                "resolutionNote" to "",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            ref.set(payload).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -3403,6 +3708,9 @@ class VoxStageRepository(
             val updatedPicTimestamps = if (cleanImage.isNotEmpty()) {
                 reservePictureUploadSlot(uid)
             } else null
+            val updatedWeeklyDiscoveryTimestamps = if (cleanImage.isNotEmpty()) {
+                reserveWeeklyDiscoveryPhotoSlot(uid, myTier)
+            } else null
 
             val userRef = db.collection("users").document(uid)
             if (boostToTop) {
@@ -3419,6 +3727,9 @@ class VoxStageRepository(
                 )
                 if (updatedPicTimestamps != null) {
                     userPatch["pictureUploadTimestamps"] = updatedPicTimestamps
+                }
+                if (updatedWeeklyDiscoveryTimestamps != null) {
+                    userPatch["discoveryPhotoTimestamps"] = updatedWeeklyDiscoveryTimestamps
                 }
                 batch.update(userRef, userPatch)
                 batch.set(docRef, postPayload)
@@ -3439,16 +3750,19 @@ class VoxStageRepository(
                     )
                 )
                 batch.commit().await()
-            } else if (updatedPicTimestamps != null) {
+            } else if (updatedPicTimestamps != null || updatedWeeklyDiscoveryTimestamps != null) {
                 val batch = db.batch()
                 batch.set(docRef, postPayload)
-                batch.update(
-                    userRef,
-                    mapOf(
-                        "pictureUploadTimestamps" to updatedPicTimestamps,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                val userPatch = mutableMapOf<String, Any>(
+                    "updatedAt" to FieldValue.serverTimestamp()
                 )
+                if (updatedPicTimestamps != null) {
+                    userPatch["pictureUploadTimestamps"] = updatedPicTimestamps
+                }
+                if (updatedWeeklyDiscoveryTimestamps != null) {
+                    userPatch["discoveryPhotoTimestamps"] = updatedWeeklyDiscoveryTimestamps
+                }
+                batch.update(userRef, userPatch)
                 batch.commit().await()
             } else {
                 docRef.set(postPayload).await()
@@ -4019,7 +4333,8 @@ class VoxStageRepository(
             batch.update(
                 creatorRef,
                 mapOf(
-                    "creatorEarningsCents" to FieldValue.increment(100L),
+                    "pointsBalance" to FieldValue.increment(1L),
+                    "creatorEarnedPoints" to FieldValue.increment(1L),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             )
@@ -4034,8 +4349,8 @@ class VoxStageRepository(
                     "postId" to post.id,
                     "pointsDelta" to -2L,
                     "grossCents" to 200L,
-                    "creatorShareCents" to 100L,
-                    "platformShareCents" to 100L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 200L,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
             )
@@ -4104,8 +4419,8 @@ class VoxStageRepository(
                         "creatorId" to creatorId,
                         "creatorName" to safeCreatorName,
                         "priceCents" to 1500L,
-                        "creatorShareCents" to 750L,
-                        "platformShareCents" to 750L,
+                        "creatorShareCents" to 0L,
+                        "platformShareCents" to 1500L,
                         "active" to true,
                         "expiresAtMillis" to newExpiryMs,
                         "createdAt" to FieldValue.serverTimestamp(),
@@ -4123,7 +4438,8 @@ class VoxStageRepository(
             batch.update(
                 creatorRef,
                 mapOf(
-                    "creatorEarningsCents" to FieldValue.increment(750L),
+                    "pointsBalance" to FieldValue.increment(8L),
+                    "creatorEarnedPoints" to FieldValue.increment(8L),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             )
@@ -4138,8 +4454,8 @@ class VoxStageRepository(
                     "postId" to "",
                     "pointsDelta" to 0L,
                     "grossCents" to 1500L,
-                    "creatorShareCents" to 750L,
-                    "platformShareCents" to 750L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 1500L,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
             )
@@ -4248,17 +4564,128 @@ class VoxStageRepository(
             }
             val payload = mapOf(
                 "userId" to targetUserId,
-                "targetRoomId" to targetRoomId.trim().take(128),
+                "targetRoomId" to targetRoomId.trim().take(260),
                 "targetRoomTitle" to targetRoomTitle.trim().ifBlank { "Live Room" }.take(60),
                 "fromRoomId" to fromRoomId.trim().take(128),
                 "movedByAdminId" to adminUid,
                 "movedByAdminName" to adminName.trim().ifBlank { "Administrator" }.take(40),
                 "reason" to reason.trim().take(200),
+                "transferType" to RoomTransfer.TYPE_ROOM,
+                "targetThreadId" to "",
+                "targetSupportUserId" to "",
+                "targetSupportName" to "",
                 "consumed" to false,
                 "createdAt" to FieldValue.serverTimestamp()
             )
             db.collection("roomTransfers").document(targetUserId).set(payload).await()
             Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun sendUserToSupportPrivateChat(
+        targetUser: DirectoryEntry,
+        supportMember: DirectoryEntry,
+        adminName: String,
+        reason: String
+    ): Result<String> {
+        val adminUid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (targetUser.userId.isBlank() || supportMember.userId.isBlank()) {
+            return Result.failure(IllegalArgumentException("Select a valid user and support member."))
+        }
+        if (targetUser.userId == supportMember.userId) {
+            return Result.failure(IllegalArgumentException("Choose a different support member for this user."))
+        }
+        val threadId = canonicalPairId(targetUser.userId, supportMember.userId)
+        val threadRef = db.collection("directThreads").document(threadId)
+        val path = threadRef.path
+        return try {
+            val (first, second) = if (targetUser.userId <= supportMember.userId) {
+                targetUser to supportMember
+            } else {
+                supportMember to targetUser
+            }
+            val safeAdminName = adminName.trim().ifBlank { "Administrator" }.take(40)
+            val safeReason = reason.trim().take(200)
+            val supportLabel = supportMember.displayName.trim().ifBlank { "Support" }.take(40)
+            val userLabel = targetUser.displayName.trim().ifBlank { "Member" }.take(40)
+            val handoffText = buildString {
+                append("Admin $safeAdminName connected $userLabel with Support ($supportLabel).")
+                if (safeReason.isNotEmpty()) {
+                    append(" Topic: $safeReason")
+                }
+            }.take(500)
+            val participants = listOf(first.userId, second.userId)
+            val unreadBoth = listOf(targetUser.userId, supportMember.userId)
+
+            val existingThread = threadRef.get().await()
+            if (!existingThread.exists()) {
+                val threadPayload = mapOf(
+                    "participantIds" to participants,
+                    "userAId" to first.userId,
+                    "userAName" to first.displayName.trim().ifBlank { "Member" }.take(40),
+                    "userAColorHex" to (first.avatarColorHex.takeIf { Regex("^#[0-9A-Fa-f]{6}$").matches(it) } ?: "#0088FF"),
+                    "userATier" to first.tierEnum().name,
+                    "userBId" to second.userId,
+                    "userBName" to second.displayName.trim().ifBlank { "Support" }.take(40),
+                    "userBColorHex" to (second.avatarColorHex.takeIf { Regex("^#[0-9A-Fa-f]{6}$").matches(it) } ?: "#1565C0"),
+                    "userBTier" to second.tierEnum().name,
+                    "lastMessageText" to handoffText.take(300),
+                    "lastMessageSenderId" to adminUid,
+                    "unreadByUserIds" to unreadBoth,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                threadRef.set(threadPayload).await()
+            } else {
+                threadRef.update(
+                    mapOf(
+                        "lastMessageText" to handoffText.take(300),
+                        "lastMessageSenderId" to adminUid,
+                        "unreadByUserIds" to unreadBoth,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+
+            // Write SUPPORT_HANDOFF system intro message into the private thread
+            val msgRef = threadRef.collection("messages").document()
+            msgRef.set(
+                mapOf(
+                    "threadId" to threadId,
+                    "participantIds" to participants,
+                    "senderId" to adminUid,
+                    "senderName" to safeAdminName,
+                    "senderTier" to StaffTier.ADMIN.name,
+                    "text" to handoffText,
+                    "messageType" to DirectMessage.TYPE_SUPPORT_HANDOFF,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            // Send live SUPPORT_DM transfer directive so target user opens the support private chat automatically
+            val transferPayload = mapOf(
+                "userId" to targetUser.userId,
+                "targetRoomId" to threadId.take(260),
+                "targetRoomTitle" to "Support: $supportLabel".take(60),
+                "fromRoomId" to "",
+                "movedByAdminId" to adminUid,
+                "movedByAdminName" to safeAdminName,
+                "reason" to safeReason,
+                "transferType" to RoomTransfer.TYPE_SUPPORT_DM,
+                "targetThreadId" to threadId.take(260),
+                "targetSupportUserId" to supportMember.userId.take(128),
+                "targetSupportName" to supportLabel,
+                "consumed" to false,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            db.collection("roomTransfers").document(targetUser.userId).set(transferPayload).await()
+            Result.success(threadId)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -4780,6 +5207,1343 @@ class VoxStageRepository(
             Result.failure(e)
         }
     }
+
+    fun observeAllUserFollows(): Flow<List<UserFollow>> {
+        val query = db.collection("userFollows")
+        return query.snapshots()
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { doc ->
+                    doc.toObject(UserFollow::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                }
+            }
+            .catch { error ->
+                val root = unwrapFirestoreError(error)
+                handleFirestoreError(root, OperationType.LIST, "userFollows")
+                throw error
+            }
+    }
+
+    // --- ADMIN APP-WIDE BROADCAST MESSAGES TO ALL USERS ---
+
+    fun observeAppBroadcasts(): Flow<List<AppBroadcast>> {
+        val query = db.collection("appBroadcasts")
+            .orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
+            .limit(50)
+        return query.snapshots()
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { doc ->
+                    doc.toObject(AppBroadcast::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                }
+            }
+            .catch { error ->
+                val root = unwrapFirestoreError(error)
+                handleFirestoreError(root, OperationType.LIST, "appBroadcasts")
+                throw error
+            }
+    }
+
+    suspend fun sendAppBroadcastToAllUsers(
+        senderName: String,
+        title: String,
+        message: String,
+        severity: AlertSeverity
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanTitle = title.trim().take(80)
+        val cleanMessage = message.trim().take(500)
+        if (cleanTitle.isEmpty() || cleanMessage.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Please enter both a title and a message."))
+        }
+        val safeSenderName = senderName.trim().ifBlank { "App Admin" }.take(40)
+        val docRef = db.collection("appBroadcasts").document()
+        val path = "appBroadcasts/${docRef.id}"
+        return try {
+            docRef.set(
+                mapOf(
+                    "title" to cleanTitle,
+                    "message" to cleanMessage,
+                    "severity" to severity.name,
+                    "senderId" to uid,
+                    "senderName" to safeSenderName,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteAppBroadcast(broadcastId: String): Result<Unit> {
+        auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (broadcastId.isBlank()) {
+            return Result.failure(IllegalArgumentException("Invalid broadcast ID."))
+        }
+        val path = "appBroadcasts/$broadcastId"
+        return try {
+            db.collection("appBroadcasts").document(broadcastId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- PINNING & UNPINNING MESSAGES IN PRIVATE CHATS ---
+
+    suspend fun pinDirectMessage(
+        threadId: String,
+        message: DirectMessage,
+        pinnedByName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (threadId.isBlank() || message.id.isBlank()) {
+            return Result.failure(IllegalArgumentException("Invalid message to pin."))
+        }
+        val preview = when {
+            message.text.isNotBlank() -> message.text.trim()
+            message.hasVoiceNote() -> "Voice note (${message.audioDurationSec}s)"
+            message.imageBase64.isNotBlank() -> "Photo message"
+            else -> "Pinned message"
+        }.take(300)
+        val safeSenderName = message.senderName.trim().ifBlank { "Member" }.take(40)
+        val safePinnerName = pinnedByName.trim().ifBlank { "Member" }.take(40)
+        val path = "directThreads/$threadId"
+        return try {
+            db.collection("directThreads").document(threadId).update(
+                mapOf(
+                    "pinnedMessageId" to message.id.take(128),
+                    "pinnedMessageText" to preview,
+                    "pinnedMessageSenderName" to safeSenderName,
+                    "pinnedByUserId" to uid,
+                    "pinnedByName" to safePinnerName,
+                    "pinnedAtMillis" to System.currentTimeMillis(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun unpinDirectMessage(threadId: String): Result<Unit> {
+        auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (threadId.isBlank()) {
+            return Result.failure(IllegalArgumentException("Invalid thread."))
+        }
+        val path = "directThreads/$threadId"
+        return try {
+            db.collection("directThreads").document(threadId).update(
+                mapOf(
+                    "pinnedMessageId" to "",
+                    "pinnedMessageText" to "",
+                    "pinnedMessageSenderName" to "",
+                    "pinnedByUserId" to "",
+                    "pinnedByName" to "",
+                    "pinnedAtMillis" to 0L,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- PRO MEMBERSHIP ($9.99/MONTH OR 10 POINTS) ---
+
+    suspend fun activateProMembership(
+        buyerName: String,
+        staffTier: StaffTier,
+        paidWithPoints: Boolean = false,
+        playOrderId: String = "",
+        playProductId: String = ""
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            if (paidWithPoints && currentPoints < UserProfile.PRO_REDEEM_POINTS) {
+                return Result.failure(
+                    IllegalStateException(
+                        "You need ${UserProfile.PRO_REDEEM_POINTS} points to activate Pro with points (or subscribe via Google Play for \$9.99/mo)."
+                    )
+                )
+            }
+            val nowMs = System.currentTimeMillis()
+            val existingExpiry = (userSnap.get("proExpiresAtMillis") as? Number)?.toLong() ?: 0L
+            val baseMs = maxOf(nowMs, existingExpiry)
+            val maxAllowedExpiry = nowMs + 31L * 24L * 60L * 60L * 1000L
+            val newExpiryMs = minOf(baseMs + UserProfile.PRO_DURATION_MILLIS, maxAllowedExpiry)
+
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val dirRef = db.collection("userDirectory").document(uid)
+            val existingDir = dirRef.get().await()
+            val txRef = db.collection("pointTransactions").document()
+
+            val userUpdates = mutableMapOf<String, Any>(
+                "proMember" to true,
+                "proExpiresAtMillis" to newExpiryMs,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (paidWithPoints) {
+                userUpdates["pointsBalance"] = FieldValue.increment(-UserProfile.PRO_REDEEM_POINTS)
+            } else {
+                userUpdates["totalSpentCents"] = FieldValue.increment(UserProfile.PRO_PRICE_CENTS)
+            }
+
+            val txData = mutableMapOf<String, Any>(
+                "type" to PointTransactionType.PRO_MEMBERSHIP.name,
+                "buyerId" to uid,
+                "buyerName" to safeBuyerName,
+                "creatorId" to "",
+                "creatorName" to "",
+                "postId" to "",
+                "pointsDelta" to if (paidWithPoints) -UserProfile.PRO_REDEEM_POINTS else 0L,
+                "grossCents" to UserProfile.PRO_PRICE_CENTS,
+                "creatorShareCents" to 0L,
+                "platformShareCents" to UserProfile.PRO_PRICE_CENTS,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            if (playOrderId.isNotBlank()) txData["playOrderId"] = playOrderId.take(128)
+            if (playProductId.isNotBlank()) txData["playProductId"] = playProductId.take(64)
+
+            val batch = db.batch()
+            batch.update(userRef, userUpdates)
+            if (existingDir.exists()) {
+                batch.update(
+                    dirRef,
+                    mapOf(
+                        "proMember" to true,
+                        "proExpiresAtMillis" to newExpiryMs,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            } else {
+                val safeHandle = (userSnap.getString("handle") ?: "vox_user").take(30)
+                val safeColor = userSnap.getString("avatarColorHex") ?: "#1E6BFF"
+                batch.set(
+                    dirRef,
+                    mapOf(
+                        "userId" to uid,
+                        "displayName" to safeBuyerName,
+                        "handle" to safeHandle,
+                        "avatarColorHex" to safeColor,
+                        "staffTier" to staffTier.name,
+                        "proMember" to true,
+                        "proExpiresAtMillis" to newExpiryMs,
+                        "online" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.set(txRef, txData)
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- REELS (PRO-ONLY SHORT VIDEOS <= 30s, $5 BOOST TO TOP, LIKE/COMMENT/SHARE) ---
+
+    fun observeReels(): Flow<UiState<List<Reel>>> = callbackFlow {
+        trySend(UiState.Loading)
+        val listener = db.collection("reels")
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(80)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    handleFirestoreError(error, OperationType.LIST, "reels")
+                    trySend(UiState.Error(error.message ?: "Unable to load Reels"))
+                    return@addSnapshotListener
+                }
+                val nowMs = System.currentTimeMillis()
+                val items = snapshot?.documents.orEmpty().mapNotNull { doc ->
+                    runCatching { doc.toObject(Reel::class.java) }.getOrNull()
+                }.sortedWith(
+                    compareByDescending<Reel> { it.isCurrentlyBoosted(nowMs) }
+                        .thenByDescending { if (it.isCurrentlyBoosted(nowMs)) it.boostedAtMillis else 0L }
+                        .thenByDescending { it.createdAt?.toDate()?.time ?: 0L }
+                )
+                trySend(UiState.Success(items))
+            }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun createReelWithChunks(
+        authorName: String,
+        authorHandle: String,
+        authorColorHex: String,
+        authorPhotoBase64: String,
+        authorTier: StaffTier,
+        caption: String,
+        durationSec: Long,
+        thumbnailBase64: String,
+        chunksBase64: List<String>,
+        boostToTop: Boolean
+    ): Result<String> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (durationSec !in 1L..Reel.MAX_DURATION_SECONDS.toLong()) {
+            return Result.failure(IllegalArgumentException("Reels must be between 1 and 30 seconds long."))
+        }
+        if (chunksBase64.isEmpty() || chunksBase64.size > 16) {
+            return Result.failure(IllegalArgumentException("Invalid video payload size."))
+        }
+        val reelRef = db.collection("reels").document()
+        val path = "reels/${reelRef.id}"
+        return try {
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val isPro = authorTier.isStaff() || (
+                userSnap.getBoolean("proMember") == true &&
+                    ((userSnap.get("proExpiresAtMillis") as? Number)?.toLong() ?: 0L) > System.currentTimeMillis()
+                )
+            if (!isPro) {
+                return Result.failure(
+                    IllegalStateException("Pro Membership (\$9.99/mo) is required to upload Reels.")
+                )
+            }
+            if (boostToTop) {
+                val pts = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+                if (pts < Reel.BOOST_PRICE_POINTS) {
+                    return Result.failure(
+                        IllegalStateException("You need 5 points (\$5) to boost this Reel to the top.")
+                    )
+                }
+            }
+
+            val safeName = authorName.trim().ifBlank { "Member" }.take(40)
+            val safeHandle = authorHandle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
+            val safeColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(authorColorHex)) authorColorHex else "#1E6BFF"
+            val safePhoto = if (authorPhotoBase64.length <= 140_000) authorPhotoBase64 else ""
+            val safeThumb = if (thumbnailBase64.length <= 140_000) thumbnailBase64 else ""
+            val nowMs = System.currentTimeMillis()
+
+            val reelDoc = mutableMapOf<String, Any>(
+                "authorId" to uid,
+                "authorName" to safeName,
+                "authorHandle" to safeHandle,
+                "authorColorHex" to safeColor,
+                "authorPhotoBase64" to safePhoto,
+                "authorTier" to authorTier.name,
+                "caption" to caption.trim().take(300),
+                "thumbnailBase64" to safeThumb,
+                "durationSec" to durationSec,
+                "chunkCount" to chunksBase64.size.toLong(),
+                "mimeType" to "video/mp4",
+                "boostedAtMillis" to if (boostToTop) nowMs else 0L,
+                "boostedUntilMillis" to if (boostToTop) nowMs + 86_400_000L else 0L,
+                "likedByUserIds" to emptyList<String>(),
+                "commentCount" to 0L,
+                "shareCount" to 0L,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+
+            val batch = db.batch()
+            batch.set(reelRef, reelDoc)
+            if (boostToTop) {
+                batch.update(
+                    userRef,
+                    mapOf(
+                        "pointsBalance" to FieldValue.increment(-Reel.BOOST_PRICE_POINTS),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                val txRef = db.collection("pointTransactions").document()
+                batch.set(
+                    txRef,
+                    mapOf(
+                        "type" to PointTransactionType.BOOST_REEL.name,
+                        "buyerId" to uid,
+                        "buyerName" to safeName,
+                        "creatorId" to "",
+                        "creatorName" to "",
+                        "postId" to reelRef.id,
+                        "pointsDelta" to -Reel.BOOST_PRICE_POINTS,
+                        "grossCents" to 500L,
+                        "creatorShareCents" to 0L,
+                        "platformShareCents" to 500L,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.commit().await()
+
+            chunksBase64.forEachIndexed { index, dataBase64 ->
+                reelRef.collection("chunks").document("chunk_$index").set(
+                    mapOf(
+                        "reelId" to reelRef.id,
+                        "authorId" to uid,
+                        "chunkIndex" to index.toLong(),
+                        "dataBase64" to dataBase64,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+
+            Result.success(reelRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun loadReelChunks(reelId: String): Result<List<ReelChunk>> {
+        val path = "reels/$reelId/chunks"
+        return try {
+            val snap = db.collection("reels")
+                .document(reelId)
+                .collection("chunks")
+                .orderBy("chunkIndex", Query.Direction.ASCENDING)
+                .get()
+                .await()
+            val chunks = snap.documents.mapNotNull { doc ->
+                runCatching { doc.toObject(ReelChunk::class.java) }.getOrNull()
+            }
+            Result.success(chunks)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun boostReelToTop(reel: Reel, buyerName: String): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "reels/${reel.id}"
+        return try {
+            if (reel.authorId != uid) {
+                return Result.failure(IllegalStateException("Only the Reel creator can boost this Reel."))
+            }
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            if (currentPoints < Reel.BOOST_PRICE_POINTS) {
+                return Result.failure(
+                    IllegalStateException("You need 5 points (\$5) to push your Reel to the top.")
+                )
+            }
+            val nowMs = System.currentTimeMillis()
+            val reelRef = db.collection("reels").document(reel.id)
+            val txRef = db.collection("pointTransactions").document()
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-Reel.BOOST_PRICE_POINTS),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                reelRef,
+                mapOf(
+                    "boostedAtMillis" to nowMs,
+                    "boostedUntilMillis" to nowMs + 86_400_000L,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.BOOST_REEL.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to "",
+                    "creatorName" to "",
+                    "postId" to reel.id,
+                    "pointsDelta" to -Reel.BOOST_PRICE_POINTS,
+                    "grossCents" to 500L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 500L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun toggleLikeReel(reel: Reel): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "reels/${reel.id}"
+        return try {
+            val updated = if (reel.likedByUserIds.contains(uid)) {
+                reel.likedByUserIds.filterNot { it == uid }
+            } else {
+                (reel.likedByUserIds + uid).distinct().take(500)
+            }
+            db.collection("reels").document(reel.id).update(
+                mapOf(
+                    "likedByUserIds" to updated,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteReel(reelId: String): Result<Unit> {
+        auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "reels/$reelId"
+        return try {
+            db.collection("reels").document(reelId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeReelComments(reelId: String): Flow<List<ReelComment>> = callbackFlow {
+        val listener = db.collection("reels")
+            .document(reelId)
+            .collection("comments")
+            .orderBy("createdAt", Query.Direction.ASCENDING)
+            .limit(100)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    handleFirestoreError(error, OperationType.LIST, "reels/$reelId/comments")
+                    return@addSnapshotListener
+                }
+                val comments = snapshot?.documents.orEmpty().mapNotNull { doc ->
+                    runCatching { doc.toObject(ReelComment::class.java) }.getOrNull()
+                }
+                trySend(comments)
+            }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun addReelComment(
+        reelId: String,
+        authorName: String,
+        authorHandle: String,
+        authorColorHex: String,
+        authorTier: StaffTier,
+        text: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) {
+            return Result.failure(IllegalArgumentException("Comment cannot be empty."))
+        }
+        val path = "reels/$reelId/comments"
+        return try {
+            val reelRef = db.collection("reels").document(reelId)
+            val commentRef = reelRef.collection("comments").document()
+            val safeName = authorName.trim().ifBlank { "Member" }.take(40)
+            val safeHandle = authorHandle.trim().replace(" ", "_").ifBlank { "vox_user" }.take(30)
+            val safeColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(authorColorHex)) authorColorHex else "#1E6BFF"
+
+            val batch = db.batch()
+            batch.set(
+                commentRef,
+                mapOf(
+                    "reelId" to reelId,
+                    "authorId" to uid,
+                    "authorName" to safeName,
+                    "authorHandle" to safeHandle,
+                    "authorColorHex" to safeColor,
+                    "authorTier" to authorTier.name,
+                    "text" to trimmed.take(400),
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                reelRef,
+                mapOf(
+                    "commentCount" to FieldValue.increment(1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteReelComment(reelId: String, commentId: String): Result<Unit> {
+        auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "reels/$reelId/comments/$commentId"
+        return try {
+            val reelRef = db.collection("reels").document(reelId)
+            val commentRef = reelRef.collection("comments").document(commentId)
+            val batch = db.batch()
+            batch.delete(commentRef)
+            batch.update(
+                reelRef,
+                mapOf(
+                    "commentCount" to FieldValue.increment(-1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun incrementReelShareCount(reelId: String): Result<Unit> {
+        auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "reels/$reelId"
+        return try {
+            db.collection("reels").document(reelId).update(
+                mapOf(
+                    "shareCount" to FieldValue.increment(1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- PROMOTE PROFILE TO TOP OF DISCOVERY (5 PTS / 24H) ---
+
+    suspend fun boostMyProfileToTop(
+        buyerName: String,
+        staffTier: StaffTier
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            require(currentPoints >= 5L) {
+                "You need 5 points to promote your profile to the top of Discovery."
+            }
+            val nowMs = System.currentTimeMillis()
+            val boostUntilMs = nowMs + 24L * 60L * 60L * 1000L
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val dirRef = db.collection("userDirectory").document(uid)
+            val existingDir = dirRef.get().await()
+            val txRef = db.collection("pointTransactions").document()
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-5L),
+                    "profileBoostedUntilMillis" to boostUntilMs,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            if (existingDir.exists()) {
+                batch.update(
+                    dirRef,
+                    mapOf(
+                        "profileBoostedUntilMillis" to boostUntilMs,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            } else {
+                val safeHandle = (userSnap.getString("handle") ?: "vox_user").take(30)
+                val safeColor = userSnap.getString("avatarColorHex") ?: "#1E6BFF"
+                batch.set(
+                    dirRef,
+                    mapOf(
+                        "userId" to uid,
+                        "displayName" to safeBuyerName,
+                        "handle" to safeHandle,
+                        "avatarColorHex" to safeColor,
+                        "staffTier" to staffTier.name,
+                        "profileBoostedUntilMillis" to boostUntilMs,
+                        "online" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.BOOST_PROFILE.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to "",
+                    "creatorName" to "",
+                    "postId" to "",
+                    "pointsDelta" to -5L,
+                    "grossCents" to 500L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 500L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- CUSTOM PTT THEMES & WALKIE CHIRPS SHOP ---
+
+    suspend fun selectPttTheme(theme: PttThemeStyle): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "selectedPttTheme" to theme.id,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun purchasePttTheme(theme: PttThemeStyle, buyerName: String): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (theme.pricePoints <= 0L) return selectPttTheme(theme)
+        val path = "users/$uid"
+        return try {
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            val existingOwned = (userSnap.get("ownedPttThemes") as? List<*>)
+                ?.mapNotNull { it as? String }
+                .orEmpty()
+            if (existingOwned.contains(theme.id)) {
+                return selectPttTheme(theme)
+            }
+            require(currentPoints >= theme.pricePoints) {
+                "You need ${theme.pricePoints} points to unlock ${theme.label}."
+            }
+            val updatedOwned = (existingOwned + theme.id).distinct().take(20)
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val grossCents = theme.pricePoints * 100L
+            val txRef = db.collection("pointTransactions").document()
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-theme.pricePoints),
+                    "ownedPttThemes" to updatedOwned,
+                    "selectedPttTheme" to theme.id,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.BUY_PTT_ITEM.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to "",
+                    "creatorName" to "",
+                    "postId" to "THEME_${theme.id}",
+                    "pointsDelta" to -theme.pricePoints,
+                    "grossCents" to grossCents,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to grossCents,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun selectPttChirp(chirp: PttChirpStyle): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "selectedPttChirp" to chirp.id,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun purchasePttChirp(chirp: PttChirpStyle, buyerName: String): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (chirp.pricePoints <= 0L) return selectPttChirp(chirp)
+        val path = "users/$uid"
+        return try {
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            val existingOwned = (userSnap.get("ownedPttChirps") as? List<*>)
+                ?.mapNotNull { it as? String }
+                .orEmpty()
+            if (existingOwned.contains(chirp.id)) {
+                return selectPttChirp(chirp)
+            }
+            require(currentPoints >= chirp.pricePoints) {
+                "You need ${chirp.pricePoints} points to unlock ${chirp.label}."
+            }
+            val updatedOwned = (existingOwned + chirp.id).distinct().take(20)
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val grossCents = chirp.pricePoints * 100L
+            val txRef = db.collection("pointTransactions").document()
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-chirp.pricePoints),
+                    "ownedPttChirps" to updatedOwned,
+                    "selectedPttChirp" to chirp.id,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.BUY_PTT_ITEM.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to "",
+                    "creatorName" to "",
+                    "postId" to "CHIRP_${chirp.id}",
+                    "pointsDelta" to -chirp.pricePoints,
+                    "grossCents" to grossCents,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to grossCents,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- MUTUAL DM TALK STREAKS (3+ CONSECUTIVE DAYS OF MUTUAL MESSAGES OR PTT CLIPS) ---
+
+    private fun computeNextTalkStreakUpdate(thread: DirectThread, senderUid: String): Map<String, Any> {
+        val today = utcDayKey()
+        val yesterday = utcYesterdayKey()
+        val otherUid = thread.otherUserId(senderUid)
+        val updatedDays = thread.lastMessageDayByUserId.toMutableMap()
+        updatedDays[senderUid] = today
+        val otherSentToday = updatedDays[otherUid] == today
+        val (nextCount, nextLastMutualDay) = if (otherSentToday) {
+            when (thread.talkStreakLastMutualDay) {
+                today -> thread.talkStreakCount.coerceAtLeast(1) to today
+                yesterday -> (thread.talkStreakCount + 1).coerceAtMost(10_000) to today
+                else -> 1 to today
+            }
+        } else {
+            val activeCount = thread.activeTalkStreakCount(today, yesterday)
+            val keptDay = if (activeCount > 0) thread.talkStreakLastMutualDay else ""
+            activeCount to keptDay
+        }
+        return mapOf(
+            "talkStreakCount" to nextCount,
+            "talkStreakLastMutualDay" to nextLastMutualDay,
+            "lastMessageDayByUserId" to updatedDays
+        )
+    }
+
+    suspend fun recordLivePttTalkStreak(threadId: String): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (threadId.isBlank()) return Result.success(Unit)
+        val ref = db.collection("directThreads").document(threadId)
+        val path = ref.path
+        return try {
+            val snap = ref.get().await()
+            val thread = snap.toObject(DirectThread::class.java) ?: return Result.success(Unit)
+            if (thread.isGroup || uid !in thread.participantIds || thread.hasAnyBlock() || thread.isUserKicked(uid)) {
+                return Result.success(Unit)
+            }
+            val update = computeNextTalkStreakUpdate(thread, uid).toMutableMap()
+            update["updatedAt"] = FieldValue.serverTimestamp()
+            ref.update(update).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- 24-HOUR SPOTLIGHT FRAME (5 POINTS -> GLOWING NEON AVATAR BORDER IN DISCOVER & CHATS) ---
+
+    suspend fun purchaseSpotlightFrame(
+        color: SpotlightFrameColor,
+        buyerName: String,
+        staffTier: StaffTier
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val currentPoints = (userSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            require(currentPoints >= SpotlightFrameColor.PRICE_POINTS) {
+                "You need 5 points to activate a 24-Hour Glowing Neon Spotlight Frame."
+            }
+            val untilMs = System.currentTimeMillis() + SpotlightFrameColor.DURATION_MS
+            val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+            val dirRef = db.collection("userDirectory").document(uid)
+            val existingDir = dirRef.get().await()
+            val txRef = db.collection("pointTransactions").document()
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-SpotlightFrameColor.PRICE_POINTS),
+                    "spotlightFrameUntilMillis" to untilMs,
+                    "spotlightFrameColorHex" to color.primaryHex,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            if (existingDir.exists()) {
+                batch.update(
+                    dirRef,
+                    mapOf(
+                        "spotlightFrameUntilMillis" to untilMs,
+                        "spotlightFrameColorHex" to color.primaryHex,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            } else {
+                val safeHandle = (userSnap.getString("handle") ?: "vox_user").take(30)
+                val safeColor = userSnap.getString("avatarColorHex") ?: "#1E6BFF"
+                batch.set(
+                    dirRef,
+                    mapOf(
+                        "userId" to uid,
+                        "displayName" to safeBuyerName,
+                        "handle" to safeHandle,
+                        "avatarColorHex" to safeColor,
+                        "staffTier" to staffTier.name,
+                        "spotlightFrameUntilMillis" to untilMs,
+                        "spotlightFrameColorHex" to color.primaryHex,
+                        "referralCode" to generateReferralCode(uid),
+                        "online" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.BUY_SPOTLIGHT_FRAME.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeBuyerName,
+                    "creatorId" to "",
+                    "creatorName" to "",
+                    "postId" to "",
+                    "pointsDelta" to -SpotlightFrameColor.PRICE_POINTS,
+                    "grossCents" to 500L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 500L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- DAILY LOGIN STREAK (+0.5 PT FOR FREE USERS AFTER 7-DAY STREAK) ---
+
+    data class DailyLoginStreakOutcome(
+        val streakDays: Int,
+        val awardedHalfPoint: Boolean,
+        val convertedToFullPoint: Boolean
+    )
+
+    suspend fun recordDailyLoginStreak(
+        buyerName: String,
+        staffTier: StaffTier
+    ): Result<DailyLoginStreakOutcome?> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val userRef = db.collection("users").document(uid)
+        val path = userRef.path
+        return try {
+            val snap = userRef.get().await()
+            if (!snap.exists()) return Result.success(null)
+            val today = utcDayKey()
+            val yesterday = utcYesterdayKey()
+            val lastLoginDay = snap.getString("lastLoginDayKey").orEmpty()
+            if (lastLoginDay == today) {
+                return Result.success(null)
+            }
+            val oldStreak = (snap.get("loginStreakDays") as? Number)?.toInt()?.coerceAtLeast(0) ?: 0
+            val nextStreak = if (lastLoginDay == yesterday) oldStreak + 1 else 1
+            val proMember = snap.getBoolean("proMember") == true
+            val proExpiry = (snap.get("proExpiresAtMillis") as? Number)?.toLong() ?: 0L
+            val isProUser = proMember && proExpiry > System.currentTimeMillis()
+            val isFreeMember = !isProUser && staffTier == StaffTier.USER
+            val lastRewardDay = snap.getString("lastStreakRewardDayKey").orEmpty()
+            val shouldAwardHalfPoint = isFreeMember &&
+                nextStreak >= 7 &&
+                (nextStreak % 7 == 0) &&
+                lastRewardDay != today
+
+            val oldHalf = (snap.get("halfPointsBalance") as? Number)?.toInt()?.coerceIn(0, 1) ?: 0
+            val update = mutableMapOf<String, Any>(
+                "loginStreakDays" to nextStreak,
+                "lastLoginDayKey" to today,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            var convertedToFull = false
+            val batch = db.batch()
+            if (shouldAwardHalfPoint) {
+                update["lastStreakRewardDayKey"] = today
+                if (oldHalf == 0) {
+                    update["halfPointsBalance"] = 1
+                } else {
+                    update["halfPointsBalance"] = 0
+                    update["pointsBalance"] = FieldValue.increment(1L)
+                    convertedToFull = true
+                }
+                val safeBuyerName = buyerName.trim().ifBlank { "Member" }.take(40)
+                val txRef = db.collection("pointTransactions").document()
+                batch.set(
+                    txRef,
+                    mapOf(
+                        "type" to PointTransactionType.DAILY_STREAK_BONUS.name,
+                        "buyerId" to uid,
+                        "buyerName" to safeBuyerName,
+                        "creatorId" to "",
+                        "creatorName" to "",
+                        "postId" to "",
+                        "pointsDelta" to if (convertedToFull) 1L else 0L,
+                        "grossCents" to 0L,
+                        "creatorShareCents" to 0L,
+                        "platformShareCents" to 0L,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.update(userRef, update)
+            batch.commit().await()
+            Result.success(
+                DailyLoginStreakOutcome(
+                    streakDays = nextStreak,
+                    awardedHalfPoint = shouldAwardHalfPoint,
+                    convertedToFullPoint = convertedToFull
+                )
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- INVITE-A-FRIEND POINT BONUS (+2 PTS EACH AFTER VERIFIED ACCOUNT + FIRST PTT CLIP) ---
+
+    data class ReferralBonusAwarded(
+        val inviterName: String,
+        val bonusPointsEach: Int = 2
+    )
+
+    suspend fun ensureMyReferralCode(): Result<String> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val code = generateReferralCode(uid)
+        val userRef = db.collection("users").document(uid)
+        return try {
+            val snap = userRef.get().await()
+            if (snap.exists() && snap.getString("referralCode").isNullOrBlank()) {
+                userRef.update(
+                    mapOf(
+                        "referralCode" to code,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            val dirRef = db.collection("userDirectory").document(uid)
+            val dirSnap = dirRef.get().await()
+            if (dirSnap.exists() && dirSnap.getString("referralCode").isNullOrBlank()) {
+                dirRef.update(
+                    mapOf(
+                        "referralCode" to code,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(snap.getString("referralCode").orEmpty().ifBlank { code })
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, userRef.path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeMyIncomingReferral(userId: String): Flow<ReferralRecord?> {
+        if (userId.isBlank()) return flowOf(null)
+        return db.collection("referrals").document(userId)
+            .snapshots()
+            .map { snap -> snap.toObject(ReferralRecord::class.java) }
+            .catch { e ->
+                if (e is CancellationException) throw e
+                emit(null)
+            }
+    }
+
+    fun observeMyInvitedReferrals(userId: String): Flow<List<ReferralRecord>> {
+        if (userId.isBlank()) return flowOf(emptyList())
+        return db.collection("referrals")
+            .whereEqualTo("inviterId", userId)
+            .snapshots()
+            .map { snap ->
+                snap.documents
+                    .mapNotNull { it.toObject(ReferralRecord::class.java) }
+                    .sortedByDescending { it.createdAt?.toDate()?.time ?: 0L }
+            }
+            .catch { e ->
+                if (e is CancellationException) throw e
+                emit(emptyList())
+            }
+    }
+
+    suspend fun redeemReferralCode(
+        codeInput: String,
+        myName: String
+    ): Result<String> {
+        val currentUser = auth.currentUser
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val uid = currentUser.uid
+        val normalized = codeInput.trim().uppercase(java.util.Locale.US)
+        val path = "referrals/$uid"
+        return try {
+            require(Regex("^[A-Z0-9\\-]{4,24}$").matches(normalized)) {
+                "Enter a valid invite code (e.g. VOX-A7K9P2)."
+            }
+            val existingRef = db.collection("referrals").document(uid).get().await()
+            require(!existingRef.exists()) {
+                "You have already linked an invite code to this account."
+            }
+            val matches = db.collection("userDirectory")
+                .whereEqualTo("referralCode", normalized)
+                .limit(2)
+                .get()
+                .await()
+            val inviterDoc = matches.documents.firstOrNull()
+                ?: throw IllegalArgumentException("Invite code not found. Double-check the code and try again.")
+            val inviterId = inviterDoc.getString("userId").orEmpty().ifBlank { inviterDoc.id }
+            require(inviterId != uid) {
+                "You cannot use your own invite code."
+            }
+            val inviterName = inviterDoc.getString("displayName").orEmpty().ifBlank { "Friend" }.take(40)
+            val safeMyName = myName.trim().ifBlank { "Member" }.take(40)
+            val isVerified = currentUser.isEmailVerified
+
+            val batch = db.batch()
+            batch.set(
+                db.collection("referrals").document(uid),
+                mapOf(
+                    "inviteeId" to uid,
+                    "inviteeName" to safeMyName,
+                    "inviterId" to inviterId,
+                    "inviterName" to inviterName,
+                    "referralCode" to normalized,
+                    "accountVerified" to isVerified,
+                    "firstPttSent" to false,
+                    "bonusClaimed" to false,
+                    "bonusPointsEach" to 2,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                db.collection("users").document(uid),
+                mapOf(
+                    "referredByUserId" to inviterId,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(inviterName)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun completeReferralBonusOnFirstPttClip(myName: String): Result<ReferralBonusAwarded?> {
+        val currentUser = auth.currentUser
+            ?: return Result.success(null)
+        val uid = currentUser.uid
+        val refDocRef = db.collection("referrals").document(uid)
+        val path = refDocRef.path
+        return try {
+            val snap = refDocRef.get().await()
+            if (!snap.exists()) return Result.success(null)
+            val record = snap.toObject(ReferralRecord::class.java) ?: return Result.success(null)
+            if (record.bonusClaimed) return Result.success(null)
+
+            val isVerified = currentUser.isEmailVerified
+            if (!isVerified) {
+                // Record that first PTT clip is done; bonus will unlock once Google email is verified
+                if (!record.firstPttSent) {
+                    refDocRef.update(
+                        mapOf(
+                            "firstPttSent" to true,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                return Result.success(null)
+            }
+
+            val safeMyName = myName.trim().ifBlank { record.inviteeName.ifBlank { "Member" } }.take(40)
+            val txRef = db.collection("pointTransactions").document()
+            val batch = db.batch()
+            batch.update(
+                refDocRef,
+                mapOf(
+                    "accountVerified" to true,
+                    "firstPttSent" to true,
+                    "bonusClaimed" to true,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                db.collection("users").document(uid),
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(2L),
+                    "referralBonusClaimed" to true,
+                    "referredByUserId" to record.inviterId,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                db.collection("users").document(record.inviterId),
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(2L),
+                    "referralEarnedPoints" to FieldValue.increment(2L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.REFERRAL_BONUS.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeMyName,
+                    "creatorId" to record.inviterId,
+                    "creatorName" to record.inviterName.ifBlank { "Friend" }.take(40),
+                    "postId" to "",
+                    "pointsDelta" to 2L,
+                    "grossCents" to 0L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 0L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(ReferralBonusAwarded(inviterName = record.inviterName.ifBlank { "your friend" }))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
 }
+
 
 

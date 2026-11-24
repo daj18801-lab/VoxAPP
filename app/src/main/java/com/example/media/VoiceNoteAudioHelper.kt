@@ -32,12 +32,14 @@ class VoiceNoteRecorder(private val context: Context) {
     private var recorder: MediaRecorder? = null
     private var outputFile: File? = null
     private var startMillis: Long = 0L
+    private var activeMaxDurationSeconds: Int = FREE_MAX_DURATION_SECONDS
 
     val isRecording: Boolean
         get() = recorder != null
 
-    fun startRecording(): Boolean {
+    fun startRecording(maxDurationSeconds: Int = FREE_MAX_DURATION_SECONDS): Boolean {
         cancel()
+        val boundedMax = maxDurationSeconds.coerceIn(1, PRO_MAX_DURATION_SECONDS)
         return try {
             val file = File(context.cacheDir, "vn_rec_${System.currentTimeMillis()}.m4a")
             val mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -52,14 +54,15 @@ class VoiceNoteRecorder(private val context: Context) {
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 setAudioChannels(1)
                 setAudioSamplingRate(16_000)
-                setAudioEncodingBitRate(24_000)
-                setMaxDuration(MAX_DURATION_SECONDS * 1000)
+                setAudioEncodingBitRate(16_000)
+                setMaxDuration(boundedMax * 1000)
                 setOutputFile(file.absolutePath)
                 prepare()
                 start()
             }
             recorder = mediaRecorder
             outputFile = file
+            activeMaxDurationSeconds = boundedMax
             startMillis = System.currentTimeMillis()
             true
         } catch (e: Exception) {
@@ -72,8 +75,9 @@ class VoiceNoteRecorder(private val context: Context) {
     suspend fun stopAndEncode(): RecordedVoiceNote? = withContext(Dispatchers.IO) {
         val activeRecorder = recorder ?: return@withContext null
         val file = outputFile
+        val maxSec = activeMaxDurationSeconds.toLong()
         val elapsedSec = (((System.currentTimeMillis() - startMillis) + 500L) / 1000L)
-            .coerceIn(1L, MAX_DURATION_SECONDS.toLong())
+            .coerceIn(1L, maxSec)
         recorder = null
         outputFile = null
         startMillis = 0L
@@ -125,9 +129,11 @@ class VoiceNoteRecorder(private val context: Context) {
 
     companion object {
         private const val TAG = "VoiceNoteRecorder"
-        const val MAX_DURATION_SECONDS = 30
-        private const val MAX_RAW_BYTES = 215_000
-        private const val MAX_BASE64_CHARS = 295_000
+        const val FREE_MAX_DURATION_SECONDS = 5
+        const val PRO_MAX_DURATION_SECONDS = 60
+        const val MAX_DURATION_SECONDS = PRO_MAX_DURATION_SECONDS
+        private const val MAX_RAW_BYTES = 260_000
+        private const val MAX_BASE64_CHARS = 350_000
     }
 }
 

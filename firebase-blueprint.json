@@ -22,14 +22,37 @@
         "disableVideo": { "type": "boolean", "description": "Admin-controlled restriction disabling camera video broadcast." },
         "suspendedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which the user is suspended by Admin or Support (0 = not suspended)." },
         "suspensionReason": { "type": "string", "description": "Optional reason shown to suspended user (0-200 chars)." },
-        "pointsBalance": { "type": "integer", "description": "Available points balance (1 point = $1; 2 points = $2)." },
-        "creatorEarningsCents": { "type": "integer", "description": "Accumulated creator earnings in USD cents ($1 per 2-pt photo unlock, $5 per $10 paid DM, $7.50 per $15/mo subscription)." },
-        "totalSpentCents": { "type": "integer", "description": "Total USD cents spent on points, paid DMs, and creator subscriptions." },
-        "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"], "description": "Private message privacy setting: OPEN (anyone), PAID ($10 lock, $5 user / $5 app), or DISABLED (no private messages)." },
+        "pointsBalance": { "type": "integer", "description": "Available spendable in-app points balance (1 point = $1; includes purchased points, creator earned points, streak rollovers, and referral bonuses)." },
+        "halfPointsBalance": { "type": "integer", "description": "Half-point remainder (0 or 1, representing +0.5 pt from free-user 7-day login streaks; two halves merge into +1 full point)." },
+        "creatorEarnedPoints": { "type": "integer", "description": "Cumulative spendable in-app points earned as a creator (+1 pt per 2-pt photo unlock, +1 pt per $5 paid DM unlock, +8 pts per creator subscription). Credited directly to pointsBalance; app owner earns 100% of money." },
+        "creatorEarningsCents": { "type": "integer", "description": "Legacy deprecated counter retained for backward compatibility. App owner earns 100% of money; creators earn spendable in-app points in pointsBalance / creatorEarnedPoints." },
+        "proMember": { "type": "boolean", "description": "Whether the user has an active $9.99/month Pro membership (1-min PTT, 30s Reels uploads, Blue username color, unlimited Discovery photos)." },
+        "proExpiresAtMillis": { "type": "integer", "description": "Epoch milliseconds when Pro membership expires (0 = not Pro)." },
+        "profileBoostedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which this user's profile is promoted to the top of Discovery People (5 points per 24h boost)." },
+        "spotlightFrameUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which a glowing neon Spotlight Frame border appears around this user's avatar in Discover and Chats (5 points per 24h)." },
+        "spotlightFrameColorHex": { "type": "string", "description": "Hex color (#RRGGBB) of the user's active 24-hour glowing neon Spotlight Frame." },
+        "loginStreakDays": { "type": "integer", "description": "Current consecutive UTC days the user has logged into VoxStage." },
+        "lastLoginDayKey": { "type": "string", "description": "UTC date (YYYY-MM-DD) of the user's most recent daily login check-in." },
+        "lastStreakRewardDayKey": { "type": "string", "description": "UTC date (YYYY-MM-DD) when the user last received a free-member 7-day +0.5 pt login streak reward." },
+        "referralCode": { "type": "string", "description": "Unique shareable Invite-a-Friend code (e.g. VOX-A7K9P2)." },
+        "referredByUserId": { "type": "string", "description": "UID of the inviter whose referral code this user redeemed (set once)." },
+        "referralBonusClaimed": { "type": "boolean", "description": "Whether this invited user has completed account verification + first PTT clip and claimed the +2 pt bonus for both users." },
+        "referralEarnedPoints": { "type": "integer", "description": "Cumulative usable points earned from inviting friends (+2 pts per completed referral)." },
+        "ownedPttThemes": { "type": "array", "description": "List of purchased custom floating PTT button theme IDs." },
+        "selectedPttTheme": { "type": "string", "enum": ["CLASSIC", "NEON_MAGENTA", "TACTICAL_CYAN", "SOLAR_GOLD", "ROYAL_PURPLE", "INFERNO_CRIMSON"], "description": "Currently equipped floating PTT button color/glow ring theme." },
+        "ownedPttChirps": { "type": "array", "description": "List of purchased custom walkie-talkie chirp sound IDs." },
+        "selectedPttChirp": { "type": "string", "enum": ["STANDARD", "ROGER_BEEP", "TACTICAL_SQUAWK", "RETRO_POLICE", "SCIFI_PULSE"], "description": "Currently equipped PTT key-down/key-up radio chirp tone." },
+        "totalSpentCents": { "type": "integer", "description": "Total USD cents spent on points, Pro membership, paid DMs, and creator subscriptions." },
+        "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"], "description": "Private message privacy setting: OPEN (anyone), PAID ($5 lock — full $5 goes to app owner and recipient earns +1 usable in-app point), or DISABLED (no private messages)." },
         "adultVerified": { "type": "boolean", "description": "Whether the user has verified they are 18+ years old (required to lock photos or view/unlock locked photos)." },
         "birthYear": { "type": "integer", "description": "User's self-verified birth year (0 if unverified; must satisfy age >= 18 when adultVerified is true)." },
+        "sex": { "type": "string", "enum": ["UNSPECIFIED", "MALE", "FEMALE"], "description": "Optional user sex/gender for Discovery filtering." },
+        "age": { "type": "integer", "description": "Optional user age (0 if unset, or 18-120) for Discovery filtering." },
+        "totalTimeSpentSec": { "type": "integer", "description": "Cumulative foreground time spent on the app in seconds." },
+        "appearanceStatus": { "type": "string", "enum": ["ONLINE", "IDLE", "OFFLINE"], "description": "User-selected visible status (Admins and Support always see true live status)." },
         "blockedUserIds": { "type": "array", "description": "Bounded list of up to 100 blocked UIDs." },
         "pictureUploadTimestamps": { "type": "array", "description": "Sliding-window epoch ms timestamps (max 10) enforcing max 10 picture uploads per 10 minutes." },
+        "discoveryPhotoTimestamps": { "type": "array", "description": "Sliding-window epoch ms timestamps (max 2) enforcing max 2 Discovery photo posts per 7-day week for free members." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
       },
@@ -247,9 +270,19 @@
         "avatarColorHex": { "type": "string" },
         "photoBase64": { "type": "string" },
         "staffTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "proMember": { "type": "boolean", "description": "Whether the user has an active $9.99/month Pro membership (displays Blue username)." },
+        "proExpiresAtMillis": { "type": "integer", "description": "Epoch milliseconds when Pro membership expires." },
+        "profileBoostedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which this profile is promoted to the top of Discovery People." },
+        "spotlightFrameUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which a glowing neon Spotlight Frame border appears around this user's avatar in Discover and Chats." },
+        "spotlightFrameColorHex": { "type": "string", "description": "Hex color (#RRGGBB) for the user's active glowing neon Spotlight Frame." },
+        "referralCode": { "type": "string", "description": "Public shareable Invite-a-Friend code for referral lookup." },
         "postCount": { "type": "integer" },
         "dmPolicy": { "type": "string", "enum": ["OPEN", "PAID", "DISABLED"] },
+        "sex": { "type": "string", "enum": ["UNSPECIFIED", "MALE", "FEMALE"] },
+        "age": { "type": "integer" },
         "online": { "type": "boolean" },
+        "appearanceStatus": { "type": "string", "enum": ["ONLINE", "IDLE", "OFFLINE"], "description": "User-selected visible status (Admins/Support see true online status)." },
+        "totalTimeSpentSec": { "type": "integer", "description": "Cumulative seconds spent on the app." },
         "acceptedFriendIds": { "type": "array", "description": "Bounded list of accepted friend UIDs (max 200) used to compute Friends-of-Friends suggestions." },
         "lastActiveAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -311,6 +344,15 @@
         "lastAlertSenderId": { "type": "string", "description": "UID of friend who last sent a ring & vibrate attention alert." },
         "lastAlertSenderName": { "type": "string", "description": "Display name of friend who last sent an attention alert." },
         "lastAlertAtMillis": { "type": "integer", "description": "Epoch ms of the last attention alert (enforces 1 alert per 5 minutes)." },
+        "pinnedMessageId": { "type": "string", "description": "ID of the currently pinned message in this private chat (empty if none)." },
+        "pinnedMessageText": { "type": "string", "description": "Preview text of the currently pinned message (up to 300 chars)." },
+        "pinnedMessageSenderName": { "type": "string", "description": "Display name of the sender of the pinned message." },
+        "pinnedByUserId": { "type": "string", "description": "UID of the participant who pinned the message." },
+        "pinnedByName": { "type": "string", "description": "Display name of the participant who pinned the message." },
+        "pinnedAtMillis": { "type": "integer", "description": "Epoch ms when the message was pinned (0 if none)." },
+        "talkStreakCount": { "type": "integer", "description": "Consecutive UTC days both participants exchanged at least one DM or PTT clip (displayed with flame/radio-tower icon at 3+ days)." },
+        "talkStreakLastMutualDay": { "type": "string", "description": "UTC date (YYYY-MM-DD) when both participants last exchanged a message or PTT clip." },
+        "lastMessageDayByUserId": { "type": "object", "description": "Map of participant UID to most recent UTC date (YYYY-MM-DD) they sent a message or PTT clip in this thread." },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -336,6 +378,8 @@
         "audioBase64": { "type": "string", "description": "Optional compressed M4A/AAC voice note encoded as Base64." },
         "audioDurationSec": { "type": "integer", "description": "Duration of the attached voice note in seconds (0-60)." },
         "expiresAtMillis": { "type": "integer", "description": "Optional epoch ms when a disappearing message expires (0 = permanent)." },
+        "messageType": { "type": "string", "enum": ["TEXT", "SCREENSHOT", "SUPPORT_HANDOFF"], "description": "Optional message type for normal text/media, screenshot alert notices, or admin-to-support handoffs." },
+        "reactionsByUserId": { "type": "object", "description": "Map of participant UID to emoji reaction ('❤️', '👍', '😂', '😮', '😢', '🔥')." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["threadId", "participantIds", "senderId", "senderName", "senderTier", "text", "createdAt"]
@@ -417,7 +461,7 @@
     },
     "DmAccessPass": {
       "title": "DmAccessPass",
-      "description": "Paid $10 private message access pass ($5 to recipient, $5 to app owner) that can be revoked/kicked by the recipient.",
+      "description": "Paid $5 private message access pass (full $5 to app owner; recipient earns +1 usable in-app point) that can be revoked/kicked by the recipient.",
       "type": "object",
       "properties": {
         "senderId": { "type": "string" },
@@ -440,10 +484,10 @@
     },
     "PointTransaction": {
       "title": "PointTransaction",
-      "description": "Immutable ledger entry recording point purchases, 2-point ($2) photo unlocks ($1 creator / $1 app owner), 5-point ($5) Discovery boosts, $10 paid DMs ($5 user / $5 app owner), and $15/mo creator subscriptions.",
+      "description": "Immutable ledger entry recording point purchases, Pro memberships ($9.99/mo or 10 pts), 2-point photo unlocks (creator earns +1 usable pt), 5-point Picture/Reel/Profile boosts, custom PTT themes & chirps, $5 paid DMs (full $5 to app owner; recipient earns +1 usable pt), and $15/mo creator subscriptions (full $15 to app owner; creator earns +8 usable pts).",
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["BUY_POINTS", "UNLOCK_PHOTO", "SUBSCRIBE_CREATOR", "BOOST_POST", "UNLOCK_DM"] },
+        "type": { "type": "string", "enum": ["BUY_POINTS", "UNLOCK_PHOTO", "SUBSCRIBE_CREATOR", "BOOST_POST", "BOOST_REEL", "BOOST_PROFILE", "BUY_PTT_ITEM", "BUY_SPOTLIGHT_FRAME", "DAILY_STREAK_BONUS", "REFERRAL_BONUS", "UNLOCK_DM", "PRO_MEMBERSHIP"] },
         "buyerId": { "type": "string" },
         "buyerName": { "type": "string" },
         "creatorId": { "type": "string" },
@@ -488,6 +532,10 @@
         "movedByAdminId": { "type": "string", "description": "UID of the administrator who sent the user." },
         "movedByAdminName": { "type": "string", "description": "Display name of the administrator." },
         "reason": { "type": "string", "description": "Optional reason shown to the user." },
+        "transferType": { "type": "string", "enum": ["ROOM", "SUPPORT_DM"], "description": "Whether the Admin directive routes the user to a live room or a Support member's private chat." },
+        "targetThreadId": { "type": "string", "description": "Destination private message thread ID when transferType is SUPPORT_DM." },
+        "targetSupportUserId": { "type": "string", "description": "Target Support member UID when transferType is SUPPORT_DM." },
+        "targetSupportName": { "type": "string", "description": "Target Support member display name when transferType is SUPPORT_DM." },
         "consumed": { "type": "boolean", "description": "Set to true by the recipient client once navigated." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -526,6 +574,106 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["followerId", "followingId", "createdAt"]
+    },
+    "AppBroadcast": {
+      "title": "AppBroadcast",
+      "description": "Admin-sent app-wide announcement message delivered in real time to all signed-in users.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Short announcement headline (1-80 chars)." },
+        "message": { "type": "string", "description": "Announcement body text (1-500 chars)." },
+        "severity": { "type": "string", "enum": ["INFO", "WARNING", "URGENT"], "description": "Visual urgency level." },
+        "senderId": { "type": "string", "description": "UID of the Admin who sent the broadcast." },
+        "senderName": { "type": "string", "description": "Display name of the Admin who sent the broadcast." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "message", "severity", "senderId", "senderName", "createdAt"]
+    },
+    "Reel": {
+      "title": "Reel",
+      "description": "Vertical short video reel (max 30 seconds, Pro-only upload) with $5 boost-to-top, likes, comments, and shares.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorHandle": { "type": "string" },
+        "authorColorHex": { "type": "string" },
+        "authorPhotoBase64": { "type": "string" },
+        "authorTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "caption": { "type": "string" },
+        "thumbnailBase64": { "type": "string" },
+        "durationSec": { "type": "integer", "description": "Video duration in seconds (1-30)." },
+        "chunkCount": { "type": "integer", "description": "Number of Base64 video chunks stored in /reels/{reelId}/chunks (1-16)." },
+        "mimeType": { "type": "string", "description": "MIME type (video/mp4)." },
+        "boostedAtMillis": { "type": "integer" },
+        "boostedUntilMillis": { "type": "integer" },
+        "likedByUserIds": { "type": "array" },
+        "commentCount": { "type": "integer" },
+        "shareCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "authorId", "authorName", "authorHandle", "authorColorHex", "authorTier",
+        "caption", "thumbnailBase64", "durationSec", "chunkCount", "mimeType",
+        "likedByUserIds", "createdAt", "updatedAt"
+      ]
+    },
+    "ReelChunk": {
+      "title": "ReelChunk",
+      "description": "Ordered Base64-encoded video segment belonging to a parent Reel.",
+      "type": "object",
+      "properties": {
+        "reelId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "chunkIndex": { "type": "integer" },
+        "dataBase64": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reelId", "authorId", "chunkIndex", "dataBase64", "createdAt"]
+    },
+    "ReelComment": {
+      "title": "ReelComment",
+      "description": "Community comment on a vertical video Reel.",
+      "type": "object",
+      "properties": {
+        "reelId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorHandle": { "type": "string" },
+        "authorColorHex": { "type": "string" },
+        "authorTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "reelId", "authorId", "authorName", "authorHandle", "authorColorHex",
+        "authorTier", "text", "createdAt", "updatedAt"
+      ]
+    },
+    "ReferralRecord": {
+      "title": "ReferralRecord",
+      "description": "Invite-a-Friend referral link keyed by invitee UID awarding +2 points to both inviter and invitee once the invitee verifies their account and sends their first PTT clip.",
+      "type": "object",
+      "properties": {
+        "inviteeId": { "type": "string" },
+        "inviteeName": { "type": "string" },
+        "inviterId": { "type": "string" },
+        "inviterName": { "type": "string" },
+        "referralCode": { "type": "string" },
+        "accountVerified": { "type": "boolean" },
+        "firstPttSent": { "type": "boolean" },
+        "bonusClaimed": { "type": "boolean" },
+        "bonusPointsEach": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "inviteeId", "inviteeName", "inviterId", "inviterName", "referralCode",
+        "accountVerified", "firstPttSent", "bonusClaimed", "bonusPointsEach",
+        "createdAt", "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -616,6 +764,26 @@
     "/userFollows/{followId}": {
       "schema": { "$ref": "#/entities/UserFollow" },
       "description": "Directed follower -> following edges keyed by {followerId}__{followingId}."
+    },
+    "/appBroadcasts/{broadcastId}": {
+      "schema": { "$ref": "#/entities/AppBroadcast" },
+      "description": "Admin-authored app-wide broadcast messages delivered live to all signed-in users."
+    },
+    "/reels/{reelId}": {
+      "schema": { "$ref": "#/entities/Reel" },
+      "description": "Vertical swipe video reels (max 30s, Pro-only upload) with $5 boost to top, likes, comments, and shares."
+    },
+    "/reels/{reelId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/ReelChunk" },
+      "description": "Ordered Base64 MP4 video chunks for a parent Reel."
+    },
+    "/reels/{reelId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/ReelComment" },
+      "description": "Community comments on a vertical video Reel."
+    },
+    "/referrals/{inviteeId}": {
+      "schema": { "$ref": "#/entities/ReferralRecord" },
+      "description": "Invite-a-Friend referral records granting +2 points to both inviter and new user once verified and first PTT clip is sent."
     }
   }
 }

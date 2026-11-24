@@ -695,10 +695,12 @@ private fun ParticipantRosterRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    val isLeader = participant.roleEnum() == ParticipantRole.HOST ||
+                        participant.roleEnum() == ParticipantRole.MODERATOR
                     Text(
                         text = if (isSelf) "${participant.displayName} (You)" else participant.displayName,
                         style = MaterialTheme.typography.titleSmall,
-                        color = usernameColor(tier)
+                        color = usernameColor(tier, isRoomLeader = isLeader, userId = participant.userId)
                     )
                     StaffTierBadge(tier = tier)
                     if (!participant.invisible) {
@@ -707,7 +709,7 @@ private fun ParticipantRosterRow(
                         Icon(
                             imageVector = Icons.Rounded.VisibilityOff,
                             contentDescription = "Invisible",
-                            tint = usernameColor(tier),
+                            tint = usernameColor(tier, isRoomLeader = isLeader, userId = participant.userId),
                             modifier = Modifier.size(14.dp)
                         )
                     }
@@ -790,7 +792,7 @@ fun UserModerationActionSheet(
             Text(
                 text = targetName,
                 style = MaterialTheme.typography.headlineSmall,
-                color = usernameColor(targetTier)
+                color = usernameColor(targetTier, isRoomLeader = targetIsHost || targetIsCoAdmin, userId = targetUserId)
             )
             StaffTierBadge(tier = targetTier)
         }

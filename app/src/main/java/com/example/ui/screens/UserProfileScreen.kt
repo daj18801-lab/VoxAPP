@@ -37,6 +37,8 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.SupportAgent
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -48,6 +50,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -78,12 +81,14 @@ import com.example.data.DirectoryEntry
 import com.example.data.DmPolicy
 import com.example.data.Friendship
 import com.example.data.PostComment
+import com.example.data.PresenceStatus
 import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.ui.components.FullScreenPhotoDialog
 import com.example.ui.components.PostCommentsDialog
+import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.ProfilePostCard
 import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
@@ -91,10 +96,13 @@ import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.rememberBase64ImageBitmap
 import com.example.ui.components.rememberBlurredBase64ImageBitmap
+import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.showTopMessage
+import com.example.ui.components.ProMemberBadge
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
+import com.example.ui.theme.PresenceOnlineGreen
 import com.example.ui.theme.SafetyEmerald
 import com.example.viewmodel.UserProfileViewModel
 import kotlinx.coroutines.flow.Flow
@@ -123,7 +131,14 @@ fun UserProfileScreen(
     onSharePostToFeed: (ProfilePost, String, () -> Unit) -> Unit,
     onExternalSharePost: (ProfilePost) -> Unit,
     onSubscribeCreator: (creatorId: String, creatorName: String) -> Unit,
-    onOpenBuyPoints: () -> Unit
+    onOpenBuyPoints: () -> Unit,
+    supportStaffMembers: List<DirectoryEntry> = emptyList(),
+    onAdminSendToSupportChat: (
+        targetUser: DirectoryEntry,
+        supportMember: DirectoryEntry,
+        reason: String,
+        onSent: () -> Unit
+    ) -> Unit = { _, _, _, _ -> }
 ) {
     BackHandler(onBack = onBack)
 
@@ -141,6 +156,8 @@ fun UserProfileScreen(
     var buyPointsNeededCount by remember { mutableIntStateOf(2) }
     var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
     var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
+    var showSendToSupportDialog by remember { mutableStateOf(false) }
+    val nowMillis = rememberPresenceClockMillis()
 
     LaunchedEffect(Unit) {
         viewModel.snackbarEvents.collect { msg ->
@@ -195,7 +212,7 @@ fun UserProfileScreen(
                             Text(
                                 text = entry?.displayName?.ifBlank { "User Profile" } ?: "User Profile",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                color = usernameColor(tier),
+                                color = usernameColor(tier, isPro = entry?.isProActive() == true, userId = entry?.userId),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -280,6 +297,8 @@ fun UserProfileScreen(
                                             micActive = false,
                                             size = 92.dp,
                                             photoBase64 = user.photoBase64,
+                                            userId = user.userId,
+                                            spotlightColorHex = user.activeSpotlightColorHex(),
                                             modifier = Modifier
                                                 .clickable(enabled = user.photoBase64.isNotBlank()) {
                                                     showFullAvatar = true
@@ -287,16 +306,58 @@ fun UserProfileScreen(
                                                 .testTag("user_profile_avatar")
                                         )
 
+                                        val displayedStatus = user.displayedStatusFor(
+                                            viewerIsStaff = staffCapabilities.isStaff,
+                                            nowMillis = nowMillis
+                                        )
+                                        val isHidingTrueOnline = staffCapabilities.isStaff &&
+                                            user.isHidingTrueOnlineStatus(nowMillis)
+
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
+                                            PresenceStatusDot(
+                                                status = displayedStatus,
+                                                size = 11.dp,
+                                                modifier = Modifier.testTag("user_profile_presence_dot")
+                                            )
                                             Text(
                                                 text = user.displayName,
                                                 style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
-                                                color = usernameColor(tier)
+                                                color = usernameColor(tier, isPro = user.isProActive(), userId = user.userId)
                                             )
                                             StaffTierBadge(tier = tier)
+                                            if (user.isProActive()) {
+                                                ProMemberBadge()
+                                            }
+                                        }
+
+                                        if (isHidingTrueOnline) {
+                                            Surface(
+                                                shape = RoundedCornerShape(999.dp),
+                                                color = PresenceOnlineGreen.copy(alpha = 0.14f),
+                                                border = BorderStroke(1.dp, PresenceOnlineGreen.copy(alpha = 0.45f)),
+                                                modifier = Modifier.testTag("user_profile_staff_true_status_badge")
+                                            ) {
+                                                Text(
+                                                    text = "True Status: Online (Appearing ${user.appearanceStatusEnum().label})",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = PresenceOnlineGreen,
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                                )
+                                            }
+                                        } else {
+                                            Text(
+                                                text = displayedStatus.label,
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                                color = when (displayedStatus) {
+                                                    PresenceStatus.ONLINE -> PresenceOnlineGreen
+                                                    PresenceStatus.IDLE -> ModAmber
+                                                    PresenceStatus.OFFLINE -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                },
+                                                modifier = Modifier.testTag("user_profile_status_label")
+                                            )
                                         }
 
                                         if (tier != StaffTier.ADMIN) {
@@ -384,6 +445,42 @@ fun UserProfileScreen(
                                                     )
                                                     Text(
                                                         text = "Following",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            }
+                                            Surface(
+                                                shape = RoundedCornerShape(14.dp),
+                                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("user_profile_time_spent")
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 8.dp),
+                                                    horizontalAlignment = Alignment.CenterHorizontally
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Schedule,
+                                                            contentDescription = "Time on app",
+                                                            tint = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                        Text(
+                                                            text = user.formattedTimeSpent(),
+                                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = "App Time",
                                                         style = MaterialTheme.typography.labelSmall,
                                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                                     )
@@ -549,7 +646,7 @@ fun UserProfileScreen(
                                                     Spacer(modifier = Modifier.width(6.dp))
                                                     Text(
                                                         when (dmPolicy) {
-                                                            DmPolicy.PAID -> "DM (\$10)"
+                                                            DmPolicy.PAID -> "DM (\$5)"
                                                             DmPolicy.DISABLED -> "DMs Off"
                                                             DmPolicy.OPEN -> "Message"
                                                         }
@@ -696,6 +793,30 @@ fun UserProfileScreen(
                                                         } else {
                                                             "Verify 18+ to Subscribe (\$15/mo)"
                                                         },
+                                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                                    )
+                                                }
+                                            }
+
+                                            // Admin Action: Send User to a Support Member's Private Message
+                                            if (staffCapabilities.isAdmin) {
+                                                OutlinedButton(
+                                                    onClick = { showSendToSupportDialog = true },
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(48.dp)
+                                                        .testTag("admin_send_to_support_chat_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.SupportAgent,
+                                                        contentDescription = "Send user to Support chat",
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = "Send User to Support Chat",
                                                         style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                                                     )
                                                 }
@@ -978,7 +1099,7 @@ fun UserProfileScreen(
                     if (buyPointsNeededCount >= 5) {
                         "You currently have $myPointsBalance pts. Boosting a post to the top of Discovery costs 5 points (\$5) for 24 hours. Buy points in Profile Settings."
                     } else {
-                        "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). You can buy points in Profile Settings or subscribe for \$15/month to unlock all photos."
+                        "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — creator earns +1 usable in-app point). You can buy points in Profile Settings or subscribe for \$15/month to unlock all photos."
                     }
                 )
             },
@@ -1155,6 +1276,143 @@ fun UserProfileScreen(
             },
             dismissButton = {
                 TextButton(onClick = { lockedPhotoDialogPost = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showSendToSupportDialog && entry != null && staffCapabilities.isAdmin && !isSelf) {
+        val eligibleSupportMembers = remember(supportStaffMembers, entry.userId) {
+            supportStaffMembers
+                .filter { it.userId != entry.userId && it.tierEnum().isStaff() }
+                .sortedWith(
+                    compareByDescending<DirectoryEntry> { it.tierEnum() == StaffTier.SUPPORT }
+                        .thenByDescending { it.isCurrentlyOnline(nowMillis) }
+                        .thenBy { it.displayName.lowercase() }
+                )
+        }
+        var selectedSupportId by remember(eligibleSupportMembers) {
+            mutableStateOf(eligibleSupportMembers.firstOrNull()?.userId.orEmpty())
+        }
+        var supportReason by remember { mutableStateOf("") }
+        var isSendingSupportHandoff by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isSendingSupportHandoff) showSendToSupportDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.SupportAgent,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Send to Support Chat",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Connect ${entry.displayName} directly to a Support member's private chat.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (eligibleSupportMembers.isEmpty()) {
+                        Text(
+                            text = "No Support or Admin members are available right now.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(eligibleSupportMembers, key = { "support_pick_${it.userId}" }) { staff ->
+                                val isSelected = selectedSupportId == staff.userId
+                                val staffOnline = staff.isCurrentlyOnline(nowMillis)
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                    },
+                                    border = BorderStroke(
+                                        width = if (isSelected) 1.5.dp else 1.dp,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable { selectedSupportId = staff.userId }
+                                        .testTag("admin_pick_support_${staff.userId}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        PresenceStatusDot(
+                                            status = if (staffOnline) PresenceStatus.ONLINE else PresenceStatus.OFFLINE
+                                        )
+                                        Text(
+                                            text = staff.displayName,
+                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = usernameColor(staff.tierEnum(), isPro = staff.isProActive(), userId = staff.userId),
+                                            modifier = Modifier.weight(1f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        StaffTierBadge(tier = staff.tierEnum())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = supportReason,
+                        onValueChange = { supportReason = it.take(180) },
+                        label = { Text("Note / Topic (optional)") },
+                        placeholder = { Text("e.g., Account help or moderation review") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_support_handoff_reason_input")
+                    )
+                }
+            },
+            confirmButton = {
+                val chosenSupport = eligibleSupportMembers.firstOrNull { it.userId == selectedSupportId }
+                Button(
+                    onClick = {
+                        if (chosenSupport != null) {
+                            isSendingSupportHandoff = true
+                            onAdminSendToSupportChat(entry, chosenSupport, supportReason) {
+                                isSendingSupportHandoff = false
+                                showSendToSupportDialog = false
+                            }
+                        }
+                    },
+                    enabled = chosenSupport != null && !isSendingSupportHandoff,
+                    modifier = Modifier.testTag("admin_confirm_send_to_support_button")
+                ) {
+                    Text(if (isSendingSupportHandoff) "Sending…" else "Send Now")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showSendToSupportDialog = false },
+                    enabled = !isSendingSupportHandoff
+                ) {
                     Text("Cancel")
                 }
             }

@@ -650,7 +650,7 @@ private fun LiveRoomCard(
                     Text(
                         text = if (isHost) "You" else room.hostName,
                         style = MaterialTheme.typography.labelSmall,
-                        color = usernameColor(hostTier),
+                        color = usernameColor(hostTier, isRoomLeader = true, userId = room.hostId),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )

@@ -391,32 +391,49 @@ class PrivateCallForegroundService : Service() {
             combine(
                 LivePttSessionManager.isTransmitting,
                 LivePttSessionManager.remoteSpeakingName,
-                LivePttSessionManager.isConnected
-            ) { transmitting, remoteSpeaker, connected ->
-                Triple(transmitting, remoteSpeaker, connected)
-            }.collect { (transmitting, remoteSpeaker, connected) ->
+                LivePttSessionManager.isConnected,
+                LivePttSessionManager.activePttTheme
+            ) { transmitting, remoteSpeaker, connected, pttTheme ->
+                OverlayVisualState(transmitting, remoteSpeaker, connected, pttTheme)
+            }.collect { (transmitting, remoteSpeaker, connected, pttTheme) ->
                 val circle = floatingButtonCircle ?: return@collect
+                val standbyColor = runCatching { Color.parseColor(pttTheme.standbyColorHex) }
+                    .getOrDefault(COLOR_STANDBY_EMERALD)
+                val liveColor = runCatching { Color.parseColor(pttTheme.liveColorHex) }
+                    .getOrDefault(COLOR_LIVE_CORAL)
+                val glowStroke = if (pttTheme.hasPulseRing) {
+                    runCatching { Color.parseColor(pttTheme.ringGlowHex) }.getOrDefault(COLOR_WHITE_BORDER)
+                } else {
+                    COLOR_WHITE_BORDER
+                }
                 when {
                     transmitting -> {
                         circle.text = "LIVE"
-                        circle.background = createCircleBackground(COLOR_LIVE_CORAL, 0xFFFFFFFF.toInt())
+                        circle.background = createCircleBackground(liveColor, glowStroke)
                     }
                     !remoteSpeaker.isNullOrBlank() -> {
                         circle.text = "HEAR"
-                        circle.background = createCircleBackground(COLOR_INCOMING_BLUE, 0xFFFFFFFF.toInt())
+                        circle.background = createCircleBackground(COLOR_INCOMING_BLUE, glowStroke)
                     }
                     connected -> {
                         circle.text = "PTT"
-                        circle.background = createCircleBackground(COLOR_STANDBY_EMERALD, COLOR_WHITE_BORDER)
+                        circle.background = createCircleBackground(standbyColor, glowStroke)
                     }
                     else -> {
                         circle.text = "..."
-                        circle.background = createCircleBackground(COLOR_CONNECTING_SLATE, COLOR_WHITE_BORDER)
+                        circle.background = createCircleBackground(COLOR_CONNECTING_SLATE, glowStroke)
                     }
                 }
             }
         }
     }
+
+    private data class OverlayVisualState(
+        val transmitting: Boolean,
+        val remoteSpeaker: String?,
+        val connected: Boolean,
+        val pttTheme: com.example.data.PttThemeStyle
+    )
 
     private fun createCircleBackground(fillColor: Int, strokeColor: Int): GradientDrawable {
         val strokePx = (2.5f * resources.displayMetrics.density).toInt().coerceAtLeast(2)

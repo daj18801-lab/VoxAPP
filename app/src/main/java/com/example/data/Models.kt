@@ -172,12 +172,183 @@ enum class ReportStatus(val label: String) {
 
 enum class DmPolicy(val label: String, val subtitle: String) {
     OPEN("Allow Private Messages", "Anyone can send you private messages"),
-    PAID("Paid Only (\$10 Lock)", "Users pay \$10 (\$5 to you · \$5 to app owner) — kick anytime"),
+    PAID("Paid Only (\$5 Lock)", "Users pay \$5 (you earn +1 usable point per user; 10 pts = Pro) — kick anytime"),
     DISABLED("Turn Off Private Messages", "No one can start a private chat with you");
 
     companion object {
         fun fromRaw(raw: String?): DmPolicy =
             entries.firstOrNull { it.name == raw } ?: OPEN
+    }
+}
+
+enum class PttThemeStyle(
+    val id: String,
+    val label: String,
+    val subtitle: String,
+    val pricePoints: Long,
+    val standbyColorHex: String,
+    val liveColorHex: String,
+    val ringGlowHex: String,
+    val hasPulseRing: Boolean
+) {
+    CLASSIC(
+        id = "CLASSIC",
+        label = "Classic Emerald",
+        subtitle = "Clean green standby & crimson live",
+        pricePoints = 0L,
+        standbyColorHex = "#10B981",
+        liveColorHex = "#EF4444",
+        ringGlowHex = "#34D399",
+        hasPulseRing = false
+    ),
+    NEON_MAGENTA(
+        id = "NEON_MAGENTA",
+        label = "Neon Magenta Pulse",
+        subtitle = "Electric magenta core with glowing pulse ring",
+        pricePoints = 2L,
+        standbyColorHex = "#EC4899",
+        liveColorHex = "#F43F5E",
+        ringGlowHex = "#F472B6",
+        hasPulseRing = true
+    ),
+    TACTICAL_CYAN(
+        id = "TACTICAL_CYAN",
+        label = "Cyber Cyan Ring",
+        subtitle = "Tactical cyan beacon with laser halo",
+        pricePoints = 2L,
+        standbyColorHex = "#06B6D4",
+        liveColorHex = "#0EA5E9",
+        ringGlowHex = "#22D3EE",
+        hasPulseRing = true
+    ),
+    SOLAR_GOLD(
+        id = "SOLAR_GOLD",
+        label = "Solar Gold Halo",
+        subtitle = "Luxury gold badge with radiant amber ring",
+        pricePoints = 3L,
+        standbyColorHex = "#F59E0B",
+        liveColorHex = "#EA580C",
+        ringGlowHex = "#FDE047",
+        hasPulseRing = true
+    ),
+    ROYAL_PURPLE(
+        id = "ROYAL_PURPLE",
+        label = "Royal Purple Glow",
+        subtitle = "Deep violet button with neon lavender aura",
+        pricePoints = 3L,
+        standbyColorHex = "#8B5CF6",
+        liveColorHex = "#A855F7",
+        ringGlowHex = "#C084FC",
+        hasPulseRing = true
+    ),
+    INFERNO_CRIMSON(
+        id = "INFERNO_CRIMSON",
+        label = "Inferno Crimson Ring",
+        subtitle = "Blazing ember core with high-energy pulse ring",
+        pricePoints = 4L,
+        standbyColorHex = "#DC2626",
+        liveColorHex = "#F97316",
+        ringGlowHex = "#FB7185",
+        hasPulseRing = true
+    );
+
+    companion object {
+        fun fromRaw(raw: String?): PttThemeStyle =
+            entries.firstOrNull { it.id.equals(raw, ignoreCase = true) || it.name.equals(raw, ignoreCase = true) }
+                ?: CLASSIC
+    }
+}
+
+enum class PttChirpStyle(
+    val id: String,
+    val label: String,
+    val subtitle: String,
+    val pricePoints: Long
+) {
+    STANDARD(
+        id = "STANDARD",
+        label = "Standard Click",
+        subtitle = "Subtle built-in key-down / key-up tone",
+        pricePoints = 0L
+    ),
+    ROGER_BEEP(
+        id = "ROGER_BEEP",
+        label = "Classic Roger Beep",
+        subtitle = "Iconic walkie-talkie dual-beep confirmation",
+        pricePoints = 2L
+    ),
+    TACTICAL_SQUAWK(
+        id = "TACTICAL_SQUAWK",
+        label = "Tactical Radio Squawk",
+        subtitle = "Crisp static squelch burst & high chirp",
+        pricePoints = 3L
+    ),
+    RETRO_POLICE(
+        id = "RETRO_POLICE",
+        label = "Dispatch 3-Tone Chirp",
+        subtitle = "Classic three-step dispatch radio chime",
+        pricePoints = 3L
+    ),
+    SCIFI_PULSE(
+        id = "SCIFI_PULSE",
+        label = "Sci-Fi Comms Pulse",
+        subtitle = "Futuristic frequency-sweep communicator chirp",
+        pricePoints = 4L
+    );
+
+    companion object {
+        fun fromRaw(raw: String?): PttChirpStyle =
+            entries.firstOrNull { it.id.equals(raw, ignoreCase = true) || it.name.equals(raw, ignoreCase = true) }
+                ?: STANDARD
+    }
+}
+
+enum class UserSex(val label: String) {
+    UNSPECIFIED("Not set"),
+    MALE("Male"),
+    FEMALE("Female");
+
+    companion object {
+        fun fromRaw(raw: String?): UserSex =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: UNSPECIFIED
+    }
+}
+
+enum class AgeFilterRange(val label: String, val minAge: Int, val maxAge: Int) {
+    ALL("Any Age", 0, 999),
+    AGE_18_24("18–24", 18, 24),
+    AGE_25_34("25–34", 25, 34),
+    AGE_35_44("35–44", 35, 44),
+    AGE_45_PLUS("45+", 45, 120);
+
+    fun matches(age: Int): Boolean =
+        if (this == ALL) true else age in minAge..maxAge
+}
+
+enum class PresenceStatus(val label: String) {
+    ONLINE("Online"),
+    IDLE("Idle"),
+    OFFLINE("Offline");
+
+    companion object {
+        fun fromRaw(raw: String?): PresenceStatus =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: ONLINE
+    }
+}
+
+fun formatAppTimeSpent(totalSeconds: Long): String {
+    val safe = totalSeconds.coerceAtLeast(0L)
+    if (safe < 60L) return "${safe}s"
+    val totalMinutes = safe / 60L
+    val days = totalMinutes / (60L * 24L)
+    val hours = (totalMinutes % (60L * 24L)) / 60L
+    val minutes = totalMinutes % 60L
+    return when {
+        days > 0L && hours > 0L -> "${days}d ${hours}h"
+        days > 0L -> "${days}d"
+        hours > 0L && minutes > 0L -> "${hours}h ${minutes}m"
+        hours > 0L -> "${hours}h"
+        else -> "${minutes}m"
     }
 }
 
@@ -203,17 +374,97 @@ data class UserProfile(
     val suspendedUntilMillis: Long = 0L,
     val suspensionReason: String = "",
     val pointsBalance: Long = 0L,
+    val halfPointsBalance: Int = 0,
+    val creatorEarnedPoints: Long = 0L,
     val creatorEarningsCents: Long = 0L,
     val totalSpentCents: Long = 0L,
+    val proMember: Boolean = false,
+    val proExpiresAtMillis: Long = 0L,
+    val profileBoostedUntilMillis: Long = 0L,
+    val spotlightFrameUntilMillis: Long = 0L,
+    val spotlightFrameColorHex: String = SpotlightFrameColor.ELECTRIC_CYAN.primaryHex,
+    val loginStreakDays: Int = 0,
+    val lastLoginDayKey: String = "",
+    val lastStreakRewardDayKey: String = "",
+    val referralCode: String = "",
+    val referredByUserId: String = "",
+    val referralBonusClaimed: Boolean = false,
+    val referralEarnedPoints: Long = 0L,
+    val ownedPttThemes: List<String> = emptyList(),
+    val selectedPttTheme: String = PttThemeStyle.CLASSIC.id,
+    val ownedPttChirps: List<String> = emptyList(),
+    val selectedPttChirp: String = PttChirpStyle.STANDARD.id,
     val dmPolicy: String = DmPolicy.OPEN.name,
     val adultVerified: Boolean = false,
     val birthYear: Long = 0L,
+    val sex: String = UserSex.UNSPECIFIED.name,
+    val age: Long = 0L,
+    val totalTimeSpentSec: Long = 0L,
+    val appearanceStatus: String = PresenceStatus.ONLINE.name,
     val blockedUserIds: List<String> = emptyList(),
     val pictureUploadTimestamps: List<Long> = emptyList(),
+    val discoveryPhotoTimestamps: List<Long> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun dmPolicyEnum(): DmPolicy = DmPolicy.fromRaw(dmPolicy)
+    fun sexEnum(): UserSex = UserSex.fromRaw(sex)
+    fun appearanceStatusEnum(): PresenceStatus = PresenceStatus.fromRaw(appearanceStatus)
+    fun formattedTimeSpent(): String = formatAppTimeSpent(totalTimeSpentSec)
+    fun formattedPointsBalance(): String = formatPointsBalance(pointsBalance, halfPointsBalance)
+    fun isProfileBoosted(nowMs: Long = System.currentTimeMillis()): Boolean =
+        profileBoostedUntilMillis > nowMs
+    fun profileBoostRemainingLabel(nowMs: Long = System.currentTimeMillis()): String =
+        formatRemainingHoursLabel(profileBoostedUntilMillis, nowMs)
+    fun hasActiveSpotlightFrame(nowMs: Long = System.currentTimeMillis()): Boolean =
+        spotlightFrameUntilMillis > nowMs
+    fun spotlightFrameRemainingLabel(nowMs: Long = System.currentTimeMillis()): String =
+        formatRemainingHoursLabel(spotlightFrameUntilMillis, nowMs)
+    fun activeSpotlightColorHex(nowMs: Long = System.currentTimeMillis()): String? =
+        if (hasActiveSpotlightFrame(nowMs)) spotlightFrameColorHex else null
+    fun effectiveReferralCode(): String =
+        referralCode.ifBlank { generateReferralCode(userId.ifBlank { id }) }
+    fun streakCycleDay(): Int {
+        if (loginStreakDays <= 0) return 0
+        val mod = loginStreakDays % 7
+        return if (mod == 0) 7 else mod
+    }
+    fun selectedPttThemeEnum(): PttThemeStyle = PttThemeStyle.fromRaw(selectedPttTheme)
+    fun selectedPttChirpEnum(): PttChirpStyle = PttChirpStyle.fromRaw(selectedPttChirp)
+    fun ownsPttTheme(theme: PttThemeStyle): Boolean =
+        theme == PttThemeStyle.CLASSIC || ownedPttThemes.contains(theme.id)
+    fun ownsPttChirp(chirp: PttChirpStyle): Boolean =
+        chirp == PttChirpStyle.STANDARD || ownedPttChirps.contains(chirp.id)
+    fun effectiveAge(): Int {
+        if (age in 18L..120L) return age.toInt()
+        if (birthYear >= 1900L) {
+            val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+            val derived = currentYear - birthYear.toInt()
+            if (derived in 18..120) return derived
+        }
+        return 0
+    }
+    fun isProActive(
+        tier: StaffTier = StaffTier.USER,
+        nowMs: Long = System.currentTimeMillis()
+    ): Boolean = tier.isStaff() || (proMember && proExpiresAtMillis > nowMs)
+
+    fun isProSubscriberOnly(nowMs: Long = System.currentTimeMillis()): Boolean =
+        proMember && proExpiresAtMillis > nowMs
+
+    fun proDaysRemaining(nowMs: Long = System.currentTimeMillis()): Int {
+        val diff = (proExpiresAtMillis - nowMs).coerceAtLeast(0L)
+        return ((diff + 86_399_999L) / 86_400_000L).toInt()
+    }
+
+    /** Free members: 5-second PTT clips; Pro members & Staff: 1-minute (60s) PTT clips. */
+    fun pttMaxDurationSeconds(
+        tier: StaffTier = StaffTier.USER,
+        nowMs: Long = System.currentTimeMillis()
+    ): Int = if (isProActive(tier, nowMs)) PRO_PTT_MAX_SECONDS else FREE_PTT_MAX_SECONDS
+
+    fun isPaidMember(tier: StaffTier = StaffTier.USER): Boolean =
+        isProActive(tier) || totalSpentCents > 0L || pointsBalance > 0L
     fun isAdult18Plus(): Boolean {
         if (!adultVerified || birthYear < 1900L) return false
         val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
@@ -224,6 +475,12 @@ data class UserProfile(
 
     fun remainingPictureUploads(nowMs: Long = System.currentTimeMillis()): Int =
         (MAX_PICTURES_PER_WINDOW - recentPictureUploadsCount(nowMs)).coerceAtLeast(0)
+
+    fun recentDiscoveryPhotosCount(nowMs: Long = System.currentTimeMillis()): Int =
+        discoveryPhotoTimestamps.count { nowMs - it < DISCOVERY_PHOTO_WEEK_MS }
+
+    fun remainingFreeDiscoveryPhotos(nowMs: Long = System.currentTimeMillis()): Int =
+        (FREE_MAX_DISCOVERY_PHOTOS_PER_WEEK - recentDiscoveryPhotosCount(nowMs)).coerceAtLeast(0)
 
     fun currentlySuspended(nowMs: Long = System.currentTimeMillis()): Boolean =
         suspendedUntilMillis > nowMs
@@ -244,6 +501,13 @@ data class UserProfile(
     companion object {
         const val MAX_PICTURES_PER_WINDOW = 10
         const val PICTURE_UPLOAD_WINDOW_MS = 10L * 60L * 1000L
+        const val FREE_PTT_MAX_SECONDS = 5
+        const val PRO_PTT_MAX_SECONDS = 60
+        const val PRO_PRICE_CENTS = 999L
+        const val PRO_DURATION_MILLIS = 30L * 24L * 60L * 60L * 1000L
+        const val PRO_REDEEM_POINTS = 10L
+        const val FREE_MAX_DISCOVERY_PHOTOS_PER_WEEK = 2
+        const val DISCOVERY_PHOTO_WEEK_MS = 7L * 24L * 60L * 60L * 1000L
     }
 }
 
@@ -298,6 +562,20 @@ data class UserAlert(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun senderTierEnum(): StaffTier = StaffTier.fromRaw(senderTier)
+    fun severityEnum(): AlertSeverity = AlertSeverity.fromRaw(severity)
+}
+
+@Keep
+@IgnoreExtraProperties
+data class AppBroadcast(
+    @DocumentId val id: String = "",
+    val title: String = "",
+    val message: String = "",
+    val severity: String = AlertSeverity.INFO.name,
+    val senderId: String = "",
+    val senderName: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+) {
     fun severityEnum(): AlertSeverity = AlertSeverity.fromRaw(severity)
 }
 
@@ -483,15 +761,37 @@ data class DirectoryEntry(
     val avatarColorHex: String = "#0088FF",
     val photoBase64: String = "",
     val staffTier: String = StaffTier.USER.name,
+    val proMember: Boolean = false,
+    val proExpiresAtMillis: Long = 0L,
+    val profileBoostedUntilMillis: Long = 0L,
+    val spotlightFrameUntilMillis: Long = 0L,
+    val spotlightFrameColorHex: String = SpotlightFrameColor.ELECTRIC_CYAN.primaryHex,
+    val referralCode: String = "",
     val postCount: Long = 0L,
     val dmPolicy: String = DmPolicy.OPEN.name,
+    val sex: String = UserSex.UNSPECIFIED.name,
+    val age: Long = 0L,
     val online: Boolean = false,
+    val appearanceStatus: String = PresenceStatus.ONLINE.name,
+    val totalTimeSpentSec: Long = 0L,
     val acceptedFriendIds: List<String> = emptyList(),
     @ServerTimestamp val lastActiveAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun tierEnum(): StaffTier = StaffTier.fromRaw(staffTier)
+    fun isProActive(nowMs: Long = System.currentTimeMillis()): Boolean =
+        proMember && proExpiresAtMillis > nowMs
+    fun isProfileBoosted(nowMs: Long = System.currentTimeMillis()): Boolean =
+        profileBoostedUntilMillis > nowMs
+    fun hasActiveSpotlightFrame(nowMs: Long = System.currentTimeMillis()): Boolean =
+        spotlightFrameUntilMillis > nowMs
+    fun activeSpotlightColorHex(nowMs: Long = System.currentTimeMillis()): String? =
+        if (hasActiveSpotlightFrame(nowMs)) spotlightFrameColorHex else null
     fun dmPolicyEnum(): DmPolicy = DmPolicy.fromRaw(dmPolicy)
+    fun sexEnum(): UserSex = UserSex.fromRaw(sex)
+    fun appearanceStatusEnum(): PresenceStatus = PresenceStatus.fromRaw(appearanceStatus)
+    fun formattedTimeSpent(): String = formatAppTimeSpent(totalTimeSpentSec)
+    fun effectiveAge(): Int = if (age in 18L..120L) age.toInt() else 0
 
     /**
      * Returns true only if the user explicitly has online = true AND their last heartbeat
@@ -502,6 +802,30 @@ data class DirectoryEntry(
         val lastMs = lastActiveAt?.toDate()?.time ?: return true
         return (nowMillis - lastMs) <= ONLINE_STALE_WINDOW_MS
     }
+
+    /** True connectivity status independent of user's chosen appearance preference. */
+    fun trueStatus(nowMillis: Long = System.currentTimeMillis()): PresenceStatus =
+        if (isCurrentlyOnline(nowMillis)) PresenceStatus.ONLINE else PresenceStatus.OFFLINE
+
+    /**
+     * Status shown to a viewer:
+     * - Admins & Support always see the user's true online/offline status.
+     * - Regular users see the user's selected appearanceStatus (Online / Idle / Offline) when active,
+     *   or Offline when the user is actually offline.
+     */
+    fun displayedStatusFor(
+        viewerIsStaff: Boolean,
+        nowMillis: Long = System.currentTimeMillis()
+    ): PresenceStatus {
+        val trulyOnline = isCurrentlyOnline(nowMillis)
+        if (!trulyOnline) return PresenceStatus.OFFLINE
+        if (viewerIsStaff) return PresenceStatus.ONLINE
+        return appearanceStatusEnum()
+    }
+
+    /** True when the user is truly online but hiding their status as Idle or Offline. */
+    fun isHidingTrueOnlineStatus(nowMillis: Long = System.currentTimeMillis()): Boolean =
+        isCurrentlyOnline(nowMillis) && appearanceStatusEnum() != PresenceStatus.ONLINE
 
     companion object {
         const val ONLINE_STALE_WINDOW_MS = 3L * 60L * 1000L
@@ -569,6 +893,15 @@ data class DirectThread(
     val lastAlertSenderId: String = "",
     val lastAlertSenderName: String = "",
     val lastAlertAtMillis: Long = 0L,
+    val pinnedMessageId: String = "",
+    val pinnedMessageText: String = "",
+    val pinnedMessageSenderName: String = "",
+    val pinnedByUserId: String = "",
+    val pinnedByName: String = "",
+    val pinnedAtMillis: Long = 0L,
+    val talkStreakCount: Int = 0,
+    val talkStreakLastMutualDay: String = "",
+    val lastMessageDayByUserId: Map<String, String> = emptyMap(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -592,6 +925,20 @@ data class DirectThread(
     fun areReadReceiptsMutual(myUid: String, otherUid: String): Boolean =
         isReadReceiptsEnabledFor(myUid) && isReadReceiptsEnabledFor(otherUid)
     fun lastReadMillisFor(uid: String): Long = readTimestampsByUserId[uid] ?: 0L
+    fun hasPinnedMessage(): Boolean = pinnedMessageId.isNotBlank()
+    fun activeTalkStreakCount(
+        todayKey: String = utcDayKey(),
+        yesterdayKey: String = utcYesterdayKey()
+    ): Int {
+        if (isGroup || talkStreakCount <= 0) return 0
+        return if (talkStreakLastMutualDay == todayKey || talkStreakLastMutualDay == yesterdayKey) {
+            talkStreakCount
+        } else 0
+    }
+    fun isTalkStreakExpiringToday(
+        todayKey: String = utcDayKey(),
+        yesterdayKey: String = utcYesterdayKey()
+    ): Boolean = activeTalkStreakCount(todayKey, yesterdayKey) >= 3 && talkStreakLastMutualDay == yesterdayKey
     fun displayTitle(myUid: String): String {
         if (!isGroup) return otherName(myUid)
         if (groupName.isNotBlank()) return groupName
@@ -631,8 +978,8 @@ data class DmAccessPass(
     val senderName: String = "",
     val recipientId: String = "",
     val recipientName: String = "",
-    val priceCents: Long = 1000L,
-    val creatorShareCents: Long = 500L,
+    val priceCents: Long = 500L,
+    val creatorShareCents: Long = 0L,
     val platformShareCents: Long = 500L,
     val active: Boolean = true,
     val kicked: Boolean = false,
@@ -656,10 +1003,26 @@ data class DirectMessage(
     val audioBase64: String = "",
     val audioDurationSec: Long = 0L,
     val expiresAtMillis: Long = 0L,
+    val messageType: String = TYPE_TEXT,
+    val reactionsByUserId: Map<String, String> = emptyMap(),
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     fun senderTierEnum(): StaffTier = StaffTier.fromRaw(senderTier)
     fun hasVoiceNote(): Boolean = audioBase64.isNotBlank()
+    fun isScreenshotNotice(): Boolean = messageType == TYPE_SCREENSHOT
+    fun isSupportHandoffNotice(): Boolean = messageType == TYPE_SUPPORT_HANDOFF
+    fun isSystemNotice(): Boolean = isScreenshotNotice() || isSupportHandoffNotice()
+    fun isStandaloneThumbsUp(): Boolean =
+        !isSystemNotice() && imageBase64.isBlank() && audioBase64.isBlank() && text.trim() == "👍"
+    fun myReaction(myUid: String): String? = reactionsByUserId[myUid]?.takeIf { it.isNotBlank() }
+    fun groupedReactions(): List<Pair<String, Int>> =
+        reactionsByUserId.values
+            .filter { it.isNotBlank() }
+            .groupingBy { it }
+            .eachCount()
+            .entries
+            .sortedByDescending { it.value }
+            .map { it.key to it.value }
     fun isDisappearing(): Boolean = expiresAtMillis > 0L
     fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean =
         expiresAtMillis > 0L && nowMs >= expiresAtMillis
@@ -672,6 +1035,13 @@ data class DirectMessage(
             remSec < 3600L -> "${(remSec + 59L) / 60L}m"
             else -> "${(remSec + 3599L) / 3600L}h"
         }
+    }
+
+    companion object {
+        const val TYPE_TEXT = "TEXT"
+        const val TYPE_SCREENSHOT = "SCREENSHOT"
+        const val TYPE_SUPPORT_HANDOFF = "SUPPORT_HANDOFF"
+        val ALLOWED_REACTIONS = listOf("❤️", "👍", "😂", "😮", "😢", "🔥")
     }
 }
 
@@ -748,8 +1118,15 @@ enum class PointTransactionType(val label: String) {
     BUY_POINTS("Bought Points"),
     UNLOCK_PHOTO("Unlocked Photo"),
     SUBSCRIBE_CREATOR("Creator Subscription"),
-    BOOST_POST("Boosted to Top of Discovery"),
-    UNLOCK_DM("Paid Private Message (\$10)");
+    BOOST_POST("Promoted Photo to Top (5 pts)"),
+    BOOST_REEL("Promoted Video Reel to Top (5 pts)"),
+    BOOST_PROFILE("Promoted Profile to Top (5 pts)"),
+    BUY_PTT_ITEM("Custom PTT Theme / Walkie Chirp"),
+    BUY_SPOTLIGHT_FRAME("24h Neon Spotlight Frame (5 pts)"),
+    DAILY_STREAK_BONUS("7-Day Login Streak (+0.5 pt)"),
+    REFERRAL_BONUS("Invite-a-Friend Bonus (+2 pts)"),
+    UNLOCK_DM("Paid Private Message (\$5)"),
+    PRO_MEMBERSHIP("VoxStage Pro (\$9.99/mo)");
 
     companion object {
         fun fromRaw(raw: String?): PointTransactionType =
@@ -765,8 +1142,8 @@ data class CreatorSubscription(
     val creatorId: String = "",
     val creatorName: String = "",
     val priceCents: Long = 1500L,
-    val creatorShareCents: Long = 750L,
-    val platformShareCents: Long = 750L,
+    val creatorShareCents: Long = 0L,
+    val platformShareCents: Long = 1500L,
     val active: Boolean = true,
     val expiresAtMillis: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
@@ -828,9 +1205,20 @@ data class RoomTransfer(
     val movedByAdminId: String = "",
     val movedByAdminName: String = "",
     val reason: String = "",
+    val transferType: String = TYPE_ROOM,
+    val targetThreadId: String = "",
+    val targetSupportUserId: String = "",
+    val targetSupportName: String = "",
     val consumed: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null
-)
+) {
+    fun isSupportDmTransfer(): Boolean = transferType == TYPE_SUPPORT_DM && targetThreadId.isNotBlank()
+
+    companion object {
+        const val TYPE_ROOM = "ROOM"
+        const val TYPE_SUPPORT_DM = "SUPPORT_DM"
+    }
+}
 
 enum class SupportTicketCategory(val label: String) {
     GENERAL("General Help"),
@@ -891,4 +1279,162 @@ fun formatUsdCents(cents: Long): String {
     val rem = safe % 100L
     return if (rem == 0L) "$$dollars" else "$$dollars.${rem.toString().padStart(2, '0')}"
 }
+
+@Keep
+@IgnoreExtraProperties
+data class Reel(
+    @DocumentId val id: String = "",
+    val authorId: String = "",
+    val authorName: String = "",
+    val authorHandle: String = "",
+    val authorColorHex: String = "#1E6BFF",
+    val authorPhotoBase64: String = "",
+    val authorTier: String = StaffTier.USER.name,
+    val caption: String = "",
+    val thumbnailBase64: String = "",
+    val durationSec: Long = 1L,
+    val chunkCount: Long = 1L,
+    val mimeType: String = "video/mp4",
+    val boostedAtMillis: Long = 0L,
+    val boostedUntilMillis: Long = 0L,
+    val likedByUserIds: List<String> = emptyList(),
+    val commentCount: Long = 0L,
+    val shareCount: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun authorTierEnum(): StaffTier = StaffTier.fromRaw(authorTier)
+    fun isLikedBy(uid: String): Boolean = likedByUserIds.contains(uid)
+    fun isCurrentlyBoosted(nowMs: Long = System.currentTimeMillis()): Boolean =
+        boostedUntilMillis > nowMs
+    fun boostRemainingLabel(nowMs: Long = System.currentTimeMillis()): String {
+        val diff = (boostedUntilMillis - nowMs).coerceAtLeast(0L)
+        val hours = diff / 3_600_000L
+        val minutes = (diff % 3_600_000L) / 60_000L
+        return when {
+            hours >= 1L -> "${hours}h left"
+            minutes >= 1L -> "${minutes}m left"
+            else -> "<1m left"
+        }
+    }
+    fun formattedDuration(): String {
+        val safe = durationSec.coerceIn(1L, MAX_DURATION_SECONDS.toLong())
+        return "0:${safe.toString().padStart(2, '0')}"
+    }
+
+    companion object {
+        const val MAX_DURATION_SECONDS = 30
+        const val BOOST_PRICE_POINTS = 5L
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class ReelChunk(
+    @DocumentId val id: String = "",
+    val reelId: String = "",
+    val authorId: String = "",
+    val chunkIndex: Long = 0L,
+    val dataBase64: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class ReelComment(
+    @DocumentId val id: String = "",
+    val reelId: String = "",
+    val authorId: String = "",
+    val authorName: String = "",
+    val authorHandle: String = "",
+    val authorColorHex: String = "#1E6BFF",
+    val authorTier: String = StaffTier.USER.name,
+    val text: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun authorTierEnum(): StaffTier = StaffTier.fromRaw(authorTier)
+}
+
+/**
+ * Glowing neon Spotlight Frame colors selectable when activating the 24-Hour Spotlight Frame (5 pts).
+ */
+enum class SpotlightFrameColor(
+    val label: String,
+    val primaryHex: String,
+    val secondaryHex: String
+) {
+    ELECTRIC_CYAN("Electric Cyan", "#00F5FF", "#0088FF"),
+    NEON_MAGENTA("Neon Magenta", "#FF2E93", "#B400FF"),
+    LASER_LIME("Laser Lime", "#39FF14", "#00E5A0"),
+    HYPER_VIOLET("Hyper Violet", "#B44CFF", "#6D28D9"),
+    SOLAR_GOLD("Solar Gold", "#FFD60A", "#FF8C00");
+
+    companion object {
+        const val PRICE_POINTS = 5L
+        const val DURATION_MS = 24L * 60L * 60L * 1000L
+
+        fun fromHex(hex: String?): SpotlightFrameColor =
+            entries.firstOrNull { it.primaryHex.equals(hex, ignoreCase = true) } ?: ELECTRIC_CYAN
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class ReferralRecord(
+    @DocumentId val id: String = "",
+    val inviteeId: String = "",
+    val inviteeName: String = "",
+    val inviterId: String = "",
+    val inviterName: String = "",
+    val referralCode: String = "",
+    val accountVerified: Boolean = false,
+    val firstPttSent: Boolean = false,
+    val bonusClaimed: Boolean = false,
+    val bonusPointsEach: Int = 2,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+fun utcDayKey(nowMs: Long = System.currentTimeMillis()): String {
+    val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+    cal.timeInMillis = nowMs
+    val y = cal.get(java.util.Calendar.YEAR)
+    val m = cal.get(java.util.Calendar.MONTH) + 1
+    val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
+    return "%04d-%02d-%02d".format(java.util.Locale.US, y, m, d)
+}
+
+fun utcYesterdayKey(nowMs: Long = System.currentTimeMillis()): String =
+    utcDayKey(nowMs - 86_400_000L)
+
+fun formatPointsBalance(points: Long, halfPoints: Int = 0): String =
+    if (halfPoints == 1) "${points}.5 pts" else "$points pts"
+
+fun formatRemainingHoursLabel(untilMillis: Long, nowMs: Long = System.currentTimeMillis()): String {
+    val diff = (untilMillis - nowMs).coerceAtLeast(0L)
+    val hours = diff / 3_600_000L
+    val minutes = (diff % 3_600_000L) / 60_000L
+    return when {
+        hours >= 1L -> "${hours}h left"
+        minutes >= 1L -> "${minutes}m left"
+        else -> "<1m left"
+    }
+}
+
+fun generateReferralCode(uid: String): String {
+    if (uid.isBlank()) return "VOX-GUEST1"
+    return try {
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(uid.toByteArray())
+        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        val chars = CharArray(6) { idx ->
+            alphabet[(digest[idx].toInt() and 0xFF) % alphabet.length]
+        }
+        "VOX-${String(chars)}"
+    } catch (_: Exception) {
+        val fallback = uid.filter { it.isLetterOrDigit() }.uppercase(java.util.Locale.US).take(6).padEnd(6, 'X')
+        "VOX-$fallback"
+    }
+}
+
 
