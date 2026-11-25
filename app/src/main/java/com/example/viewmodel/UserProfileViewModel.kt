@@ -5,8 +5,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.DirectoryEntry
 import com.example.data.ProfilePost
+import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserFollow
+import com.example.data.UserProfile
 import com.example.data.VoxStageRepository
 import com.example.data.unwrapFirestoreError
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -119,6 +121,20 @@ class UserProfileViewModel(
             repository.deleteProfilePost(post)
                 .onSuccess { _snackbarEvents.tryEmit("Post deleted") }
                 .onFailure { err -> _snackbarEvents.tryEmit(err.message ?: "Could not delete post") }
+        }
+    }
+
+    private var hasRecordedView = false
+
+    fun recordProfileViewIfNeeded(viewerProfile: UserProfile?, viewerTier: StaffTier) {
+        if (hasRecordedView || viewerProfile == null || currentUserId == targetUserId) return
+        hasRecordedView = true
+        viewModelScope.launch {
+            repository.recordProfileView(
+                targetUserId = targetUserId,
+                viewerProfile = viewerProfile,
+                viewerTier = viewerTier
+            )
         }
     }
 

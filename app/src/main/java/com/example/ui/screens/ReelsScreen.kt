@@ -105,6 +105,7 @@ import com.example.ui.components.LocalProUserIds
 import com.example.ui.components.ProMemberBadge
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.TopBarSafetyShieldButton
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
@@ -134,6 +135,8 @@ fun ReelsScreen(
     onOpenUserProfile: (String) -> Unit,
     onOpenUpgradeToPro: () -> Unit,
     onShowMessage: (String) -> Unit,
+    safetyBadgeCount: Int = 0,
+    onOpenSafety: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -249,7 +252,7 @@ fun ReelsScreen(
                                     type = "text/plain"
                                     putExtra(
                                         Intent.EXTRA_TEXT,
-                                        "Watch ${reel.authorName}'s Reel on VoxStage: ${reel.caption.ifBlank { "Check out this ${reel.formattedDuration()} Reel!" }}"
+                                        "Watch ${reel.authorName}'s Reel on VOX: ${reel.caption.ifBlank { "Check out this ${reel.formattedDuration()} Reel!" }}"
                                     )
                                 }
                                 runCatching {
@@ -303,36 +306,46 @@ fun ReelsScreen(
                 }
             }
 
-            Button(
-                onClick = openUploadFlow,
-                enabled = !isPreparingVideo && !isUploadingReel,
-                shape = RoundedCornerShape(999.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isProOrStaff) SnapBlue else ModAmber,
-                    contentColor = Color.White
-                ),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                modifier = Modifier
-                    .heightIn(min = 48.dp)
-                    .testTag("upload_reel_button")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (isPreparingVideo || isUploadingReel) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isUploadingReel) "Uploading…" else "Preparing…")
-                } else {
-                    Icon(
-                        imageVector = if (isProOrStaff) Icons.Rounded.Add else Icons.Rounded.Lock,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isProOrStaff) "Upload Reel" else "Pro Upload")
+                Button(
+                    onClick = openUploadFlow,
+                    enabled = !isPreparingVideo && !isUploadingReel,
+                    shape = RoundedCornerShape(999.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isProOrStaff) SnapBlue else ModAmber,
+                        contentColor = Color.White
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("upload_reel_button")
+                ) {
+                    if (isPreparingVideo || isUploadingReel) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (isUploadingReel) "Uploading…" else "Preparing…")
+                    } else {
+                        Icon(
+                            imageVector = if (isProOrStaff) Icons.Rounded.Add else Icons.Rounded.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (isProOrStaff) "Upload Reel" else "Pro Upload")
+                    }
                 }
+                TopBarSafetyShieldButton(
+                    badgeCount = safetyBadgeCount,
+                    onDarkBackground = true,
+                    onClick = onOpenSafety
+                )
             }
         }
     }
@@ -353,11 +366,11 @@ fun ReelsScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Only VoxStage Pro members can upload Reels (up to 30 seconds each).",
+                        "Only VOX Pro members can upload Reels (up to 30 seconds each).",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
-                        "Upgrade to VoxStage Pro for \$9.99/month to unlock:\n• Upload Reels up to 30 seconds\n• 1-minute Push-to-Talk clips (vs 5s Free)\n• Blue Pro username color\n• Unlimited Discovery photo posts",
+                        "Upgrade to VOX Pro for \$9.99/month to unlock:\n• Upload Reels up to 30 seconds\n• 1-minute Push-to-Talk clips (vs 5s Free)\n• Blue Pro username color\n• Unlimited Discovery photo posts",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

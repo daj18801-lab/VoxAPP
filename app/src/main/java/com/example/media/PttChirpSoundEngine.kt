@@ -123,6 +123,25 @@ object PttChirpSoundEngine {
         playSegmentsAsync(keyDown)
     }
 
+    /**
+     * Distinct two-tone emergency/priority radio break-in chirp.
+     * Standard (1 pt): crisp alternating two-tone alert; Urgent (2 pts): double-burst two-tone break-in.
+     */
+    fun playPriorityBreakInChirp(urgent: Boolean = false) {
+        val burst = listOf(
+            ToneSegment(startFreqHz = 1320.0, endFreqHz = 1320.0, durationMs = 85, volume = 0.42),
+            ToneSegment(startFreqHz = 988.0, endFreqHz = 988.0, durationMs = 85, volume = 0.42),
+            ToneSegment(startFreqHz = 0.0, endFreqHz = 0.0, durationMs = 35, volume = 0.0),
+            ToneSegment(startFreqHz = 1480.0, endFreqHz = 1760.0, durationMs = 95, volume = 0.44, noiseMix = 0.05)
+        )
+        val segments = if (urgent) {
+            burst + listOf(ToneSegment(startFreqHz = 0.0, endFreqHz = 0.0, durationMs = 80, volume = 0.0)) + burst
+        } else {
+            burst
+        }
+        playSegmentsAsync(segments)
+    }
+
     private fun playSegmentsAsync(segments: List<ToneSegment>) {
         scope.launch {
             runCatching {

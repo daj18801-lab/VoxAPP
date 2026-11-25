@@ -81,11 +81,14 @@ import com.example.ui.components.QuickCreatePostSheet
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TalkStreakBadge
+import com.example.ui.components.TopBarSafetyShieldButton
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.parseHexColor
 import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
+import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
+import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SnapBlue
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -115,7 +118,9 @@ fun ChatsHomeScreen(
     onOpenUserProfile: (String) -> Unit,
     onOpenFriendsTab: () -> Unit,
     onOpenRoomsTab: () -> Unit,
-    onOpenProfileTab: () -> Unit
+    onOpenProfileTab: () -> Unit,
+    safetyBadgeCount: Int = 0,
+    onOpenSafety: () -> Unit = {}
 ) {
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -311,6 +316,10 @@ fun ChatsHomeScreen(
                                     }
                                 }
                             }
+                            TopBarSafetyShieldButton(
+                                badgeCount = safetyBadgeCount,
+                                onClick = onOpenSafety
+                            )
                         }
                     }
 
@@ -534,7 +543,19 @@ fun ChatsHomeScreen(
                                 }
                             }
                         } else {
-                            items(filteredThreads, key = { it.id }) { thread ->
+                            val priorityThreads = filteredThreads.filter { it.hasActivePriorityChirpFor(currentUserId) }
+                            val regularThreads = filteredThreads.filterNot { it.hasActivePriorityChirpFor(currentUserId) }
+
+                            if (priorityThreads.isNotEmpty()) {
+                                items(priorityThreads, key = { "priority_chirp_${it.id}" }) { thread ->
+                                    com.example.ui.components.PriorityChirpPinnedInboxCard(
+                                        thread = thread,
+                                        onOpenThread = { onOpenThread(thread.id) }
+                                    )
+                                }
+                            }
+
+                            items(regularThreads, key = { it.id }) { thread ->
                                 val otherUid = thread.otherUserId(currentUserId)
                                 SnapChatFeedRow(
                                     thread = thread,
@@ -794,6 +815,55 @@ private fun SnapChatFeedRow(
                                 modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                             )
                         }
+                        if (thread.isBannedInGroup(currentUserId)) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = LiveCoral.copy(alpha = 0.16f)
+                            ) {
+                                Text(
+                                    text = "Banned",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = LiveCoral,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else if (thread.isBouncedInGroup(currentUserId)) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = ModAmber.copy(alpha = 0.18f)
+                            ) {
+                                Text(
+                                    text = "Bounced",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = ModAmber,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else if (thread.isGroupAdmin(currentUserId)) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = ModAmber.copy(alpha = 0.16f)
+                            ) {
+                                Text(
+                                    text = "Admin",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = ModAmber,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else if (thread.isGroupSupport(currentUserId)) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = SafetyEmerald.copy(alpha = 0.16f)
+                            ) {
+                                Text(
+                                    text = "Support",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = SafetyEmerald,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                     } else {
                         StaffTierBadge(tier = otherTier)
                         val talkStreak = thread.activeTalkStreakCount()
@@ -981,7 +1051,7 @@ private fun NewPrivateChatSheetContent(
             if (filteredOthers.isNotEmpty()) {
                 item(key = "sheet_everyone_header") {
                     Text(
-                        text = "People on VoxStage",
+                        text = "People on VOX",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

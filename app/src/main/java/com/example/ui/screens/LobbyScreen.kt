@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Pin
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
@@ -80,6 +82,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
@@ -91,9 +94,11 @@ import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
+import com.example.ui.components.EnterRoomPinDialog
 import com.example.ui.components.LivePulseBadge
 import com.example.ui.components.SafetyTagChip
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.TopBarSafetyShieldButton
 import com.example.ui.components.coverDrawableRes
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
@@ -118,6 +123,7 @@ fun LobbyScreen(
     onToggleMyRooms: (Boolean) -> Unit,
     onToggleInvisiblePreference: (Boolean) -> Unit,
     onOpenRoom: (ChatRoom) -> Unit,
+    onRoomPinVerified: (roomId: String, pin: String) -> Unit = { _, _ -> },
     onEditRoom: (room: ChatRoom, newTitle: String, newTopic: String) -> Unit,
     onCloseRoom: (ChatRoom) -> Unit,
     onCreateRoom: (
@@ -131,12 +137,17 @@ fun LobbyScreen(
         autoModBlockMode: Boolean,
         linksBlocked: Boolean,
         slowModeSeconds: Long,
-        maxSpeakers: Long
-    ) -> Unit
+        maxSpeakers: Long,
+        pinLocked: Boolean,
+        roomPinCode: String
+    ) -> Unit,
+    safetyBadgeCount: Int = 0,
+    onOpenSafety: () -> Unit = {}
 ) {
     var showCreateSheet by remember { mutableStateOf(false) }
     var roomBeingEdited by remember { mutableStateOf<ChatRoom?>(null) }
     var roomPendingClose by remember { mutableStateOf<ChatRoom?>(null) }
+    var roomPendingPin by remember { mutableStateOf<ChatRoom?>(null) }
 
     val canCreateRooms = staffCapabilities.isAdmin || (
         userProfile?.globallyBanned != true &&
@@ -185,7 +196,7 @@ fun LobbyScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
-                                    text = "VoxStage",
+                                    text = "VOX",
                                     style = MaterialTheme.typography.headlineMedium,
                                     color = MaterialTheme.colorScheme.onBackground
                                 )
@@ -197,26 +208,35 @@ fun LobbyScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Button(
-                            onClick = { showCreateSheet = true },
-                            enabled = canCreateRooms,
-                            shape = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = LiveCoral,
-                                contentColor = Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                            modifier = Modifier.testTag("go_live_button")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Add,
-                                contentDescription = "Create live room",
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = stringResource(R.string.action_create_room),
-                                style = MaterialTheme.typography.labelLarge
+                            Button(
+                                onClick = { showCreateSheet = true },
+                                enabled = canCreateRooms,
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = LiveCoral,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                                modifier = Modifier.testTag("go_live_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Add,
+                                    contentDescription = "Create live room",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = stringResource(R.string.action_create_room),
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                            TopBarSafetyShieldButton(
+                                badgeCount = safetyBadgeCount,
+                                onClick = onOpenSafety
                             )
                         }
                     }
@@ -468,13 +488,23 @@ fun LobbyScreen(
                         }
                     } else {
                         items(filteredRooms, key = { it.id }) { room ->
+                            val isBouncedOut = !staffCapabilities.isAdmin && room.isBouncedOut(currentUserId)
+                            val isBannedFromRoom = !staffCapabilities.isAdmin && room.bannedUserIds.contains(currentUserId)
                             LiveRoomCard(
                                 room = room,
                                 isHost = room.hostId == currentUserId,
                                 canManageRoom = room.canEditOrCloseRoom(currentUserId, staffCapabilities.tier),
-                                isBouncedOut = !staffCapabilities.isAdmin && room.isBouncedOut(currentUserId),
+                                isBouncedOut = isBouncedOut,
                                 bounceRemainingLabel = room.remainingBounceLabel(currentUserId),
-                                onClick = { onOpenRoom(room) },
+                                onClick = {
+                                    if (!isBouncedOut && !isBannedFromRoom &&
+                                        room.requiresPinForUser(currentUserId, staffCapabilities.tier)
+                                    ) {
+                                        roomPendingPin = room
+                                    } else {
+                                        onOpenRoom(room)
+                                    }
+                                },
                                 onEditRoomClick = { roomBeingEdited = room },
                                 onCloseRoomClick = { roomPendingClose = room }
                             )
@@ -499,7 +529,7 @@ fun LobbyScreen(
             CreateRoomSheetContent(
                 isSubmitting = isCreatingRoom,
                 onCancel = { showCreateSheet = false },
-                onSubmit = { title, topic, category, coverKey, visibility, videoEnabled, autoModEnabled, autoModBlockMode, linksBlocked, slowModeSeconds, maxSpeakers ->
+                onSubmit = { title, topic, category, coverKey, visibility, videoEnabled, autoModEnabled, autoModBlockMode, linksBlocked, slowModeSeconds, maxSpeakers, pinLocked, roomPinCode ->
                     onCreateRoom(
                         title,
                         topic,
@@ -511,12 +541,27 @@ fun LobbyScreen(
                         autoModBlockMode,
                         linksBlocked,
                         slowModeSeconds,
-                        maxSpeakers
+                        maxSpeakers,
+                        pinLocked,
+                        roomPinCode
                     )
                     showCreateSheet = false
                 }
             )
         }
+    }
+
+    roomPendingPin?.let { lockedRoom ->
+        EnterRoomPinDialog(
+            roomTitle = lockedRoom.displayTitle(),
+            expectedPin = lockedRoom.roomPinCode,
+            onPinVerified = { enteredPin ->
+                roomPendingPin = null
+                onRoomPinVerified(lockedRoom.id, enteredPin)
+                onOpenRoom(lockedRoom)
+            },
+            onDismiss = { roomPendingPin = null }
+        )
     }
 
     roomBeingEdited?.let { editing ->
@@ -624,6 +669,30 @@ private fun LiveRoomCard(
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(14.dp)
                         )
+                    }
+                    if (room.pinLocked) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = ModAmber.copy(alpha = 0.16f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Pin,
+                                    contentDescription = "PIN locked room",
+                                    tint = ModAmber,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Text(
+                                    text = "PIN",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ModAmber
+                                )
+                            }
+                        }
                     }
                     if (room.roomLocked) {
                         Icon(
@@ -831,7 +900,9 @@ private fun CreateRoomSheetContent(
         autoModBlockMode: Boolean,
         linksBlocked: Boolean,
         slowModeSeconds: Long,
-        maxSpeakers: Long
+        maxSpeakers: Long,
+        pinLocked: Boolean,
+        roomPinCode: String
     ) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
@@ -844,6 +915,8 @@ private fun CreateRoomSheetContent(
     var autoModBlockMode by remember { mutableStateOf(false) }
     var linksBlocked by remember { mutableStateOf(true) }
     var slowModeSeconds by remember { mutableLongStateOf(0L) }
+    var pinLocked by remember { mutableStateOf(false) }
+    var roomPinCode by remember { mutableStateOf("") }
     var validationError by remember { mutableStateOf<String?>(null) }
 
     Column(
@@ -980,6 +1053,34 @@ private fun CreateRoomSheetContent(
                     onCheckedChange = { linksBlocked = it }
                 )
 
+                ToggleSettingRow(
+                    title = "Lock Room with 4-Digit PIN",
+                    subtitle = "Require a 4-digit PIN code for guests to enter your room",
+                    checked = pinLocked,
+                    onCheckedChange = { enabled ->
+                        pinLocked = enabled
+                        if (!enabled) roomPinCode = ""
+                        validationError = null
+                    }
+                )
+                if (pinLocked) {
+                    OutlinedTextField(
+                        value = roomPinCode,
+                        onValueChange = { raw ->
+                            roomPinCode = raw.filter { it.isDigit() }.take(4)
+                            validationError = null
+                        },
+                        label = { Text("4-Digit Room PIN") },
+                        placeholder = { Text("e.g. 2468") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        supportingText = { Text("${roomPinCode.length}/4 digits") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("create_room_pin_input")
+                    )
+                }
+
                 Text("Slow Mode Cooldown", style = MaterialTheme.typography.labelMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(0L to "Off", 3L to "3s", 10L to "10s", 30L to "30s").forEach { (sec, label) ->
@@ -1023,6 +1124,8 @@ private fun CreateRoomSheetContent(
                 onClick = {
                     if (title.trim().length < 3) {
                         validationError = "Please enter a room title (at least 3 characters)."
+                    } else if (pinLocked && (roomPinCode.length != 4 || !roomPinCode.all { it.isDigit() })) {
+                        validationError = "Please enter a valid 4-digit PIN code (0000–9999)."
                     } else {
                         onSubmit(
                             title.trim(),
@@ -1035,7 +1138,9 @@ private fun CreateRoomSheetContent(
                             autoModBlockMode,
                             linksBlocked,
                             slowModeSeconds,
-                            6L
+                            6L,
+                            pinLocked,
+                            if (pinLocked) roomPinCode else ""
                         )
                     }
                 },

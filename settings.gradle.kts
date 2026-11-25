@@ -23,6 +23,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "VoxStage"
+rootProject.name = "VOX"
 
 include(":app")

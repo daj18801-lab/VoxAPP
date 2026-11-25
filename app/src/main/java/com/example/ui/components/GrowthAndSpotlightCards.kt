@@ -510,7 +510,7 @@ fun InviteFriendReferralCard(
                         OutlinedButton(
                             onClick = {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                clipboard?.setPrimaryClip(ClipData.newPlainText("VoxStage Invite Code", myCode))
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("VOX Invite Code", myCode))
                                 copiedNotice = true
                             },
                             shape = RoundedCornerShape(12.dp),
@@ -534,11 +534,11 @@ fun InviteFriendReferralCard(
                                     type = "text/plain"
                                     putExtra(
                                         Intent.EXTRA_TEXT,
-                                        "Join me on VoxStage! Enter my invite code $myCode in Profile → Settings & Points, verify your account, and send your first PTT clip so we both earn +2 points!"
+                                        "Join me on VOX! Enter my invite code $myCode in Profile → Settings & Points, verify your account, and send your first PTT clip so we both earn +2 points!"
                                     )
                                 }
                                 runCatching {
-                                    context.startActivity(Intent.createChooser(shareIntent, "Share VoxStage Invite"))
+                                    context.startActivity(Intent.createChooser(shareIntent, "Share VOX Invite"))
                                 }
                             },
                             shape = RoundedCornerShape(12.dp),

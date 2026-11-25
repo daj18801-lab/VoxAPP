@@ -520,7 +520,7 @@ fun FriendsScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "No new people match your search right now. Anyone who signs into VoxStage appears here automatically.",
+                            text = "No new people match your search right now. Anyone who signs into VOX appears here automatically.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(16.dp)

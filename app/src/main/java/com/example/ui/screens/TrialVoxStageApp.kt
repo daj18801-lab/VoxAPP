@@ -263,7 +263,7 @@ fun TrialVoxStageApp(
                                     )
                                     Column {
                                         Text(
-                                            text = appConfig.bannerTitle.ifBlank { "VoxStage News" },
+                                            text = appConfig.bannerTitle.ifBlank { "VOX News" },
                                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                             color = MaterialTheme.colorScheme.onPrimaryContainer
                                         )

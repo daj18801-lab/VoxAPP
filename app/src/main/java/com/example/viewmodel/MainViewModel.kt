@@ -3,9 +3,11 @@ package com.example.viewmodel
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.AdminNotification
 import com.example.data.AlertSeverity
 import com.example.data.AppBroadcast
 import com.example.data.AppConfig
+import com.example.data.AppPerkType
 import com.example.data.ChatRoom
 import com.example.data.CreatorSubscription
 import com.example.data.DirectThread
@@ -13,15 +15,20 @@ import com.example.data.DirectoryEntry
 import com.example.data.DmAccessPass
 import com.example.data.DmPolicy
 import com.example.data.Friendship
+import com.example.data.PerkGrant
 import com.example.data.PointTransaction
 import com.example.data.PresenceStatus
+import com.example.data.ProTier
 import com.example.data.ProfilePost
+import com.example.data.ProfileViewRecord
 import com.example.data.PttChirpStyle
 import com.example.data.PttThemeStyle
 import com.example.data.Reel
 import com.example.data.ReelChunk
 import com.example.data.ReelComment
 import com.example.data.ReferralRecord
+import com.example.data.RefundReport
+import com.example.data.RefundType
 import com.example.data.ReportStatus
 import com.example.data.RoomCategory
 import com.example.data.RoomCoverKey
@@ -37,9 +44,13 @@ import com.example.data.StaffTier
 import com.example.data.SupportTicket
 import com.example.data.SupportTicketCategory
 import com.example.data.SupportTicketStatus
+import com.example.data.SuspensionRequest
+import com.example.data.SuspensionRequestStatus
 import com.example.data.UiState
 import com.example.data.UserAlert
+import com.example.data.UserFileNote
 import com.example.data.UserFollow
+import com.example.data.UserModerationFile
 import com.example.data.UserProfile
 import com.example.data.UserSex
 import com.example.data.VoxStageRepository
@@ -261,6 +272,59 @@ class MainViewModel(
                 initialValue = emptyList()
             )
 
+    val profileViewsState: StateFlow<List<ProfileViewRecord>> =
+        repository.observeMyProfileViews(currentUserId)
+            .catch { error ->
+                Log.w(TAG, "Error observing profile views", unwrapFirestoreError(error))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val myModerationFileState: StateFlow<UserModerationFile?> =
+        repository.observeMyModerationFile(currentUserId)
+            .catch { emit(null) }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = null
+            )
+
+    val allModerationFilesState: StateFlow<List<UserModerationFile>> =
+        isStaffFlow.flatMapLatest { staff ->
+            if (!staff) flowOf(emptyList())
+            else repository.observeAllModerationFiles().catch { emit(emptyList()) }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val suspensionRequestsState: StateFlow<List<SuspensionRequest>> =
+        isStaffFlow.flatMapLatest { staff ->
+            if (!staff) flowOf(emptyList())
+            else repository.observeSuspensionRequests().catch { emit(emptyList()) }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    private val verifiedPinsByRoomId = mutableMapOf<String, String>()
+
+    fun setVerifiedPinForRoom(roomId: String, pin: String) {
+        val clean = pin.filter { it.isDigit() }.take(4)
+        if (clean.length == 4) {
+            verifiedPinsByRoomId[roomId] = clean
+        }
+    }
+
+    fun getVerifiedPinForRoom(roomId: String): String =
+        verifiedPinsByRoomId[roomId].orEmpty()
+
     // --- PROFILE POSTS (MY POSTS & COMMUNITY DISCOVERY FEED) ---
 
     val myPostsState: StateFlow<UiState<List<ProfilePost>>> =
@@ -473,12 +537,64 @@ class MainViewModel(
             )
 
     val allTransactionsState: StateFlow<List<PointTransaction>> =
-        isAdminFlow.flatMapLatest { isAdminNow ->
-            if (isAdminNow) {
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            if (isStaffNow) {
                 repository.observeAllTransactionsForAdmin().catch { error ->
                     Log.w(TAG, "Error observing platform transactions", unwrapFirestoreError(error))
                     emit(emptyList())
                 }
+            } else {
+                flowOf(emptyList())
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val allCreatorSubscriptionsState: StateFlow<List<CreatorSubscription>> =
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            if (isStaffNow) {
+                repository.observeAllCreatorSubscriptionsForStaff().catch { emit(emptyList()) }
+            } else {
+                flowOf(emptyList())
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val refundReportsState: StateFlow<List<RefundReport>> =
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            if (isStaffNow) {
+                repository.observeRefundReports().catch { emit(emptyList()) }
+            } else {
+                flowOf(emptyList())
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val perkGrantsState: StateFlow<List<PerkGrant>> =
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            if (isStaffNow) {
+                repository.observePerkGrants().catch { emit(emptyList()) }
+            } else {
+                flowOf(emptyList())
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val adminNotificationsState: StateFlow<List<AdminNotification>> =
+        isAdminFlow.flatMapLatest { isAdminNow ->
+            if (isAdminNow) {
+                repository.observeAdminNotifications().catch { emit(emptyList()) }
             } else {
                 flowOf(emptyList())
             }
@@ -550,7 +666,8 @@ class MainViewModel(
                     bio = profile.bio,
                     avatarColorHex = profile.avatarColorHex,
                     photoBase64 = profile.photoBase64,
-                    staffTier = caps.tier
+                    staffTier = caps.tier,
+                    proTier = profile.effectiveProTier(caps.tier)
                 )
             }
         }
@@ -875,6 +992,8 @@ class MainViewModel(
         linksBlocked: Boolean,
         slowModeSeconds: Long,
         maxSpeakers: Long,
+        pinLocked: Boolean = false,
+        roomPinCode: String = "",
         onCreated: (String) -> Unit
     ) {
         if (_isCreatingRoom.value) return
@@ -913,9 +1032,14 @@ class MainViewModel(
                 autoModBlockMode = autoModBlockMode,
                 linksBlocked = linksBlocked,
                 slowModeSeconds = slowModeSeconds,
-                maxSpeakers = maxSpeakers
+                maxSpeakers = maxSpeakers,
+                pinLocked = pinLocked,
+                roomPinCode = roomPinCode
             ).onSuccess { roomId ->
                 _isCreatingRoom.value = false
+                if (pinLocked && roomPinCode.length == 4) {
+                    setVerifiedPinForRoom(roomId, roomPinCode)
+                }
                 onCreated(roomId)
             }.onFailure { err ->
                 _isCreatingRoom.value = false
@@ -1406,7 +1530,9 @@ class MainViewModel(
         disableMic: Boolean,
         disableVideo: Boolean,
         suspendedUntilMillis: Long,
-        suspensionReason: String
+        suspensionReason: String,
+        pointsBalance: Long? = null,
+        proLifetime: Boolean? = null
     ) {
         viewModelScope.launch {
             repository.adminEditUserProfileAndRestrictions(
@@ -1421,7 +1547,9 @@ class MainViewModel(
                 disableVideo = disableVideo,
                 suspendedUntilMillis = suspendedUntilMillis,
                 suspensionReason = suspensionReason,
-                actorName = currentActorName()
+                actorName = currentActorName(),
+                pointsBalance = pointsBalance,
+                proLifetime = proLifetime
             ).onSuccess {
                 _snackbarEvents.tryEmit("Saved changes for $displayName")
             }.onFailure { err ->
@@ -1844,9 +1972,11 @@ class MainViewModel(
     fun activateProMembership(
         paidWithPoints: Boolean = false,
         playOrderId: String = "",
-        playProductId: String = ""
+        playProductId: String = "",
+        targetTier: ProTier = ProTier.PRO
     ) {
         if (_isProcessingWallet.value) return
+        val resolvedTier = if (paidWithPoints) ProTier.PRO else targetTier
         viewModelScope.launch {
             _isProcessingWallet.value = true
             repository.activateProMembership(
@@ -1854,15 +1984,22 @@ class MainViewModel(
                 staffTier = staffCapabilities.value.tier,
                 paidWithPoints = paidWithPoints,
                 playOrderId = playOrderId,
-                playProductId = playProductId
+                playProductId = playProductId,
+                targetTier = resolvedTier
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit(
-                    "Welcome to VoxStage Pro! 1-minute PTT, 30s Reels uploads, and Blue username unlocked for 30 days."
-                )
+                val msg = when (resolvedTier) {
+                    ProTier.ELITE_PRO ->
+                        "Welcome to Elite Pro! Group DMs up to 50 users + Admin PTT speaker control + all VOX Pro perks unlocked for 30 days."
+                    ProTier.VIP_PRO ->
+                        "Welcome to VIP Pro! Group DMs up to 25 users + Admin PTT speaker control + all VOX Pro perks unlocked for 30 days."
+                    else ->
+                        "Welcome to VOX Pro! Group DMs up to 15 users, 1-minute PTT, 30s Reels uploads, Who Viewed My Profile, and Blue username unlocked for 30 days."
+                }
+                _snackbarEvents.tryEmit(msg)
             }.onFailure { err ->
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit(err.message ?: "Could not activate Pro membership")
+                _snackbarEvents.tryEmit(err.message ?: "Could not activate membership")
             }
         }
     }
@@ -2124,6 +2261,262 @@ class MainViewModel(
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not redeem invite code")
+            }
+        }
+    }
+
+    fun unlockProfileViewers(onInsufficientPoints: () -> Unit = {}) {
+        if (_isProcessingWallet.value) return
+        val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
+        if (profile.pointsBalance < 2L) {
+            _snackbarEvents.tryEmit("You need 2 points to unlock Who Viewed Your Profile.")
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.unlockProfileViewers(profile.displayName)
+                .onSuccess {
+                    _isProcessingWallet.value = false
+                    _snackbarEvents.tryEmit("Unlocked Who Viewed Your Profile for 24 hours! (-2 pts)")
+                }
+                .onFailure { err ->
+                    _isProcessingWallet.value = false
+                    _snackbarEvents.tryEmit(err.message ?: "Could not unlock profile viewers")
+                }
+        }
+    }
+
+    fun setPriorityChirpOptIn(optIn: Boolean) {
+        viewModelScope.launch {
+            repository.updatePriorityChirpOptIn(optIn)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (optIn) "Close friends can now send you Priority Break-In Chirps."
+                        else "Priority Break-In Chirps turned off."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Priority Chirp setting")
+                }
+        }
+    }
+
+    fun verifyAge13Plus(birthYear: Int, onVerified: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.verifyUserAge13Plus(birthYear)
+                .onSuccess { age ->
+                    _snackbarEvents.tryEmit(
+                        if (age >= 18) "Age verified ($age+): Full VOX access & purchases unlocked."
+                        else "Age verified (13+): Welcome to VOX! Pro & Points purchases are enabled."
+                    )
+                    onVerified()
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Age verification failed")
+                }
+        }
+    }
+
+    fun observeUserFileNotes(targetUserId: String): Flow<List<UserFileNote>> =
+        repository.observeUserFileNotes(targetUserId)
+
+    fun acknowledgeStrikeWarning() {
+        viewModelScope.launch {
+            repository.acknowledgeStrikeWarning()
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not acknowledge warning")
+                }
+        }
+    }
+
+    fun resolveUserInvestigation(
+        targetUserId: String,
+        targetName: String,
+        resolutionNote: String,
+        resetReportCount: Boolean,
+        onResolved: () -> Unit = {}
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("Only Support or Admin can resolve investigations.")
+            return
+        }
+        viewModelScope.launch {
+            repository.resolveUserInvestigation(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                resolverName = effectiveMyProfile().displayName,
+                resolverTier = caps.tier,
+                resolutionNote = resolutionNote,
+                resetReportCount = resetReportCount
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Investigation resolved for $targetName and logged to their file.")
+                onResolved()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not resolve investigation")
+            }
+        }
+    }
+
+    fun submitSupportSuspensionRequest(
+        targetUserId: String,
+        targetName: String,
+        reason: String,
+        roomId: String = "",
+        onSubmitted: () -> Unit = {}
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("Only Support Staff or Admins can request a suspension.")
+            return
+        }
+        viewModelScope.launch {
+            repository.submitSupportSuspensionRequest(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                requestedByName = effectiveMyProfile().displayName,
+                requesterTier = caps.tier,
+                reason = reason,
+                roomId = roomId
+            ).onSuccess {
+                _snackbarEvents.tryEmit("$targetName suspended immediately pending Admin review.")
+                onSubmitted()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not submit suspension request")
+            }
+        }
+    }
+
+    fun adminReviewSuspensionRequest(
+        request: SuspensionRequest,
+        decision: SuspensionRequestStatus,
+        timedHours: Int = 24,
+        adminNote: String,
+        onReviewed: () -> Unit = {}
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isAdmin) {
+            _snackbarEvents.tryEmit("Only App Administrators can review suspension requests.")
+            return
+        }
+        viewModelScope.launch {
+            repository.adminReviewSuspensionRequest(
+                request = request,
+                decision = decision,
+                timedHours = timedHours,
+                adminName = effectiveMyProfile().displayName,
+                adminNote = adminNote
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Admin decision saved (${decision.label}) for ${request.targetName}.")
+                onReviewed()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not save Admin decision")
+            }
+        }
+    }
+
+    fun issueRefund(
+        targetUserId: String,
+        targetName: String,
+        refundType: RefundType,
+        itemLabel: String,
+        amountCents: Long,
+        transactionId: String = "",
+        subscriptionId: String = "",
+        dmPassId: String = "",
+        reason: String,
+        onIssued: () -> Unit = {}
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("Only App Admins and Support Staff can issue refunds.")
+            return
+        }
+        viewModelScope.launch {
+            repository.issueRefund(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                refundType = refundType,
+                itemLabel = itemLabel,
+                amountCents = amountCents,
+                transactionId = transactionId,
+                subscriptionId = subscriptionId,
+                dmPassId = dmPassId,
+                reason = reason,
+                issuerName = effectiveMyProfile().displayName,
+                issuerTier = caps.tier
+            ).onSuccess {
+                val revokedSuffix = if (refundType.revokesMembership) " Membership unsubscribed." else ""
+                val reportSuffix = if (caps.tier == StaffTier.SUPPORT) " Record sent to App Admins." else ""
+                _snackbarEvents.tryEmit(
+                    "Refund issued (${formatUsdCents(amountCents)}) for $targetName.$revokedSuffix$reportSuffix"
+                )
+                onIssued()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not issue refund")
+            }
+        }
+    }
+
+    fun acknowledgeRefundReport(reportId: String) {
+        val caps = staffCapabilities.value
+        if (!caps.isAdmin) {
+            _snackbarEvents.tryEmit("Only App Admins can acknowledge refund reports.")
+            return
+        }
+        viewModelScope.launch {
+            repository.acknowledgeRefundReport(reportId, effectiveMyProfile().displayName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Refund report acknowledged for record keeping.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not acknowledge refund report")
+                }
+        }
+    }
+
+    fun markAdminNotificationRead(notifId: String) {
+        if (!staffCapabilities.value.isAdmin) return
+        viewModelScope.launch {
+            repository.markAdminNotificationRead(notifId)
+        }
+    }
+
+    fun grantAppPerk(
+        targetUserId: String,
+        targetName: String,
+        perkType: AppPerkType,
+        detailValue: String = "",
+        pointsAmount: Long = 5L,
+        reason: String = "",
+        onGranted: () -> Unit = {}
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("Only App Admins and Support Staff can grant app perks.")
+            return
+        }
+        viewModelScope.launch {
+            repository.grantAppPerk(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                perkType = perkType,
+                detailValue = detailValue,
+                pointsAmount = pointsAmount,
+                reason = reason,
+                granterName = effectiveMyProfile().displayName,
+                granterTier = caps.tier
+            ).onSuccess { support5dCount ->
+                val alertNote = if (caps.tier == StaffTier.SUPPORT && support5dCount >= PerkGrant.SUPPORT_ALERT_THRESHOLD) {
+                    " (Support 5-day total: $support5dCount — App Admins notified)"
+                } else if (caps.tier == StaffTier.SUPPORT) {
+                    " (Support 5-day total: $support5dCount / ${PerkGrant.SUPPORT_ALERT_THRESHOLD})"
+                } else ""
+                _snackbarEvents.tryEmit("Granted ${perkType.label} to $targetName!$alertNote")
+                onGranted()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not grant perk")
             }
         }
     }

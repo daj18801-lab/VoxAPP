@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -32,6 +34,7 @@ import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.notifications.DirectMessageNotificationHelper
+import com.example.notifications.DirectMessageNotificationPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,6 +66,17 @@ class PrivateCallForegroundService : Service() {
     private var currentThreadId: String = ""
     private var currentPeerName: String = "Private Chat"
     private var overlayDismissedByUserForBackgroundCycle: Boolean = false
+    private var screenOffReceiverRegistered: Boolean = false
+
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_SCREEN_OFF) return
+            if (!isPttMode) return
+            if (LivePttSessionManager.activeThreadId.value.isNullOrBlank()) return
+            if (!DirectMessageNotificationPrefs.isLockScreenPttEnabled(this@PrivateCallForegroundService)) return
+            launchLockScreenPttActivity()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -79,6 +93,7 @@ class PrivateCallForegroundService : Service() {
                     _endCallEvents.tryEmit(threadId)
                 }
                 removeFloatingOverlay()
+                unregisterScreenOffReceiver()
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -153,19 +168,34 @@ class PrivateCallForegroundService : Service() {
                 toggleIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
+            val lockScreenIntent = Intent(this, LockScreenPttActivity::class.java).apply {
+                this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            val lockScreenPendingIntent = PendingIntent.getActivity(
+                this,
+                NOTIFICATION_ID + 3,
+                lockScreenIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
             notificationBuilder
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentTitle(
                     if (pttTransmitting) "LIVE PTT Transmitting · $currentPeerName"
                     else "Live Push-to-Talk Ready · $currentPeerName"
                 )
                 .setContentText(
-                    if (pttTransmitting) "Streaming live audio — tap Mute or release floating button"
-                    else "Hold floating PTT button or tap Talk to stream live audio"
+                    if (pttTransmitting) "Streaming live audio — release button or tap Mute"
+                    else "Tap Lock-Screen PTT or hold floating button to stream live audio"
                 )
                 .addAction(
                     0,
                     if (pttTransmitting) "Mute PTT" else "Talk Live",
                     togglePendingIntent
+                )
+                .addAction(
+                    0,
+                    "Lock-Screen PTT",
+                    lockScreenPendingIntent
                 )
                 .addAction(
                     0,
@@ -199,6 +229,12 @@ class PrivateCallForegroundService : Service() {
             return START_NOT_STICKY
         }
 
+        if (pttMode) {
+            registerScreenOffReceiver()
+        } else {
+            unregisterScreenOffReceiver()
+        }
+
         if (pttMode && showFloatingOverlay) {
             if (!overlayDismissedByUserForBackgroundCycle) {
                 showOrUpdateFloatingOverlay()
@@ -209,6 +245,38 @@ class PrivateCallForegroundService : Service() {
         }
 
         return START_NOT_STICKY
+    }
+
+    private fun registerScreenOffReceiver() {
+        if (screenOffReceiverRegistered) return
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                screenOffReceiver,
+                IntentFilter(Intent.ACTION_SCREEN_OFF),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            screenOffReceiverRegistered = true
+        } catch (err: Exception) {
+            Log.w(TAG, "Unable to register screen-off receiver for lock-screen PTT", err)
+        }
+    }
+
+    private fun unregisterScreenOffReceiver() {
+        if (!screenOffReceiverRegistered) return
+        screenOffReceiverRegistered = false
+        runCatching { unregisterReceiver(screenOffReceiver) }
+    }
+
+    private fun launchLockScreenPttActivity() {
+        try {
+            val intent = Intent(this, LockScreenPttActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            startActivity(intent)
+        } catch (err: Exception) {
+            Log.w(TAG, "Unable to launch LockScreenPttActivity on screen lock", err)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -477,6 +545,7 @@ class PrivateCallForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        unregisterScreenOffReceiver()
         removeFloatingOverlay()
         serviceScope.cancel()
         isRunning = false

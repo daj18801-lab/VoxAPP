@@ -364,13 +364,17 @@ fun EditUserAdminDialog(
         disableMic: Boolean,
         disableVideo: Boolean,
         suspendedUntilMillis: Long,
-        suspensionReason: String
+        suspensionReason: String,
+        pointsBalance: Long,
+        proLifetime: Boolean
     ) -> Unit,
     onDismiss: () -> Unit
 ) {
     var displayName by remember(profile.userId) { mutableStateOf(profile.displayName) }
     var handle by remember(profile.userId) { mutableStateOf(profile.handle) }
     var bio by remember(profile.userId) { mutableStateOf(profile.bio) }
+    var pointsInput by remember(profile.userId) { mutableStateOf(profile.pointsBalance.toString()) }
+    var proLifetime by remember(profile.userId) { mutableStateOf(profile.proLifetime) }
     var globallyBanned by remember(profile.userId) { mutableStateOf(profile.globallyBanned) }
     var disableCreateRoom by remember(profile.userId) { mutableStateOf(profile.disableCreateRoom) }
     var disableEnterRoom by remember(profile.userId) { mutableStateOf(profile.disableEnterRoom) }
@@ -380,6 +384,7 @@ fun EditUserAdminDialog(
     var suspensionReason by remember(profile.userId) { mutableStateOf(profile.suspensionReason) }
 
     val isCurrentlySuspended = suspendedUntilMillis > System.currentTimeMillis()
+    val parsedPoints = pointsInput.trim().toLongOrNull()?.coerceIn(0L, 1_000_000L) ?: profile.pointsBalance
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -390,7 +395,7 @@ fun EditUserAdminDialog(
                 tint = LiveCoral
             )
         },
-        title = { Text("Admin: Edit User & Restrictions") },
+        title = { Text("Admin: Edit User & Perks") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -424,6 +429,54 @@ fun EditUserAdminDialog(
                         .fillMaxWidth()
                         .testTag("admin_edit_user_bio")
                 )
+
+                HorizontalDivider()
+                Text(
+                    text = "Points & Lifetime Pro Membership",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                OutlinedTextField(
+                    value = pointsInput,
+                    onValueChange = { raw ->
+                        pointsInput = raw.filter { it.isDigit() }.take(7)
+                    },
+                    label = { Text("Points Balance") },
+                    supportingText = { Text("Current: ${profile.pointsBalance} pts · New: $parsedPoints pts") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("admin_edit_user_points_input")
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(5L, 10L, 50L).forEach { bonus ->
+                        OutlinedButton(
+                            onClick = {
+                                val next = (parsedPoints + bonus).coerceAtMost(1_000_000L)
+                                pointsInput = next.toString()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("admin_give_points_$bonus")
+                        ) {
+                            Text("+$bonus pts")
+                        }
+                    }
+                }
+
+                Column(modifier = Modifier.testTag("admin_lifetime_pro_switch")) {
+                    ToggleSettingRow(
+                        title = "Lifetime Pro Member (Never Expires)",
+                        subtitle = "Grants permanent VOX Pro status without monthly renewal",
+                        checked = proLifetime,
+                        onCheckedChange = { proLifetime = it }
+                    )
+                }
 
                 HorizontalDivider()
                 Text(
@@ -513,7 +566,9 @@ fun EditUserAdminDialog(
                             disableMic,
                             disableVideo,
                             suspendedUntilMillis,
-                            suspensionReason.trim()
+                            suspensionReason.trim(),
+                            parsedPoints,
+                            proLifetime
                         )
                         onDismiss()
                     }

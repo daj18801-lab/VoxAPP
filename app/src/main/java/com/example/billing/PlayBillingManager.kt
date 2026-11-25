@@ -78,6 +78,16 @@ class PlayBillingManager(
 
         const val PRO_SUBSCRIPTION_PRODUCT_ID = "voxstage_pro_monthly"
         const val PRO_FALLBACK_PRICE_LABEL = "$9.99/mo"
+        const val VIP_PRO_SUBSCRIPTION_PRODUCT_ID = "voxstage_vip_pro_monthly"
+        const val VIP_PRO_FALLBACK_PRICE_LABEL = "$29.99/mo"
+        const val ELITE_PRO_SUBSCRIPTION_PRODUCT_ID = "voxstage_elite_pro_monthly"
+        const val ELITE_PRO_FALLBACK_PRICE_LABEL = "$59.99/mo"
+
+        val ALL_SUBSCRIPTION_PRODUCT_IDS: Set<String> = setOf(
+            PRO_SUBSCRIPTION_PRODUCT_ID,
+            VIP_PRO_SUBSCRIPTION_PRODUCT_ID,
+            ELITE_PRO_SUBSCRIPTION_PRODUCT_ID
+        )
 
         val POINTS_CATALOG: List<PointsProductSku> = listOf(
             PointsProductSku(productId = "voxstage_points_2", points = 2L, fallbackPriceLabel = "$2.00"),
@@ -105,6 +115,9 @@ class PlayBillingManager(
 
     private val _proSubscriptionDetails = MutableStateFlow<ProductDetails?>(null)
     val proSubscriptionDetails: StateFlow<ProductDetails?> = _proSubscriptionDetails.asStateFlow()
+
+    private val _subscriptionDetailsByProductId = MutableStateFlow<Map<String, ProductDetails>>(emptyMap())
+    val subscriptionDetailsByProductId: StateFlow<Map<String, ProductDetails>> = _subscriptionDetailsByProductId.asStateFlow()
 
     private val _isPurchaseInFlight = MutableStateFlow(false)
     val isPurchaseInFlight: StateFlow<Boolean> = _isPurchaseInFlight.asStateFlow()
@@ -195,19 +208,21 @@ class PlayBillingManager(
             Log.w(TAG, "queryProductDetails failed: ${result.billingResult.responseCode} ${result.billingResult.debugMessage}")
         }
 
-        // Query Pro Monthly Subscription ($9.99/mo)
-        val subsProduct = QueryProductDetailsParams.Product.newBuilder()
-            .setProductId(PRO_SUBSCRIPTION_PRODUCT_ID)
-            .setProductType(BillingClient.ProductType.SUBS)
-            .build()
+        // Query VOX Pro ($9.99/mo), VIP Pro ($29.99/mo), and Elite Pro ($59.99/mo) Subscriptions
+        val subsProducts = ALL_SUBSCRIPTION_PRODUCT_IDS.map { skuId ->
+            QueryProductDetailsParams.Product.newBuilder()
+                .setProductId(skuId)
+                .setProductType(BillingClient.ProductType.SUBS)
+                .build()
+        }
         val subsParams = QueryProductDetailsParams.newBuilder()
-            .setProductList(listOf(subsProduct))
+            .setProductList(subsProducts)
             .build()
         val subsResult = billingClient.queryProductDetails(subsParams)
         if (subsResult.billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-            _proSubscriptionDetails.value = subsResult.productDetailsList
-                .orEmpty()
-                .firstOrNull { it.productId == PRO_SUBSCRIPTION_PRODUCT_ID }
+            val subMap = subsResult.productDetailsList.orEmpty().associateBy { it.productId }
+            _subscriptionDetailsByProductId.value = subMap
+            _proSubscriptionDetails.value = subMap[PRO_SUBSCRIPTION_PRODUCT_ID]
         }
     }
 
@@ -233,17 +248,26 @@ class PlayBillingManager(
         }
     }
 
-    fun formattedProPrice(): String {
-        val offer = _proSubscriptionDetails.value
+    fun formattedProPrice(): String = formattedPriceForTier(com.example.data.ProTier.PRO)
+
+    fun formattedPriceForTier(tier: com.example.data.ProTier): String {
+        val productId = tier.playProductId
+        if (productId.isBlank()) return tier.priceLabel
+        val offer = _subscriptionDetailsByProductId.value[productId]
             ?.subscriptionOfferDetails
             ?.firstOrNull()
             ?.pricingPhases
             ?.pricingPhaseList
             ?.firstOrNull()
-        return offer?.formattedPrice?.let { "$it/mo" } ?: PRO_FALLBACK_PRICE_LABEL
+        return offer?.formattedPrice?.let { "$it/mo" } ?: tier.priceLabel
     }
 
-    fun launchProSubscription(activity: Activity) {
+    fun launchProSubscription(activity: Activity) =
+        launchSubscription(activity, com.example.data.ProTier.PRO)
+
+    fun launchSubscription(activity: Activity, tier: com.example.data.ProTier) {
+        val productId = tier.playProductId
+        if (productId.isBlank()) return
         if (!billingClient.isReady) {
             startConnection()
             _events.tryEmit(
@@ -253,13 +277,18 @@ class PlayBillingManager(
             )
             return
         }
-        val details = _proSubscriptionDetails.value
+        val details = _subscriptionDetailsByProductId.value[productId]
         val offerToken = details?.subscriptionOfferDetails?.firstOrNull()?.offerToken
         if (details == null || offerToken.isNullOrBlank()) {
             scope.launch { queryCatalogProducts() }
+            val extraHint = if (tier == com.example.data.ProTier.PRO) {
+                " You can also activate VOX Pro with 10 points below."
+            } else {
+                ""
+            }
             _events.tryEmit(
                 PlayBillingEvent.Message(
-                    "Google Play subscription '$PRO_SUBSCRIPTION_PRODUCT_ID' (\$9.99/mo) is not active in Play Console yet. You can also activate Pro with 10 points below."
+                    "Google Play subscription '$productId' (${tier.priceLabel}) is not active in Play Console yet.$extraHint"
                 )
             )
             return
@@ -389,7 +418,7 @@ class PlayBillingManager(
                 if (token.isBlank() || !processedTokens.add(token)) return
 
                 val productId = purchase.products.firstOrNull().orEmpty()
-                if (productId == PRO_SUBSCRIPTION_PRODUCT_ID) {
+                if (productId in ALL_SUBSCRIPTION_PRODUCT_IDS) {
                     val orderId = purchase.orderId.orEmpty().ifBlank { token.take(36) }
                     if (!purchase.isAcknowledged) {
                         val ackParams = AcknowledgePurchaseParams.newBuilder()
@@ -400,7 +429,7 @@ class PlayBillingManager(
                             processedTokens.remove(token)
                             _events.tryEmit(
                                 PlayBillingEvent.Message(
-                                    "Could not confirm Pro subscription (${ackResult.debugMessage}). Please retry."
+                                    "Could not confirm subscription (${ackResult.debugMessage}). Please retry."
                                 )
                             )
                             return

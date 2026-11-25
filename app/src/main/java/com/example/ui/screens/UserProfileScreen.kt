@@ -138,9 +138,14 @@ fun UserProfileScreen(
         supportMember: DirectoryEntry,
         reason: String,
         onSent: () -> Unit
-    ) -> Unit = { _, _, _, _ -> }
+    ) -> Unit = { _, _, _, _ -> },
+    viewerProfile: com.example.data.UserProfile? = null
 ) {
     BackHandler(onBack = onBack)
+
+    LaunchedEffect(viewerProfile?.userId, viewModel.targetUserId) {
+        viewModel.recordProfileViewIfNeeded(viewerProfile, staffCapabilities.tier)
+    }
 
     val entryState by viewModel.directoryEntryState.collectAsStateWithLifecycle()
     val postsState by viewModel.postsState.collectAsStateWithLifecycle()

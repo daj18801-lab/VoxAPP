@@ -102,6 +102,7 @@ import com.example.data.PointTransaction
 import com.example.data.PointTransactionType
 import com.example.data.PostComment
 import com.example.data.PresenceStatus
+import com.example.data.ProTier
 import com.example.data.ProfilePost
 import com.example.data.PttChirpStyle
 import com.example.data.PttThemeStyle
@@ -129,6 +130,7 @@ import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.SpotlightFrameShopCard
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.TopBarSafetyShieldButton
 import com.example.ui.components.encodeImageUriToBase64Jpeg
 import com.example.ui.components.parseHexColor
 import com.example.ui.components.rememberBase64ImageBitmap
@@ -178,11 +180,16 @@ fun ProfileScreen(
     onDeletePost: (ProfilePost) -> Unit,
     onBuyPoints: (Long) -> Unit,
     onUpgradeToProPlay: () -> Unit = {},
+    onUpgradeToVipProPlay: () -> Unit = {},
+    onUpgradeToEliteProPlay: () -> Unit = {},
     onActivateProWithPoints: () -> Unit = {},
     onBoostMyProfile: (onInsufficientPoints: () -> Unit) -> Unit = {},
     onSelectOrBuyPttTheme: (PttThemeStyle, onInsufficientPoints: () -> Unit) -> Unit = { _, _ -> },
     onSelectOrBuyPttChirp: (PttChirpStyle, onInsufficientPoints: () -> Unit) -> Unit = { _, _ -> },
     onBuySpotlightFrame: (SpotlightFrameColor, onInsufficientPoints: () -> Unit) -> Unit = { _, _ -> },
+    profileViews: List<com.example.data.ProfileViewRecord> = emptyList(),
+    onUnlockProfileViewers: (onInsufficientPoints: () -> Unit) -> Unit = {},
+    onSetPriorityChirpOptIn: (Boolean) -> Unit = {},
     incomingReferral: ReferralRecord? = null,
     invitedReferrals: List<ReferralRecord> = emptyList(),
     userEmailVerified: Boolean = false,
@@ -204,7 +211,9 @@ fun ProfileScreen(
     ) -> Unit,
     onSaveBio: (String, () -> Unit) -> Unit = { _, _ -> },
     onChangeAppearanceStatus: (PresenceStatus) -> Unit = {},
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    safetyBadgeCount: Int = 0,
+    onOpenSafety: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -231,6 +240,9 @@ fun ProfileScreen(
     }
     var volumeDownPttEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isVolumeDownPttEnabled(context))
+    }
+    var lockScreenPttEnabled by remember {
+        mutableStateOf(DirectMessageNotificationPrefs.isLockScreenPttEnabled(context))
     }
     var hasNotificationPermission by remember {
         mutableStateOf(DirectMessageNotificationHelper.hasNotificationPermission(context))
@@ -265,7 +277,7 @@ fun ProfileScreen(
     var selectedSex by remember { mutableStateOf(userProfile?.sexEnum() ?: UserSex.UNSPECIFIED) }
     var ageInput by remember {
         mutableStateOf(
-            userProfile?.effectiveAge()?.takeIf { it in 18..120 }?.toString().orEmpty()
+            userProfile?.effectiveAge()?.takeIf { it in 13..120 }?.toString().orEmpty()
         )
     }
 
@@ -279,7 +291,7 @@ fun ProfileScreen(
             nightModeEnabled = userProfile.nightModeEnabled
             invisibleModePreferred = userProfile.invisibleModePreferred
             selectedSex = userProfile.sexEnum()
-            ageInput = userProfile.effectiveAge().takeIf { it in 18..120 }?.toString().orEmpty()
+            ageInput = userProfile.effectiveAge().takeIf { it in 13..120 }?.toString().orEmpty()
         }
     }
 
@@ -363,11 +375,21 @@ fun ProfileScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item(key = "profile_title") {
-                Text(
-                    text = "My Profile",
-                    style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.ExtraBold),
-                    color = MaterialTheme.colorScheme.onBackground
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "My Profile",
+                        style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.ExtraBold),
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    TopBarSafetyShieldButton(
+                        badgeCount = safetyBadgeCount,
+                        onClick = onOpenSafety
+                    )
+                }
             }
 
             // Profile Identity Card with Profile Picture Upload
@@ -794,6 +816,21 @@ fun ProfileScreen(
                 }
             }
 
+            // "Who Viewed My Profile" Teaser Card (Blurred for Free, Unlocked for VOX Pro / 2 pts)
+            item(key = "who_viewed_my_profile_card") {
+                com.example.ui.components.WhoViewedMyProfileCard(
+                    userProfile = userProfile,
+                    staffTier = staffCapabilities.tier,
+                    profileViews = profileViews,
+                    isProcessing = isProcessingWallet,
+                    onUnlockWithPoints = {
+                        onUnlockProfileViewers { showNeedPointsForBoostDialog = true }
+                    },
+                    onUpgradeToPro = { selectedTab = 1 },
+                    onOpenUserProfile = onOpenUserProfile
+                )
+            }
+
             // Segmented Switcher: My Posts vs Edit & Studio
             item(key = "profile_tabs") {
                 Row(
@@ -1198,6 +1235,8 @@ fun ProfileScreen(
                         isProcessingWallet = isProcessingWallet,
                         playBillingManager = playBillingManager,
                         onUpgradeToProPlay = onUpgradeToProPlay,
+                        onUpgradeToVipProPlay = onUpgradeToVipProPlay,
+                        onUpgradeToEliteProPlay = onUpgradeToEliteProPlay,
                         onActivateProWithPoints = onActivateProWithPoints
                     )
                 }
@@ -1489,8 +1528,8 @@ fun ProfileScreen(
                                 onValueChange = { raw ->
                                     ageInput = raw.filter { it.isDigit() }.take(3)
                                 },
-                                label = { Text("Age (18+ · used for Discovery filters)") },
-                                placeholder = { Text("e.g. 26") },
+                                label = { Text("Age (13+ · used for Discovery filters)") },
+                                placeholder = { Text("e.g. 22") },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier
@@ -1647,7 +1686,7 @@ fun ProfileScreen(
                             Box(modifier = Modifier.testTag("toggle_volume_down_ptt")) {
                                 ToggleSettingRow(
                                     title = "Volume Down Push-to-Talk",
-                                    subtitle = "Hold the hardware Volume Down key to transmit whenever PTT is active in VoxStage",
+                                    subtitle = "Hold the hardware Volume Down key to transmit whenever PTT is active in VOX",
                                     checked = volumeDownPttEnabled,
                                     onCheckedChange = { enable ->
                                         volumeDownPttEnabled = enable
@@ -1656,10 +1695,33 @@ fun ProfileScreen(
                                 )
                             }
 
+                            Box(modifier = Modifier.testTag("toggle_lock_screen_ptt")) {
+                                ToggleSettingRow(
+                                    title = "Lock-Screen Push-to-Talk Button",
+                                    subtitle = "Show a giant hold-to-talk PTT button over your lock screen if your phone locks during live PTT",
+                                    checked = lockScreenPttEnabled,
+                                    onCheckedChange = { enable ->
+                                        lockScreenPttEnabled = enable
+                                        DirectMessageNotificationPrefs.setLockScreenPttEnabled(context, enable)
+                                    }
+                                )
+                            }
+
+                            Box(modifier = Modifier.testTag("toggle_priority_chirp_opt_in")) {
+                                ToggleSettingRow(
+                                    title = "Close Friends Priority Break-In Chirps",
+                                    subtitle = "Allow close friends to spend 1–2 points to send a two-tone radio alert pinned to the top of your Chats inbox",
+                                    checked = userProfile?.priorityChirpOptIn == true,
+                                    onCheckedChange = { enable ->
+                                        onSetPriorityChirpOptIn(enable)
+                                    }
+                                )
+                            }
+
                             Button(
                                 onClick = {
                                     val parsedAge = ageInput.trim().toLongOrNull()
-                                        ?.takeIf { it in 18L..120L } ?: 0L
+                                        ?.takeIf { it in 13L..120L } ?: 0L
                                     onSaveProfile(
                                         displayName,
                                         handle,
@@ -1886,16 +1948,23 @@ private fun ProMembershipCard(
     isProcessingWallet: Boolean,
     playBillingManager: com.example.billing.PlayBillingManager? = null,
     onUpgradeToProPlay: () -> Unit,
+    onUpgradeToVipProPlay: () -> Unit = {},
+    onUpgradeToEliteProPlay: () -> Unit = {},
     onActivateProWithPoints: () -> Unit
 ) {
     val isProSubscriber = userProfile?.isProSubscriberOnly() == true
     val hasProAccess = userProfile?.isProActive(staffCapabilities.tier) == true
+    val activeTier = userProfile?.effectiveProTier(staffCapabilities.tier) ?: ProTier.FREE
     val daysLeft = userProfile?.proDaysRemaining() ?: 0
     val pointsBalance = userProfile?.pointsBalance ?: 0L
     val isPlayInFlight = playBillingManager?.isPurchaseInFlight?.collectAsStateWithLifecycle()?.value ?: false
-    val proPrice = playBillingManager?.formattedProPrice() ?: "\$9.99/mo"
+    val proPrice = playBillingManager?.formattedPriceForTier(ProTier.PRO) ?: ProTier.PRO.priceLabel
+    val vipProPrice = playBillingManager?.formattedPriceForTier(ProTier.VIP_PRO) ?: ProTier.VIP_PRO.priceLabel
+    val eliteProPrice = playBillingManager?.formattedPriceForTier(ProTier.ELITE_PRO) ?: ProTier.ELITE_PRO.priceLabel
     val canClick = !isProcessingWallet && !isPlayInFlight
     val proBlue = usernameColor(StaffTier.USER, isPro = true)
+    val vipAccent = MaterialTheme.colorScheme.secondary
+    val eliteAccent = MaterialTheme.colorScheme.tertiary
 
     Surface(
         shape = RoundedCornerShape(20.dp),
@@ -1910,7 +1979,7 @@ private fun ProMembershipCard(
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1919,23 +1988,45 @@ private fun ProMembershipCard(
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Stars,
-                    contentDescription = "VoxStage Pro",
+                    contentDescription = "VOX Pro Plans",
                     tint = proBlue,
                     modifier = Modifier.size(22.dp)
                 )
-                Text(
-                    text = "VoxStage Pro Membership",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
-                    color = proBlue,
-                    modifier = Modifier.weight(1f)
-                )
-                if (isProSubscriber) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "VOX Memberships",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                        color = proBlue
+                    )
+                    Text(
+                        text = "Current: ${activeTier.label} · Group DM up to ${activeTier.maxGroupDmMembers} users",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("active_membership_tier_label")
+                    )
+                }
+                if (userProfile?.proLifetime == true) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = proBlue.copy(alpha = 0.2f),
+                        border = BorderStroke(1.dp, proBlue.copy(alpha = 0.65f))
+                    ) {
+                        Text(
+                            text = "LIFETIME PRO",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = proBlue,
+                            modifier = Modifier
+                                .padding(horizontal = 9.dp, vertical = 4.dp)
+                                .testTag("lifetime_pro_badge")
+                        )
+                    }
+                } else if (isProSubscriber) {
                     Surface(
                         shape = RoundedCornerShape(999.dp),
                         color = proBlue.copy(alpha = 0.16f)
                     ) {
                         Text(
-                            text = "ACTIVE · ${daysLeft}d left",
+                            text = "${activeTier.label.uppercase()} · ${daysLeft}d",
                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                             color = proBlue,
                             modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
@@ -1956,66 +2047,207 @@ private fun ProMembershipCard(
                 } else {
                     Surface(
                         shape = RoundedCornerShape(999.dp),
-                        color = proBlue.copy(alpha = 0.14f)
+                        color = MaterialTheme.colorScheme.surfaceVariant
                     ) {
                         Text(
-                            text = proPrice,
+                            text = "FREE · Max 7 DM",
                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                            color = proBlue,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                         )
                     }
                 }
             }
 
-            Text(
-                text = "• 1-minute Push-to-Talk clips (Free members get 5-second clips)\n" +
-                    "• Upload short video Reels (up to 30 seconds)\n" +
-                    "• Blue Pro member username color & PRO badge\n" +
-                    "• Unlimited Discovery photos (Free gets 2/week)",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // Tier 1: VOX Pro ($9.99/mo or 10 pts) — Group DMs up to 15 users
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = proBlue.copy(alpha = 0.08f),
+                border = BorderStroke(1.dp, proBlue.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Button(
-                    onClick = onUpgradeToProPlay,
-                    enabled = canClick,
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = proBlue,
-                        contentColor = Color.White
-                    ),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("pro_subscribe_play_button")
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "VOX Pro",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = proBlue,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = proPrice,
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = proBlue
+                        )
+                    }
                     Text(
-                        text = if (isProSubscriber) "Renew Pro ($proPrice)" else "Go Pro · $proPrice",
-                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        text = "• Group DMs up to 15 users (Free max 7)\n" +
+                            "• 1-minute Push-to-Talk clips (Free gets 5s)\n" +
+                            "• Upload Reels (30s), Who Viewed My Profile, Blue badge & unlimited Discovery photos",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onUpgradeToProPlay,
+                            enabled = canClick,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = proBlue,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("pro_subscribe_play_button")
+                        ) {
+                            Text(
+                                text = if (activeTier == ProTier.PRO) "Renew Pro · $proPrice" else "Go Pro · $proPrice",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
 
-                OutlinedButton(
-                    onClick = onActivateProWithPoints,
-                    enabled = canClick && pointsBalance >= UserProfile.PRO_REDEEM_POINTS,
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, proBlue.copy(alpha = 0.6f)),
-                    modifier = Modifier
-                        .height(48.dp)
-                        .testTag("pro_activate_with_points_button")
+                        OutlinedButton(
+                            onClick = onActivateProWithPoints,
+                            enabled = canClick && pointsBalance >= UserProfile.PRO_REDEEM_POINTS,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, proBlue.copy(alpha = 0.6f)),
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("pro_activate_with_points_button")
+                        ) {
+                            Text(
+                                text = "Use ${UserProfile.PRO_REDEEM_POINTS} pts",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                color = if (pointsBalance >= UserProfile.PRO_REDEEM_POINTS) proBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Tier 2: VIP Pro ($29.99/mo) — Group DMs up to 25 users
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = vipAccent.copy(alpha = 0.08f),
+                border = BorderStroke(1.dp, vipAccent.copy(alpha = 0.40f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "VIP Pro",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = vipAccent,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = vipProPrice,
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = vipAccent
+                        )
+                    }
                     Text(
-                        text = "Use ${UserProfile.PRO_REDEEM_POINTS} pts",
-                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                        color = if (pointsBalance >= UserProfile.PRO_REDEEM_POINTS) proBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "• Group DMs up to 25 users (required above 15 users)\n" +
+                            "• Admin Push-to-Talk speaker selection for groups over 15 users\n" +
+                            "• Includes all VOX Pro perks (1-min PTT, Reels, Blue badge)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Button(
+                        onClick = onUpgradeToVipProPlay,
+                        enabled = canClick,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = vipAccent,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("vip_pro_subscribe_play_button")
+                    ) {
+                        Text(
+                            text = if (activeTier == ProTier.VIP_PRO) "Renew VIP Pro · $vipProPrice" else "Upgrade to VIP Pro · $vipProPrice",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            // Tier 3: Elite Pro ($59.99/mo) — Group DMs up to 50 users (max)
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = eliteAccent.copy(alpha = 0.09f),
+                border = BorderStroke(1.dp, eliteAccent.copy(alpha = 0.45f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Elite Pro",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = eliteAccent,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = eliteProPrice,
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = eliteAccent
+                        )
+                    }
+                    Text(
+                        text = "• Group DMs up to 50 users (maximum capacity; required above 25)\n" +
+                            "• Admin Push-to-Talk speaker selection & Group Support Staff controls\n" +
+                            "• Includes all VOX Pro & VIP Pro perks",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(
+                        onClick = onUpgradeToEliteProPlay,
+                        enabled = canClick,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = eliteAccent,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("elite_pro_subscribe_play_button")
+                    ) {
+                        Text(
+                            text = if (activeTier == ProTier.ELITE_PRO) "Renew Elite Pro · $eliteProPrice" else "Upgrade to Elite Pro · $eliteProPrice",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
@@ -2401,10 +2633,14 @@ private fun PointsWalletSettingsCard(
                             "Unlocked custom PTT item (${tx.postId.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }}) (${tx.pointsDelta} pts)"
                         PointTransactionType.PRO_MEMBERSHIP ->
                             if (tx.pointsDelta < 0) {
-                                "Activated VoxStage Pro Membership (${tx.pointsDelta} pts · 30 days)"
+                                "Activated VOX Pro Membership (${tx.pointsDelta} pts · 30 days)"
                             } else {
-                                "Activated VoxStage Pro Membership (${formatUsdCents(tx.grossCents)}/mo)"
+                                "Activated VOX Pro Membership (${formatUsdCents(tx.grossCents)}/mo)"
                             }
+                        PointTransactionType.VIP_PRO_MEMBERSHIP ->
+                            "Activated VIP Pro Membership (${formatUsdCents(tx.grossCents)}/mo · up to 25 Group DM)"
+                        PointTransactionType.ELITE_PRO_MEMBERSHIP ->
+                            "Activated Elite Pro Membership (${formatUsdCents(tx.grossCents)}/mo · up to 50 Group DM)"
                         PointTransactionType.UNLOCK_DM ->
                             if (isCreatorCredit) {
                                 "${tx.buyerName} unlocked Private Messages (+1 usable point earned)"
@@ -2425,6 +2661,12 @@ private fun PointsWalletSettingsCard(
                             } else {
                                 "Invite-a-Friend Bonus with ${tx.creatorName} (+2 pts)"
                             }
+                        PointTransactionType.UNLOCK_PROFILE_VIEWERS ->
+                            "Unlocked Who Viewed My Profile list for 24h (-2 pts)"
+                        PointTransactionType.PRIORITY_CHIRP ->
+                            "Sent Priority Break-In Chirp to ${tx.creatorName.ifBlank { "friend" }} (${tx.pointsDelta} pts)"
+                        PointTransactionType.DM_SCROLLING_BANNER ->
+                            "Set 24-Hour DM Scrolling Banner (${tx.pointsDelta} pt)"
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2536,7 +2778,7 @@ private fun PrivateMessageSettingsCard(
 
             DmPolicyOptionRow(
                 title = "Allow Private Messages (Everyone)",
-                subtitle = "Anyone on VoxStage can start a private chat with you",
+                subtitle = "Anyone on VOX can start a private chat with you",
                 icon = Icons.Rounded.ChatBubbleOutline,
                 selected = currentPolicy == DmPolicy.OPEN,
                 accentColor = MaterialTheme.colorScheme.primary,

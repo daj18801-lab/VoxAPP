@@ -46,6 +46,7 @@ function validProfilePayload(uid, overrides = {}) {
     disableVideo: false,
     suspendedUntilMillis: 0,
     suspensionReason: "",
+    age13Verified: true,
     blockedUserIds: [],
     createdAt: ts,
     updatedAt: ts,
@@ -2911,7 +2912,7 @@ test("Free members can post at most 2 Discovery photos per week; paid members un
     })
   );
 
-  // Invalid sex or age < 18 denied
+  // Invalid sex or age < 13 denied
   await assertFails(
     aliceDb.collection("users").doc(ALICE_UID).update({
       sex: "INVALID_SEX",
@@ -2920,7 +2921,7 @@ test("Free members can post at most 2 Discovery photos per week; paid members un
   );
   await assertFails(
     aliceDb.collection("users").doc(ALICE_UID).update({
-      age: 15,
+      age: 12,
       updatedAt: pastDate(4300),
     })
   );
@@ -3174,24 +3175,31 @@ test("DM participants can report a private message to safetyReports; non-partici
     })
   );
 
-  // Participant Alice CAN report a private message in her thread
-  await assertSucceeds(
-    aliceDb.collection("safetyReports").doc("rep_dm_1").set({
-      reporterId: ALICE_UID,
-      reporterName: "Alice",
-      roomId: threadId,
-      roomTitle: "Private Message",
-      roomHostId: ALICE_UID,
-      targetUserId: BOB_UID,
-      targetName: "Bob",
-      category: "HARASSMENT",
-      details: "Reported DM: \"Offensive DM\"",
-      status: "OPEN",
-      resolutionNote: "",
-      createdAt: pastDate(2000),
-      updatedAt: pastDate(2000),
-    })
-  );
+  // Participant Alice CAN report a private message in her thread (with atomic reportRateLimits)
+  const dmRepBatch = aliceDb.batch();
+  dmRepBatch.set(aliceDb.collection("safetyReports").doc("rep_dm_1"), {
+    reporterId: ALICE_UID,
+    reporterName: "Alice",
+    roomId: threadId,
+    roomTitle: "Private Message",
+    roomHostId: ALICE_UID,
+    targetUserId: BOB_UID,
+    targetName: "Bob",
+    category: "HARASSMENT",
+    details: "Reported DM: \"Offensive DM\"",
+    status: "OPEN",
+    resolutionNote: "",
+    createdAt: pastDate(2000),
+    updatedAt: pastDate(2000),
+  });
+  dmRepBatch.set(aliceDb.collection("reportRateLimits").doc(ALICE_UID), {
+    userId: ALICE_UID,
+    recentTargetTimestamps: { [BOB_UID]: Date.now() },
+    lastTargetUserId: BOB_UID,
+    lastReportId: "rep_dm_1",
+    updatedAt: pastDate(2000),
+  });
+  await assertSucceeds(dmRepBatch.commit());
 
   // Non-participant Charlie CANNOT file a DM report for Alice & Bob's thread
   await assertFails(
@@ -4168,6 +4176,1676 @@ test("24-Hour Spotlight Frame, Free-User 7-Day Login Streak (+0.5 pt), Invite-a-
     })
   );
 });
+
+// 41. WHO VIEWED MY PROFILE (2 PTS / PRO), PRIORITY BREAK-IN CHIRPS (1-2 PTS), 24H DM SCROLLING BANNER (1 PT), ADMIN POINTS & LIFETIME PRO
+test("Profile views, 2-pt viewer unlock, Priority Break-In Chirps, 24h DM scrolling banner, Admin points editing, and Lifetime Pro are enforced", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
+  const charlieUid = "charlie_vox_41";
+  const charlieDb = testEnv.authenticatedContext(charlieUid, { email: "charlie@example.com", email_verified: true }).firestore();
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID)));
+  await assertSucceeds(charlieDb.collection("users").doc(charlieUid).set(validProfilePayload(charlieUid)));
+
+  // 1) Admin can edit a user's points balance AND grant Lifetime Pro (never expires)
+  await assertSucceeds(
+    adminDb.collection("users").doc(ALICE_UID).update({
+      pointsBalance: 15,
+      proMember: true,
+      proLifetime: true,
+      updatedAt: pastDate(6000),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("users").doc(BOB_UID).update({
+      pointsBalance: 10,
+      updatedAt: pastDate(5900),
+    })
+  );
+
+  // Regular user CANNOT grant themselves Lifetime Pro or edit their own points arbitrarily
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).update({
+      proLifetime: true,
+      updatedAt: pastDate(5800),
+    })
+  );
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).update({
+      pointsBalance: 999,
+      updatedAt: pastDate(5750),
+    })
+  );
+
+  // Lifetime Pro Alice CAN upload a Reel even with proExpiresAtMillis == 0!
+  await assertSucceeds(
+    aliceDb.collection("reels").doc("reel_lifetime_pro").set({
+      authorId: ALICE_UID,
+      authorName: "Alice",
+      authorHandle: "alice_vox",
+      authorColorHex: "#0088FF",
+      authorTier: "USER",
+      caption: "Lifetime Pro Reel!",
+      thumbnailBase64: "AA==",
+      durationSec: 12,
+      chunkCount: 1,
+      mimeType: "video/mp4",
+      likedByUserIds: [],
+      commentCount: 0,
+      shareCount: 0,
+      createdAt: pastDate(5700),
+      updatedAt: pastDate(5700),
+    })
+  );
+
+  // 2) Who Viewed My Profile: Alice visits Bob's profile -> Bob can read/list, Charlie CANNOT read Bob's views
+  const viewId = `${BOB_UID}_${ALICE_UID}`;
+  await assertSucceeds(
+    aliceDb.collection("profileViews").doc(viewId).set({
+      targetUserId: BOB_UID,
+      viewerId: ALICE_UID,
+      viewerName: "Alice",
+      viewerHandle: "alice_vox",
+      viewerColorHex: "#0088FF",
+      viewerPhotoBase64: "",
+      viewerTier: "USER",
+      viewerProMember: true,
+      viewedAtMillis: Date.now() - 3000,
+      viewedDayKey: "2026-11-25",
+      updatedAt: pastDate(5600),
+    })
+  );
+  // Self-view is rejected
+  await assertFails(
+    bobDb.collection("profileViews").doc(`${BOB_UID}_${BOB_UID}`).set({
+      targetUserId: BOB_UID,
+      viewerId: BOB_UID,
+      viewerName: "Bob",
+      viewerHandle: "bob_vox",
+      viewerColorHex: "#0088FF",
+      viewerPhotoBase64: "",
+      viewerTier: "USER",
+      viewerProMember: false,
+      viewedAtMillis: Date.now() - 2000,
+      viewedDayKey: "2026-11-25",
+      updatedAt: pastDate(5500),
+    })
+  );
+  await assertSucceeds(bobDb.collection("profileViews").doc(viewId).get());
+  await assertFails(charlieDb.collection("profileViews").doc(viewId).get());
+
+  // Bob spends 2 points to unlock Who Viewed My Profile for 24 hours (100% platform revenue)
+  const unlockViewersBatch = bobDb.batch();
+  unlockViewersBatch.update(bobDb.collection("users").doc(BOB_UID), {
+    pointsBalance: 8,
+    profileViewersUnlockedUntilMillis: Date.now() + 24 * 60 * 60 * 1000,
+    updatedAt: pastDate(5400),
+  });
+  unlockViewersBatch.set(bobDb.collection("pointTransactions").doc("tx_unlock_viewers_1"), {
+    type: "UNLOCK_PROFILE_VIEWERS",
+    buyerId: BOB_UID,
+    buyerName: "Bob",
+    creatorId: "",
+    creatorName: "",
+    postId: "",
+    pointsDelta: -2,
+    grossCents: 200,
+    creatorShareCents: 0,
+    platformShareCents: 200,
+    createdAt: pastDate(5400),
+  });
+  await assertSucceeds(unlockViewersBatch.commit());
+
+  // 3) Priority Break-In Chirp (1-2 pts) & 24-Hour DM Scrolling Banner (1 pt)
+  const dmId = `${ALICE_UID}_${BOB_UID}`;
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(dmId).set({
+      participantIds: [ALICE_UID, BOB_UID],
+      isGroup: false,
+      groupName: "",
+      participantNamesById: { [ALICE_UID]: "Alice", [BOB_UID]: "Bob" },
+      kickedUserIds: [],
+      blockedByUserIds: [],
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Hey",
+      lastMessageSenderId: ALICE_UID,
+      unreadByUserIds: [BOB_UID],
+      createdAt: pastDate(5300),
+      updatedAt: pastDate(5300),
+    })
+  );
+
+  // Alice opts in to Priority Chirps in this DM
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(dmId).update({
+      priorityChirpOptInUserIds: [ALICE_UID],
+      updatedAt: pastDate(5200),
+    })
+  );
+
+  // Bob sends a 2-point Urgent Priority Break-In Chirp to Alice!
+  const chirpBatch = bobDb.batch();
+  chirpBatch.update(bobDb.collection("users").doc(BOB_UID), {
+    pointsBalance: 6,
+    updatedAt: pastDate(5100),
+  });
+  chirpBatch.update(bobDb.collection("directThreads").doc(dmId), {
+    lastPriorityChirpAtMillis: Date.now() - 1000,
+    lastPriorityChirpSenderId: BOB_UID,
+    lastPriorityChirpSenderName: "Bob",
+    lastPriorityChirpMessage: "Pick up ASAP — live show starting!",
+    lastPriorityChirpPoints: 2,
+    lastPriorityChirpAcknowledgedBy: [BOB_UID],
+    lastMessageText: "🚨 Priority Chirp: Pick up ASAP — live show starting!",
+    lastMessageSenderId: BOB_UID,
+    unreadByUserIds: [ALICE_UID],
+    updatedAt: pastDate(5100),
+  });
+  chirpBatch.set(bobDb.collection("directThreads").doc(dmId).collection("messages").doc("msg_chirp_1"), {
+    threadId: dmId,
+    participantIds: [ALICE_UID, BOB_UID],
+    senderId: BOB_UID,
+    senderName: "Bob",
+    senderTier: "USER",
+    text: "Pick up ASAP — live show starting!",
+    messageType: "PRIORITY_CHIRP",
+    createdAt: pastDate(5100),
+  });
+  chirpBatch.set(bobDb.collection("pointTransactions").doc("tx_priority_chirp_1"), {
+    type: "PRIORITY_CHIRP",
+    buyerId: BOB_UID,
+    buyerName: "Bob",
+    creatorId: ALICE_UID,
+    creatorName: "Alice",
+    postId: dmId,
+    pointsDelta: -2,
+    grossCents: 200,
+    creatorShareCents: 0,
+    platformShareCents: 200,
+    createdAt: pastDate(5100),
+  });
+  await assertSucceeds(chirpBatch.commit());
+
+  // Alice acknowledges the Priority Chirp
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(dmId).update({
+      lastPriorityChirpAcknowledgedBy: [BOB_UID, ALICE_UID],
+      unreadByUserIds: [],
+      updatedAt: pastDate(5000),
+    })
+  );
+
+  // Bob spends 1 point to set a 24-hour Scrolling Banner in Alice & Bob's DM
+  const bannerBatch = bobDb.batch();
+  bannerBatch.update(bobDb.collection("users").doc(BOB_UID), {
+    pointsBalance: 5,
+    updatedAt: pastDate(4900),
+  });
+  bannerBatch.update(bobDb.collection("directThreads").doc(dmId), {
+    bannerText: "🎉 Happy Birthday Alice! Tuning in tonight at 8pm!",
+    bannerAuthorId: BOB_UID,
+    bannerAuthorName: "Bob",
+    bannerColorHex: "#FF2E93",
+    bannerExpiresAtMillis: Date.now() + 24 * 60 * 60 * 1000,
+    updatedAt: pastDate(4900),
+  });
+  bannerBatch.set(bobDb.collection("pointTransactions").doc("tx_dm_banner_1"), {
+    type: "DM_SCROLLING_BANNER",
+    buyerId: BOB_UID,
+    buyerName: "Bob",
+    creatorId: "",
+    creatorName: "",
+    postId: dmId,
+    pointsDelta: -1,
+    grossCents: 100,
+    creatorShareCents: 0,
+    platformShareCents: 100,
+    createdAt: pastDate(4900),
+  });
+  await assertSucceeds(bannerBatch.commit());
+
+  // Cannot set a DM scrolling banner without paying 1 point in batch
+  await assertFails(
+    bobDb.collection("directThreads").doc(dmId).update({
+      bannerText: "Free spoofed banner",
+      bannerAuthorId: BOB_UID,
+      bannerAuthorName: "Bob",
+      bannerColorHex: "#00D4FF",
+      bannerExpiresAtMillis: Date.now() + 24 * 60 * 60 * 1000,
+      updatedAt: pastDate(4800),
+    })
+  );
+});
+
+// 42. 13+ AGE VERIFICATION FOR APP & PURCHASES + 5-STRIKE AUTOMATED REPORT ESCALATION & PRIVATE FILE NOTES
+test("13+ age check gates Pro/Points purchases and 5-strike reports automatically escalate with private file notes and staff resolution", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const supportDb = testEnv
+    .authenticatedContext(SUPPORT_UID, { email: SUPPORT_EMAIL, email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const kidUid = "kid_under13_user";
+  const kidDb = testEnv.authenticatedContext(kidUid).firestore();
+  const teenUid = "teen_14_user";
+  const teenDb = testEnv.authenticatedContext(teenUid).firestore();
+  const ts = pastDate(10000);
+  const currentYear = new Date().getFullYear();
+
+  // Grant Support role
+  await assertSucceeds(
+    adminDb.collection("staffRoles").doc(SUPPORT_UID).set({
+      userId: SUPPORT_UID,
+      email: SUPPORT_EMAIL,
+      displayName: "Support Staff",
+      staffTier: "SUPPORT",
+      canEnterInvisible: false,
+      addedByUid: ADMIN_UID,
+      addedByName: "Admin",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  // 1) Under-13 user CANNOT verify age13Verified, CANNOT set age = 12, and CANNOT buy Points or Pro
+  await assertSucceeds(
+    kidDb.collection("users").doc(kidUid).set(
+      validProfilePayload(kidUid, { age13Verified: false, birthYear: 0, age: 0 })
+    )
+  );
+  await assertFails(
+    kidDb.collection("users").doc(kidUid).update({
+      age13Verified: true,
+      birthYear: currentYear - 10,
+      updatedAt: pastDate(9000),
+    })
+  );
+  await assertFails(
+    kidDb.collection("users").doc(kidUid).update({
+      age: 12,
+      updatedAt: pastDate(8900),
+    })
+  );
+  await assertFails(
+    kidDb.collection("users").doc(kidUid).update({
+      pointsBalance: 5,
+      totalSpentCents: 500,
+      updatedAt: pastDate(8800),
+    })
+  );
+  await assertFails(
+    kidDb.collection("users").doc(kidUid).update({
+      proMember: true,
+      proExpiresAtMillis: Date.now() + 86400000,
+      totalSpentCents: 999,
+      updatedAt: pastDate(8700),
+    })
+  );
+  await assertFails(
+    kidDb.collection("pointTransactions").doc("tx_kid_buy").set({
+      type: "BUY_POINTS",
+      buyerId: kidUid,
+      buyerName: "Kid",
+      creatorId: "",
+      creatorName: "",
+      postId: "",
+      pointsDelta: 5,
+      grossCents: 500,
+      creatorShareCents: 0,
+      platformShareCents: 0,
+      createdAt: pastDate(8600),
+    })
+  );
+
+  // 2) 14-year-old user CAN verify 13+, set age = 14, buy points, and activate Pro (but still CANNOT set adultVerified 18+)
+  await assertSucceeds(
+    teenDb.collection("users").doc(teenUid).set(
+      validProfilePayload(teenUid, { age13Verified: false, birthYear: 0, age: 0 })
+    )
+  );
+  await assertSucceeds(
+    teenDb.collection("users").doc(teenUid).update({
+      age13Verified: true,
+      birthYear: currentYear - 14,
+      age: 14,
+      updatedAt: pastDate(8500),
+    })
+  );
+  await assertFails(
+    teenDb.collection("users").doc(teenUid).update({
+      adultVerified: true,
+      birthYear: currentYear - 14,
+      updatedAt: pastDate(8400),
+    })
+  );
+  const teenBuyBatch = teenDb.batch();
+  teenBuyBatch.update(teenDb.collection("users").doc(teenUid), {
+    pointsBalance: 10,
+    totalSpentCents: 1000,
+    updatedAt: pastDate(8300),
+  });
+  teenBuyBatch.set(teenDb.collection("pointTransactions").doc("tx_teen_buy"), {
+    type: "BUY_POINTS",
+    buyerId: teenUid,
+    buyerName: "Teen",
+    creatorId: "",
+    creatorName: "",
+    postId: "",
+    pointsDelta: 10,
+    grossCents: 1000,
+    creatorShareCents: 0,
+    platformShareCents: 0,
+    createdAt: pastDate(8300),
+  });
+  await assertSucceeds(teenBuyBatch.commit());
+
+  const teenProBatch = teenDb.batch();
+  teenProBatch.update(teenDb.collection("users").doc(teenUid), {
+    pointsBalance: 0,
+    proMember: true,
+    proExpiresAtMillis: Date.now() + 30 * 24 * 60 * 60 * 1000,
+    updatedAt: pastDate(8200),
+  });
+  teenProBatch.set(teenDb.collection("pointTransactions").doc("tx_teen_pro"), {
+    type: "PRO_MEMBERSHIP",
+    buyerId: teenUid,
+    buyerName: "Teen",
+    creatorId: "",
+    creatorName: "",
+    postId: "",
+    pointsDelta: -10,
+    grossCents: 999,
+    creatorShareCents: 0,
+    platformShareCents: 999,
+    createdAt: pastDate(8200),
+  });
+  await assertSucceeds(teenProBatch.commit());
+
+  // 3) 5-Strike Automated Report & Investigation Escalation + Private File Notes
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID, { displayName: "Bob" })));
+  await assertSucceeds(aliceDb.collection("rooms").doc("room_mod_test").set(validRoomPayload(ALICE_UID)));
+
+  const rep2Uid = "reporter_strike_2";
+  const rep3Uid = "reporter_strike_3";
+  const rep4Uid = "reporter_strike_4";
+  const rep5Uid = "reporter_strike_5";
+  const rep2Db = testEnv.authenticatedContext(rep2Uid).firestore();
+  const rep3Db = testEnv.authenticatedContext(rep3Uid).firestore();
+  const rep4Db = testEnv.authenticatedContext(rep4Uid).firestore();
+  const rep5Db = testEnv.authenticatedContext(rep5Uid).firestore();
+
+  const buildReport = (reportId, details, t, reporterId = ALICE_UID, reporterName = "Alice") => ({
+    reporterId,
+    reporterName,
+    roomId: "room_mod_test",
+    roomTitle: "Late Night Acoustic Jam",
+    roomHostId: ALICE_UID,
+    targetUserId: BOB_UID,
+    targetName: "Bob",
+    category: "HARASSMENT",
+    details,
+    status: "OPEN",
+    resolutionNote: "",
+    createdAt: t,
+    updatedAt: t,
+  });
+
+  const buildNote = (reportId, strikeNum, actionTaken, reason, t, reporterId = ALICE_UID, reporterName = "Alice") => ({
+    targetUserId: BOB_UID,
+    reportId,
+    strikeNumber: strikeNum,
+    actionTaken,
+    category: "HARASSMENT",
+    reason,
+    reporterId,
+    reporterName,
+    actorRole: "REPORTER",
+    createdAt: t,
+  });
+
+  const buildRateLimit = (uid, reportId, t) => ({
+    userId: uid,
+    recentTargetTimestamps: { [BOB_UID]: Date.now() },
+    lastTargetUserId: BOB_UID,
+    lastReportId: reportId,
+    updatedAt: t,
+  });
+
+  // Spoofing check: Alice CANNOT suspend Bob on Strike 1!
+  const spoofStrike1 = aliceDb.batch();
+  spoofStrike1.set(aliceDb.collection("safetyReports").doc("rep_spoof_1"), buildReport("rep_spoof_1", "Spoofed suspension", pastDate(7900)));
+  spoofStrike1.set(aliceDb.collection("reportRateLimits").doc(ALICE_UID), buildRateLimit(ALICE_UID, "rep_spoof_1", pastDate(7900)));
+  spoofStrike1.set(aliceDb.collection("userModerationFiles").doc(BOB_UID), {
+    userId: BOB_UID,
+    targetName: "Bob",
+    reportCount: 1,
+    warningCount: 0,
+    investigationActive: true,
+    investigationStatus: "INVESTIGATING",
+    suspendedUntilMillis: Date.now() + 3600000,
+    suspendedUntilInvestigationResolved: false,
+    suspensionReason: "Illegal early suspension",
+    lastWarningMessage: "",
+    lastWarningAtMillis: 0,
+    lastWarningAcknowledgedAtMillis: 0,
+    lastReportId: "rep_spoof_1",
+    updatedAt: pastDate(7900),
+  });
+  await assertFails(spoofStrike1.commit());
+
+  // STRIKE 1: Investigation started, NO suspension, report note enters file; Bob can still use the app
+  const b1 = aliceDb.batch();
+  b1.set(aliceDb.collection("safetyReports").doc("rep_1"), buildReport("rep_1", "1st report issue", pastDate(7800)));
+  b1.set(aliceDb.collection("reportRateLimits").doc(ALICE_UID), buildRateLimit(ALICE_UID, "rep_1", pastDate(7800)));
+  b1.set(aliceDb.collection("userModerationFiles").doc(BOB_UID), {
+    userId: BOB_UID,
+    targetName: "Bob",
+    reportCount: 1,
+    warningCount: 0,
+    investigationActive: true,
+    investigationStatus: "INVESTIGATING",
+    suspendedUntilMillis: 0,
+    suspendedUntilInvestigationResolved: false,
+    suspensionReason: "",
+    lastWarningMessage: "",
+    lastWarningAtMillis: 0,
+    lastWarningAcknowledgedAtMillis: 0,
+    lastReportId: "rep_1",
+    updatedAt: pastDate(7800),
+  });
+  b1.set(
+    aliceDb.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_1"),
+    buildNote("rep_1", 1, "INVESTIGATION_STARTED", "1st report issue", pastDate(7800))
+  );
+  await assertSucceeds(b1.commit());
+
+  // Bob can still create a room after Strike 1 (not suspended)
+  await assertSucceeds(bobDb.collection("rooms").doc("bob_room_after_s1").set(validRoomPayload(BOB_UID)));
+
+  // Regular users (Alice & Bob) CANNOT read private file notes — only Support & Admin can!
+  await assertFails(aliceDb.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_1").get());
+  await assertFails(bobDb.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_1").get());
+  await assertSucceeds(supportDb.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_1").get());
+  await assertSucceeds(adminDb.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_1").get());
+
+  // STRIKE 2: Warning issued, NO suspension, report note enters file
+  const b2 = rep2Db.batch();
+  b2.set(rep2Db.collection("safetyReports").doc("rep_2"), buildReport("rep_2", "2nd report issue", pastDate(7500), rep2Uid, "Rep2"));
+  b2.set(rep2Db.collection("reportRateLimits").doc(rep2Uid), buildRateLimit(rep2Uid, "rep_2", pastDate(7500)));
+  b2.update(rep2Db.collection("userModerationFiles").doc(BOB_UID), {
+    reportCount: 2,
+    warningCount: 1,
+    investigationActive: true,
+    investigationStatus: "WARNING_ISSUED",
+    lastWarningMessage: "Formal warning: 2nd safety report logged on your account.",
+    lastWarningAtMillis: Date.now() - 5000,
+    lastReportId: "rep_2",
+    updatedAt: pastDate(7500),
+  });
+  b2.set(
+    rep2Db.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_2"),
+    buildNote("rep_2", 2, "WARNING_ISSUED", "2nd report issue", pastDate(7500), rep2Uid, "Rep2")
+  );
+  await assertSucceeds(b2.commit());
+
+  // Bob acknowledges his Strike 2 warning
+  await assertSucceeds(
+    bobDb.collection("userModerationFiles").doc(BOB_UID).update({
+      lastWarningAcknowledgedAtMillis: Date.now(),
+      updatedAt: pastDate(7400),
+    })
+  );
+
+  // STRIKE 3: Automatic 1-hour suspension, report note enters file
+  const b3 = rep3Db.batch();
+  b3.set(rep3Db.collection("safetyReports").doc("rep_3"), buildReport("rep_3", "3rd report issue", pastDate(7200), rep3Uid, "Rep3"));
+  b3.set(rep3Db.collection("reportRateLimits").doc(rep3Uid), buildRateLimit(rep3Uid, "rep_3", pastDate(7200)));
+  b3.update(rep3Db.collection("userModerationFiles").doc(BOB_UID), {
+    reportCount: 3,
+    investigationActive: true,
+    investigationStatus: "SUSPENDED_1H",
+    suspendedUntilMillis: Date.now() + 3600000,
+    suspensionReason: "3rd report: Automatic 1-hour suspension.",
+    lastReportId: "rep_3",
+    updatedAt: pastDate(7200),
+  });
+  b3.set(
+    rep3Db.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_3"),
+    buildNote("rep_3", 3, "SUSPENDED_1H", "3rd report issue", pastDate(7200), rep3Uid, "Rep3")
+  );
+  await assertSucceeds(b3.commit());
+
+  // Bob is NOW blocked by Firestore rules from creating a room during 1h suspension!
+  await assertFails(bobDb.collection("rooms").doc("bob_room_blocked_s3").set(validRoomPayload(BOB_UID)));
+
+  // STRIKE 4: Automatic 2-hour suspension, report note enters file
+  const b4 = rep4Db.batch();
+  b4.set(rep4Db.collection("safetyReports").doc("rep_4"), buildReport("rep_4", "4th report issue", pastDate(7000), rep4Uid, "Rep4"));
+  b4.set(rep4Db.collection("reportRateLimits").doc(rep4Uid), buildRateLimit(rep4Uid, "rep_4", pastDate(7000)));
+  b4.update(rep4Db.collection("userModerationFiles").doc(BOB_UID), {
+    reportCount: 4,
+    investigationActive: true,
+    investigationStatus: "SUSPENDED_2H",
+    suspendedUntilMillis: Date.now() + 7200000,
+    suspensionReason: "4th report: Automatic 2-hour suspension.",
+    lastReportId: "rep_4",
+    updatedAt: pastDate(7000),
+  });
+  b4.set(
+    rep4Db.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_4"),
+    buildNote("rep_4", 4, "SUSPENDED_2H", "4th report issue", pastDate(7000), rep4Uid, "Rep4")
+  );
+  await assertSucceeds(b4.commit());
+
+  // STRIKE 5: Suspended until Support or Admin resolves investigation, report note enters file
+  const b5 = rep5Db.batch();
+  b5.set(rep5Db.collection("safetyReports").doc("rep_5"), buildReport("rep_5", "5th report issue", pastDate(6800), rep5Uid, "Rep5"));
+  b5.set(rep5Db.collection("reportRateLimits").doc(rep5Uid), buildRateLimit(rep5Uid, "rep_5", pastDate(6800)));
+  b5.update(rep5Db.collection("userModerationFiles").doc(BOB_UID), {
+    reportCount: 5,
+    investigationActive: true,
+    investigationStatus: "SUSPENDED_PENDING_REVIEW",
+    suspendedUntilInvestigationResolved: true,
+    suspensionReason: "5th report: Suspended until investigation by Support or Admin is resolved.",
+    lastReportId: "rep_5",
+    updatedAt: pastDate(6800),
+  });
+  b5.set(
+    rep5Db.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("rep_5"),
+    buildNote("rep_5", 5, "SUSPENDED_PENDING_REVIEW", "5th report issue", pastDate(6800), rep5Uid, "Rep5")
+  );
+  await assertSucceeds(b5.commit());
+
+  // Bob CANNOT lift his own Strike 5 suspension
+  await assertFails(
+    bobDb.collection("userModerationFiles").doc(BOB_UID).update({
+      suspendedUntilInvestigationResolved: false,
+      suspendedUntilMillis: 0,
+      updatedAt: pastDate(6600),
+    })
+  );
+
+  // Support resolves the investigation, lifts the suspension, and appends a resolution note to Bob's file!
+  const resolveBatch = supportDb.batch();
+  resolveBatch.update(supportDb.collection("userModerationFiles").doc(BOB_UID), {
+    investigationActive: false,
+    investigationStatus: "RESOLVED",
+    suspendedUntilMillis: 0,
+    suspendedUntilInvestigationResolved: false,
+    suspensionReason: "",
+    lastResolvedById: SUPPORT_UID,
+    lastResolvedByName: "Support Staff",
+    lastResolutionNote: "Reviewed logs and resolved investigation.",
+    updatedAt: pastDate(6400),
+  });
+  resolveBatch.set(supportDb.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("resolve_1"), {
+    targetUserId: BOB_UID,
+    reportId: "",
+    strikeNumber: 5,
+    actionTaken: "INVESTIGATION_RESOLVED",
+    category: "RESOLUTION",
+    reason: "Reviewed logs and resolved investigation.",
+    reporterId: SUPPORT_UID,
+    reporterName: "Support Staff",
+    actorRole: "SUPPORT",
+    createdAt: pastDate(6400),
+  });
+  await assertSucceeds(resolveBatch.commit());
+
+  // After Support resolves the investigation, Bob CAN use the app again!
+  await assertSucceeds(bobDb.collection("rooms").doc("bob_room_after_resolve").set(validRoomPayload(BOB_UID)));
+});
+
+// 43. REPORT RATE LIMIT (3 USERS 1x/HR), SUPPORT SUSPENSION REQUESTS (PENDING ADMIN REVIEW),
+//     24H ROOM BOUNCE LIST & UNBOUNCE, ROOM BAN, 4-DIGIT PIN LOCK, & ROOM ADMIN INVISIBLE MODE
+test("Report rate limit, Support suspension request pending Admin review, room bounce/unbounce, ban, 4-digit PIN lock, and Room Admin invisible mode", async () => {
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true }).firestore();
+  const supportDb = testEnv.authenticatedContext(SUPPORT_UID, { email: SUPPORT_EMAIL, email_verified: true }).firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const ts = pastDate(9000);
+
+  await assertSucceeds(
+    adminDb.collection("staffRoles").doc(SUPPORT_UID).set({
+      userId: SUPPORT_UID,
+      email: SUPPORT_EMAIL,
+      displayName: "Support Staff",
+      staffTier: "SUPPORT",
+      canEnterInvisible: false,
+      addedByUid: ADMIN_UID,
+      addedByName: "Admin",
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID, { displayName: "Bob" })));
+  await assertSucceeds(aliceDb.collection("rooms").doc("room_ctrl_1").set(validRoomPayload(ALICE_UID)));
+
+  // 1) REPORT RATE LIMIT: 3 different targets 1 time each within 1 hour
+  const mkRep = (repId, targetUid, targetName, t) => ({
+    reporterId: ALICE_UID,
+    reporterName: "Alice",
+    roomId: "room_ctrl_1",
+    roomTitle: "Late Night Acoustic Jam",
+    roomHostId: ALICE_UID,
+    targetUserId: targetUid,
+    targetName,
+    category: "HARASSMENT",
+    details: "Rate limit check",
+    status: "OPEN",
+    resolutionNote: "",
+    createdAt: t,
+    updatedAt: t,
+  });
+
+  // Bypass without reportRateLimits DENIED
+  await assertFails(aliceDb.collection("safetyReports").doc("rl_bypass").set(mkRep("rl_bypass", "t1", "T1", pastDate(8500))));
+
+  const t1Now = Date.now();
+  const r1 = aliceDb.batch();
+  r1.set(aliceDb.collection("safetyReports").doc("rl_1"), mkRep("rl_1", "t1", "T1", pastDate(8400)));
+  r1.set(aliceDb.collection("reportRateLimits").doc(ALICE_UID), {
+    userId: ALICE_UID,
+    recentTargetTimestamps: { t1: t1Now },
+    lastTargetUserId: "t1",
+    lastReportId: "rl_1",
+    updatedAt: pastDate(8400),
+  });
+  await assertSucceeds(r1.commit());
+
+  // Duplicate report against same user t1 within 1h DENIED
+  const dup = aliceDb.batch();
+  dup.set(aliceDb.collection("safetyReports").doc("rl_dup"), mkRep("rl_dup", "t1", "T1", pastDate(8300)));
+  dup.update(aliceDb.collection("reportRateLimits").doc(ALICE_UID), {
+    recentTargetTimestamps: { t1: Date.now() },
+    lastTargetUserId: "t1",
+    lastReportId: "rl_dup",
+    updatedAt: pastDate(8300),
+  });
+  await assertFails(dup.commit());
+
+  // 2nd distinct target t2 ALLOWED
+  const t2Now = Date.now();
+  const r2 = aliceDb.batch();
+  r2.set(aliceDb.collection("safetyReports").doc("rl_2"), mkRep("rl_2", "t2", "T2", pastDate(8200)));
+  r2.update(aliceDb.collection("reportRateLimits").doc(ALICE_UID), {
+    recentTargetTimestamps: { t1: t1Now, t2: t2Now },
+    lastTargetUserId: "t2",
+    lastReportId: "rl_2",
+    updatedAt: pastDate(8200),
+  });
+  await assertSucceeds(r2.commit());
+
+  // 3rd distinct target t3 ALLOWED
+  const t3Now = Date.now();
+  const r3 = aliceDb.batch();
+  r3.set(aliceDb.collection("safetyReports").doc("rl_3"), mkRep("rl_3", "t3", "T3", pastDate(8100)));
+  r3.update(aliceDb.collection("reportRateLimits").doc(ALICE_UID), {
+    recentTargetTimestamps: { t1: t1Now, t2: t2Now, t3: t3Now },
+    lastTargetUserId: "t3",
+    lastReportId: "rl_3",
+    updatedAt: pastDate(8100),
+  });
+  await assertSucceeds(r3.commit());
+
+  // 4th distinct target t4 within 1h DENIED (even if attempting to drop t1!)
+  const r4Drop = aliceDb.batch();
+  r4Drop.set(aliceDb.collection("safetyReports").doc("rl_4"), mkRep("rl_4", "t4", "T4", pastDate(8000)));
+  r4Drop.update(aliceDb.collection("reportRateLimits").doc(ALICE_UID), {
+    recentTargetTimestamps: { t2: t2Now, t3: t3Now, t4: Date.now() },
+    lastTargetUserId: "t4",
+    lastReportId: "rl_4",
+    updatedAt: pastDate(8000),
+  });
+  await assertFails(r4Drop.commit());
+
+  // 2) SUPPORT SUSPENSION REQUEST -> IMMEDIATELY SUSPENDS TARGET UNTIL ADMIN REVIEWS
+  // Regular user CANNOT create a suspensionRequest
+  await assertFails(
+    aliceDb.collection("suspensionRequests").doc("sr_spoof").set({
+      targetUserId: BOB_UID,
+      targetName: "Bob",
+      requestedById: ALICE_UID,
+      requestedByName: "Alice",
+      reason: "Unauthorized request",
+      roomId: "room_ctrl_1",
+      status: "PENDING",
+      reviewedByAdminId: "",
+      reviewedByAdminName: "",
+      adminDecisionNote: "",
+      createdAt: pastDate(7900),
+      updatedAt: pastDate(7900),
+    })
+  );
+
+  // Support submits suspension request with mandatory reason + immediately suspends Bob pending Admin review
+  const srBatch = supportDb.batch();
+  srBatch.set(supportDb.collection("suspensionRequests").doc("sr_1"), {
+    targetUserId: BOB_UID,
+    targetName: "Bob",
+    requestedById: SUPPORT_UID,
+    requestedByName: "Support Staff",
+    reason: "Repeated harassment across live rooms.",
+    roomId: "room_ctrl_1",
+    status: "PENDING",
+    reviewedByAdminId: "",
+    reviewedByAdminName: "",
+    adminDecisionNote: "",
+    createdAt: pastDate(7800),
+    updatedAt: pastDate(7800),
+  });
+  srBatch.set(supportDb.collection("userModerationFiles").doc(BOB_UID), {
+    userId: BOB_UID,
+    targetName: "Bob",
+    reportCount: 0,
+    warningCount: 0,
+    investigationActive: true,
+    investigationStatus: "SUSPENDED_PENDING_ADMIN_REVIEW",
+    suspendedUntilMillis: 0,
+    suspendedUntilInvestigationResolved: true,
+    pendingAdminReview: true,
+    pendingSuspensionRequestId: "sr_1",
+    suspensionReason: "Support requested suspension pending Admin review: Repeated harassment across live rooms.",
+    lastWarningMessage: "",
+    lastWarningAtMillis: 0,
+    lastWarningAcknowledgedAtMillis: 0,
+    lastReportId: "",
+    updatedAt: pastDate(7800),
+  });
+  srBatch.set(supportDb.collection("userModerationFiles").doc(BOB_UID).collection("notes").doc("sr_1"), {
+    targetUserId: BOB_UID,
+    reportId: "sr_1",
+    strikeNumber: 0,
+    actionTaken: "SUPPORT_SUSPENSION_REQUESTED",
+    category: "SUSPENSION_REQUEST",
+    reason: "Repeated harassment across live rooms.",
+    reporterId: SUPPORT_UID,
+    reporterName: "Support Staff",
+    actorRole: "SUPPORT",
+    createdAt: pastDate(7800),
+  });
+  await assertSucceeds(srBatch.commit());
+
+  // Bob is immediately suspended (cannot create a room)
+  await assertFails(bobDb.collection("rooms").doc("bob_suspended_try").set(validRoomPayload(BOB_UID)));
+
+  // Support CANNOT lift a pending Admin review suspension!
+  await assertFails(
+    supportDb.collection("userModerationFiles").doc(BOB_UID).update({
+      pendingAdminReview: false,
+      suspendedUntilInvestigationResolved: false,
+      investigationActive: false,
+      investigationStatus: "RESOLVED",
+      updatedAt: pastDate(7700),
+    })
+  );
+  // Support CANNOT approve/dismiss suspensionRequests (Admin ONLY!)
+  await assertFails(
+    supportDb.collection("suspensionRequests").doc("sr_1").update({
+      status: "DISMISSED_LIFTED",
+      reviewedByAdminId: SUPPORT_UID,
+      reviewedByAdminName: "Support Staff",
+      adminDecisionNote: "Trying to self-approve",
+      updatedAt: pastDate(7700),
+    })
+  );
+
+  // Admin reviews & lifts the suspension request
+  const adminRev = adminDb.batch();
+  adminRev.update(adminDb.collection("suspensionRequests").doc("sr_1"), {
+    status: "DISMISSED_LIFTED",
+    reviewedByAdminId: ADMIN_UID,
+    reviewedByAdminName: "App Admin",
+    adminDecisionNote: "Reviewed and cleared after warning.",
+    updatedAt: pastDate(7600),
+  });
+  adminRev.update(adminDb.collection("userModerationFiles").doc(BOB_UID), {
+    pendingAdminReview: false,
+    pendingSuspensionRequestId: "",
+    suspendedUntilInvestigationResolved: false,
+    suspendedUntilMillis: 0,
+    investigationActive: false,
+    investigationStatus: "RESOLVED",
+    suspensionReason: "",
+    lastResolvedById: ADMIN_UID,
+    lastResolvedByName: "App Admin",
+    lastResolutionNote: "Reviewed and cleared after warning.",
+    updatedAt: pastDate(7600),
+  });
+  await assertSucceeds(adminRev.commit());
+
+  // 3) 24-HOUR ROOM BOUNCE LIST & ROOM ADMIN UNBOUNCE
+  const bounceUntil = Date.now() + 86400000;
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_ctrl_1").update({
+      bouncedUntilByUserId: { [BOB_UID]: bounceUntil },
+      bouncedNamesByUserId: { [BOB_UID]: "Bob" },
+      updatedAt: pastDate(7500),
+    })
+  );
+
+  const bobParticipantPayload = (extra = {}) => ({
+    userId: BOB_UID,
+    roomId: "room_ctrl_1",
+    displayName: "Bob",
+    avatarColorHex: "#1877F2",
+    role: "LISTENER",
+    staffTier: "USER",
+    invisible: false,
+    micActive: false,
+    camActive: false,
+    handRaised: false,
+    mutedByMod: false,
+    speakingLevel: 0.0,
+    joinedAt: pastDate(7400),
+    updatedAt: pastDate(7400),
+    ...extra,
+  });
+
+  // Bounced Bob CANNOT enter the room for 24h
+  await assertFails(
+    bobDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).set(bobParticipantPayload())
+  );
+
+  // Room Admin Alice removes Bob from the Bounce List
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_ctrl_1").update({
+      bouncedUntilByUserId: {},
+      bouncedNamesByUserId: {},
+      updatedAt: pastDate(7300),
+    })
+  );
+
+  // 4) ROOM ADMIN 4-DIGIT PIN CODE LOCK
+  // Invalid 3-digit PIN DENIED
+  await assertFails(
+    aliceDb.collection("rooms").doc("room_ctrl_1").update({
+      pinLocked: true,
+      roomPinCode: "123",
+      updatedAt: pastDate(7250),
+    })
+  );
+  // Valid 4-digit PIN ALLOWED
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_ctrl_1").update({
+      pinLocked: true,
+      roomPinCode: "4829",
+      updatedAt: pastDate(7200),
+    })
+  );
+
+  // Bob WITHOUT PIN or with WRONG PIN is DENIED
+  await assertFails(
+    bobDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).set(bobParticipantPayload())
+  );
+  await assertFails(
+    bobDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).set(bobParticipantPayload({ enteredPin: "9999" }))
+  );
+
+  // Bob WITH CORRECT 4-digit PIN is ALLOWED
+  await assertSucceeds(
+    bobDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).set(bobParticipantPayload({ enteredPin: "4829" }))
+  );
+
+  // 5) ROOM ADMIN INVISIBLE MODE (Room Admin ALLOWED; regular listener DENIED)
+  // Regular listener Bob CANNOT turn invisible
+  await assertFails(
+    bobDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).update({
+      invisible: true,
+      updatedAt: pastDate(7100),
+    })
+  );
+  // Room Admin Alice CAN enter & toggle invisible in her own room (bypassing PIN too)
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      roomId: "room_ctrl_1",
+      displayName: "Alice",
+      avatarColorHex: "#9333EA",
+      role: "HOST",
+      staffTier: "USER",
+      invisible: true,
+      micActive: false,
+      camActive: false,
+      handRaised: false,
+      mutedByMod: false,
+      speakingLevel: 0.0,
+      joinedAt: pastDate(7050),
+      updatedAt: pastDate(7050),
+    })
+  );
+
+  // 6) ROOM ADMIN BAN & UNBAN
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_ctrl_1").update({
+      bannedUserIds: [BOB_UID],
+      bannedNamesByUserId: { [BOB_UID]: "Bob" },
+      updatedAt: pastDate(7000),
+    })
+  );
+  await assertSucceeds(aliceDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).delete());
+  // Banned Bob CANNOT re-enter even with correct PIN
+  await assertFails(
+    bobDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).set(bobParticipantPayload({ enteredPin: "4829" }))
+  );
+  // Room Admin unbans Bob
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_ctrl_1").update({
+      bannedUserIds: [],
+      bannedNamesByUserId: {},
+      updatedAt: pastDate(6900),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("rooms").doc("room_ctrl_1").collection("participants").doc(BOB_UID).set(bobParticipantPayload({ enteredPin: "4829" }))
+  );
+});
+
+// 44. REFUNDS + AUTO-UNSUBSCRIBE, APP PERK GRANTS + 30/5D ALERT, GROUP DM HIDE NAME & GROUP DM ADMIN (MUTE/BOUNCE/BAN)
+test("Admin & Support refunds revoke memberships + report to Admins; perk grants + 30/5d alert; Group DM hide name & admin mute/bounce/ban", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true })
+    .firestore();
+  const supportUid = "support_staff_refunds";
+  const supportDb = testEnv.authenticatedContext(supportUid).firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieUid = "charlie_uid";
+  const charlieDb = testEnv.authenticatedContext(charlieUid).firestore();
+
+  const ts = pastDate(10000);
+  const future30d = Date.now() + 30 * 24 * 60 * 60 * 1000;
+
+  // Seed users, directory, Support staff role, active Pro + Creator Sub + Transaction
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("staffRoles").doc(supportUid).set({
+      userId: supportUid,
+      email: "support@vox.test",
+      displayName: "Support Rep",
+      staffTier: "SUPPORT",
+      canEnterInvisible: false,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await db.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      proMember: true,
+      proExpiresAtMillis: future30d,
+      proLifetime: false,
+      pointsBalance: 10,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await db.collection("users").doc(BOB_UID).set({
+      ...validProfilePayload(BOB_UID),
+      displayName: "Bob",
+      handle: "bob_vox",
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await db.collection("users").doc(charlieUid).set({
+      ...validProfilePayload(charlieUid),
+      displayName: "Charlie",
+      handle: "charlie_vox",
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await db.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      avatarColorHex: "#0088FF",
+      staffTier: "USER",
+      proMember: true,
+      proExpiresAtMillis: future30d,
+      updatedAt: ts,
+    });
+    await db.collection("creatorSubscriptions").doc(`${ALICE_UID}_${BOB_UID}`).set({
+      subscriberId: ALICE_UID,
+      creatorId: BOB_UID,
+      creatorName: "Bob",
+      priceCents: 1500,
+      creatorShareCents: 0,
+      platformShareCents: 1500,
+      active: true,
+      expiresAtMillis: future30d,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await db.collection("pointTransactions").doc("tx_pro_1").set({
+      type: "PRO_MEMBERSHIP",
+      buyerId: ALICE_UID,
+      buyerName: "Alice",
+      creatorId: "",
+      creatorName: "",
+      postId: "",
+      pointsDelta: 0,
+      grossCents: 999,
+      creatorShareCents: 0,
+      platformShareCents: 999,
+      createdAt: ts,
+    });
+  });
+
+  // 1) SUPPORT ISSUES VOX PRO REFUND -> REVOKES PRO MEMBERSHIP + WRITES REFUND REPORT + NOTIFIES APP ADMINS
+  // Regular user Bob CANNOT create a refund report or revoke Alice's Pro
+  await assertFails(
+    bobDb.collection("refundReports").doc("ref_bad").set({
+      targetUserId: ALICE_UID,
+      targetName: "Alice",
+      refundType: "VOX_PRO",
+      itemLabel: "VOX Pro Membership",
+      amountCents: 999,
+      transactionId: "tx_pro_1",
+      subscriptionId: "",
+      membershipRevoked: true,
+      reason: "Fake refund",
+      issuedById: BOB_UID,
+      issuedByName: "Bob",
+      issuedByTier: "SUPPORT",
+      reportedToAdmins: true,
+      acknowledgedByAdmin: false,
+      acknowledgedByAdminName: "",
+      createdAt: pastDate(9000),
+      updatedAt: pastDate(9000),
+    })
+  );
+
+  // Support revokes Alice's Pro membership on users & userDirectory, marks tx refunded, logs refundReport, notifies Admins
+  await assertSucceeds(
+    supportDb.collection("users").doc(ALICE_UID).update({
+      proMember: false,
+      proExpiresAtMillis: 0,
+      proLifetime: false,
+      updatedAt: pastDate(8900),
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("userDirectory").doc(ALICE_UID).update({
+      proMember: false,
+      proExpiresAtMillis: 0,
+      updatedAt: pastDate(8900),
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("pointTransactions").doc("tx_pro_1").update({
+      refunded: true,
+      refundedAtMillis: Date.now(),
+      refundedById: supportUid,
+      refundedByName: "Support Rep",
+      refundReason: "Duplicate charge requested by user",
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("refundReports").doc("ref_support_1").set({
+      targetUserId: ALICE_UID,
+      targetName: "Alice",
+      refundType: "VOX_PRO",
+      itemLabel: "VOX Pro Membership",
+      amountCents: 999,
+      transactionId: "tx_pro_1",
+      subscriptionId: "",
+      membershipRevoked: true,
+      reason: "Duplicate charge requested by user",
+      issuedById: supportUid,
+      issuedByName: "Support Rep",
+      issuedByTier: "SUPPORT",
+      reportedToAdmins: true,
+      acknowledgedByAdmin: false,
+      acknowledgedByAdminName: "",
+      createdAt: pastDate(8800),
+      updatedAt: pastDate(8800),
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("adminNotifications").doc("notif_refund_1").set({
+      type: "SUPPORT_REFUND_REPORT",
+      title: "Support Refund Issued",
+      message: "Support Rep refunded VOX Pro Membership ($9.99) for Alice. Membership revoked.",
+      createdById: supportUid,
+      createdByName: "Support Rep",
+      targetUserId: ALICE_UID,
+      targetName: "Alice",
+      referenceId: "ref_support_1",
+      countValue: 1,
+      read: false,
+      createdAt: pastDate(8750),
+      updatedAt: pastDate(8750),
+    })
+  );
+
+  // Support CANNOT read adminNotifications (Admin-only!), while Admin CAN read and mark read + acknowledge refundReport
+  await assertFails(supportDb.collection("adminNotifications").doc("notif_refund_1").get());
+  await assertSucceeds(adminDb.collection("adminNotifications").doc("notif_refund_1").get());
+  await assertSucceeds(
+    adminDb.collection("adminNotifications").doc("notif_refund_1").update({
+      read: true,
+      updatedAt: pastDate(8700),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("refundReports").doc("ref_support_1").update({
+      acknowledgedByAdmin: true,
+      acknowledgedByAdminName: "App Admin",
+      updatedAt: pastDate(8650),
+    })
+  );
+
+  // Admin issues a Creator Subscription refund -> immediately revokes subscription (active=false, expiresAtMillis=0, refunded=true)
+  await assertSucceeds(
+    adminDb.collection("creatorSubscriptions").doc(`${ALICE_UID}_${BOB_UID}`).update({
+      active: false,
+      expiresAtMillis: 0,
+      refunded: true,
+      updatedAt: pastDate(8600),
+    })
+  );
+
+  // 2) ADMIN & SUPPORT GRANT ANY APP PERK + 30-PERKS-IN-5-DAYS ADMIN NOTIFICATION
+  // Regular user Bob CANNOT grant perks
+  await assertFails(
+    bobDb.collection("perkGrants").doc("perk_bad").set({
+      targetUserId: ALICE_UID,
+      targetName: "Alice",
+      perkType: "SPOTLIGHT_FRAME_24H",
+      perkLabel: "24h Spotlight Frame",
+      perkDetail: "#00D4FF",
+      reason: "Unauthorized",
+      grantedById: BOB_UID,
+      grantedByName: "Bob",
+      grantedByTier: "SUPPORT",
+      createdAtMillis: Date.now(),
+      createdAt: pastDate(8500),
+    })
+  );
+
+  // Support grants Spotlight Frame + Custom PTT Theme to Alice & logs perkGrant + triggers 30-in-5-day alert to Admins
+  await assertSucceeds(
+    supportDb.collection("users").doc(ALICE_UID).update({
+      spotlightFrameUntilMillis: Date.now() + 24 * 60 * 60 * 1000,
+      spotlightFrameColorHex: "#00D4FF",
+      ownedPttThemes: ["CLASSIC", "NEON_MAGENTA"],
+      selectedPttTheme: "NEON_MAGENTA",
+      updatedAt: pastDate(8450),
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("userDirectory").doc(ALICE_UID).update({
+      spotlightFrameUntilMillis: Date.now() + 24 * 60 * 60 * 1000,
+      spotlightFrameColorHex: "#00D4FF",
+      updatedAt: pastDate(8450),
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("perkGrants").doc("perk_support_1").set({
+      targetUserId: ALICE_UID,
+      targetName: "Alice",
+      perkType: "SPOTLIGHT_FRAME_24H",
+      perkLabel: "24h Spotlight Frame",
+      perkDetail: "#00D4FF",
+      reason: "Community event winner",
+      grantedById: supportUid,
+      grantedByName: "Support Rep",
+      grantedByTier: "SUPPORT",
+      createdAtMillis: Date.now(),
+      createdAt: pastDate(8400),
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("adminNotifications").doc("notif_perks_30").set({
+      type: "SUPPORT_PERK_THRESHOLD_30_IN_5D",
+      title: "Support Perk Limit Reached (30 in 5 Days)",
+      message: "Support Staff have granted 30 app perks over the past 5 days.",
+      createdById: supportUid,
+      createdByName: "Support Rep",
+      targetUserId: ALICE_UID,
+      targetName: "Alice",
+      referenceId: "perk_support_1",
+      countValue: 30,
+      read: false,
+      createdAt: pastDate(8350),
+      updatedAt: pastDate(8350),
+    })
+  );
+
+  // 3) GROUP DM: CREATOR IS GROUP DM ADMIN (MUTE, BOUNCE, BAN) + HIDE NAME MESSAGES
+  const groupId = "group_dm_admin_test";
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(groupId).set({
+      participantIds: [ALICE_UID, BOB_UID, charlieUid],
+      isGroup: true,
+      groupName: "Friday Squad",
+      groupAdminId: ALICE_UID,
+      participantNamesById: { [ALICE_UID]: "Alice", [BOB_UID]: "Bob", [charlieUid]: "Charlie" },
+      kickedUserIds: [],
+      mutedUserIds: [],
+      bouncedUntilByUserId: {},
+      bouncedNamesByUserId: {},
+      bannedUserIds: [],
+      bannedNamesByUserId: {},
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Welcome to Friday Squad",
+      lastMessageSenderId: ALICE_UID,
+      unreadByUserIds: [BOB_UID, charlieUid],
+      createdAt: pastDate(8200),
+      updatedAt: pastDate(8200),
+    })
+  );
+
+  // Bob sends a hidden-name message in the Group DM -> ALLOWED (and still has senderId so it can be reported!)
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(groupId).collection("messages").doc("msg_hidden_1").set({
+      threadId: groupId,
+      participantIds: [ALICE_UID, BOB_UID, charlieUid],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Mystery message from hidden member",
+      hideSenderName: true,
+      createdAt: pastDate(8100),
+    })
+  );
+
+  // Non-admin member Bob CANNOT mute/bounce/ban Charlie
+  await assertFails(
+    bobDb.collection("directThreads").doc(groupId).update({
+      mutedUserIds: [charlieUid],
+      updatedAt: pastDate(8050),
+    })
+  );
+
+  // Group DM Admin Alice MUTES Bob -> Bob DENIED sending messages
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(groupId).update({
+      mutedUserIds: [BOB_UID],
+      updatedAt: pastDate(8000),
+    })
+  );
+  await assertFails(
+    bobDb.collection("directThreads").doc(groupId).collection("messages").doc("msg_bob_muted").set({
+      threadId: groupId,
+      participantIds: [ALICE_UID, BOB_UID, charlieUid],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Trying to talk while muted",
+      createdAt: pastDate(7950),
+    })
+  );
+
+  // Alice unmutes Bob & BOUNCES Bob for 24 hours -> Bob DENIED sending messages
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(groupId).update({
+      mutedUserIds: [],
+      bouncedUntilByUserId: { [BOB_UID]: Date.now() + 24 * 60 * 60 * 1000 },
+      bouncedNamesByUserId: { [BOB_UID]: "Bob" },
+      updatedAt: pastDate(7900),
+    })
+  );
+  await assertFails(
+    bobDb.collection("directThreads").doc(groupId).collection("messages").doc("msg_bob_bounced").set({
+      threadId: groupId,
+      participantIds: [ALICE_UID, BOB_UID, charlieUid],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Trying to talk while bounced",
+      createdAt: pastDate(7850),
+    })
+  );
+
+  // Alice removes bounce & BANS Bob -> Bob DENIED sending messages
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(groupId).update({
+      bouncedUntilByUserId: {},
+      bouncedNamesByUserId: {},
+      bannedUserIds: [BOB_UID],
+      bannedNamesByUserId: { [BOB_UID]: "Bob" },
+      updatedAt: pastDate(7800),
+    })
+  );
+  await assertFails(
+    bobDb.collection("directThreads").doc(groupId).collection("messages").doc("msg_bob_banned").set({
+      threadId: groupId,
+      participantIds: [ALICE_UID, BOB_UID, charlieUid],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Trying to talk while banned",
+      createdAt: pastDate(7750),
+    })
+  );
+
+  // Alice unbans Bob -> Bob ALLOWED again
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(groupId).update({
+      bannedUserIds: [],
+      bannedNamesByUserId: {},
+      updatedAt: pastDate(7700),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(groupId).collection("messages").doc("msg_bob_unbanned").set({
+      threadId: groupId,
+      participantIds: [ALICE_UID, BOB_UID, charlieUid],
+      senderId: BOB_UID,
+      senderName: "Bob",
+      senderTier: "USER",
+      text: "Back in the group!",
+      createdAt: pastDate(7650),
+    })
+  );
+});
+
+test("45. Group DM Support Staff, Tiered Caps (7/15/25/50), and >15-Member PTT Speaker Selection", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com" }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com" }).firestore();
+  const charlieUid = "charlie_uid_45";
+  const charlieDb = testEnv.authenticatedContext(charlieUid, { email: "charlie@example.com" }).firestore();
+
+  const makeParticipants = (n) => {
+    const ids = [ALICE_UID, BOB_UID, charlieUid];
+    for (let i = 4; i <= n; i++) ids.push(`member_${i}_45`);
+    return ids.slice(0, n);
+  };
+
+  const makeUser = (uid, name, handle, extra = {}) => ({
+    userId: uid,
+    displayName: name,
+    handle,
+    bio: "",
+    avatarColorHex: "#6750A4",
+    pushToTalkPreferred: true,
+    darkThemePreferred: true,
+    blockedUserIds: [],
+    createdAt: pastDate(10000),
+    updatedAt: pastDate(10000),
+    ...extra,
+  });
+
+  // Seed Alice (FREE initially, age 13+ verified), Bob, Charlie
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("users").doc(ALICE_UID).set(makeUser(ALICE_UID, "Alice", "alice45", {
+      proMember: false,
+      proTier: "FREE",
+      proExpiresAtMillis: 0,
+      age13Verified: true,
+      birthYear: 1995,
+      totalSpentCents: 0,
+    }));
+    await db.collection("users").doc(BOB_UID).set(makeUser(BOB_UID, "Bob", "bob45"));
+    await db.collection("users").doc(charlieUid).set(makeUser(charlieUid, "Charlie", "charlie45"));
+  });
+
+  // 1) Free user Group DM capped at 7 users (creating with 8 fails; creating with 7 succeeds; adding 8th fails)
+  const freeGroupId = "group_tier_free_45";
+  const baseThread = (ids) => ({
+    participantIds: ids,
+    isGroup: true,
+    groupName: "Tiered Squad",
+    groupAdminId: ALICE_UID,
+    groupSupportIds: [],
+    pttAllowedUserIds: [],
+    userAId: ALICE_UID,
+    userAName: "Alice",
+    userAColorHex: "#6750A4",
+    userATier: "USER",
+    userBId: BOB_UID,
+    userBName: "Bob",
+    userBColorHex: "#0061A4",
+    userBTier: "USER",
+    lastMessageText: "Group created",
+    lastMessageSenderId: ALICE_UID,
+    unreadByUserIds: [BOB_UID],
+    createdAt: pastDate(9000),
+    updatedAt: pastDate(9000),
+  });
+
+  await assertFails(aliceDb.collection("directThreads").doc("group_free_8").set(baseThread(makeParticipants(8))));
+  await assertSucceeds(aliceDb.collection("directThreads").doc(freeGroupId).set(baseThread(makeParticipants(7))));
+  await assertFails(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      participantIds: makeParticipants(8),
+      updatedAt: pastDate(8900),
+    })
+  );
+
+  // 2) Group DM Support Staff permissions
+  // Alice (Group Admin) promotes Bob to Group Support Staff
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      groupSupportIds: [BOB_UID],
+      updatedAt: pastDate(8850),
+    })
+  );
+  // Bob (Support Staff) CAN mute Charlie
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(freeGroupId).update({
+      mutedUserIds: [charlieUid],
+      updatedAt: pastDate(8800),
+    })
+  );
+  // Bob (Support Staff) CAN bounce Charlie for 24h
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(freeGroupId).update({
+      mutedUserIds: [],
+      bouncedUntilByUserId: { [charlieUid]: Date.now() + 24 * 60 * 60 * 1000 },
+      bouncedNamesByUserId: { [charlieUid]: "Charlie" },
+      updatedAt: pastDate(8750),
+    })
+  );
+  // Bob (Support Staff) CANNOT ban Charlie
+  await assertFails(
+    bobDb.collection("directThreads").doc(freeGroupId).update({
+      bannedUserIds: [charlieUid],
+      bannedNamesByUserId: { [charlieUid]: "Charlie" },
+      updatedAt: pastDate(8700),
+    })
+  );
+  // Bob (Support Staff) CANNOT mute Group Admin Alice
+  await assertFails(
+    bobDb.collection("directThreads").doc(freeGroupId).update({
+      mutedUserIds: [ALICE_UID],
+      updatedAt: pastDate(8650),
+    })
+  );
+  // Bob (Support Staff) CANNOT promote Charlie to Group Support Staff
+  await assertFails(
+    bobDb.collection("directThreads").doc(freeGroupId).update({
+      groupSupportIds: [BOB_UID, charlieUid],
+      updatedAt: pastDate(8600),
+    })
+  );
+  // Clear bounce on Charlie
+  await assertSucceeds(
+    bobDb.collection("directThreads").doc(freeGroupId).update({
+      bouncedUntilByUserId: {},
+      bouncedNamesByUserId: {},
+      updatedAt: pastDate(8550),
+    })
+  );
+
+  // 3) Upgrade Alice to VOX Pro ($9.99/mo -> 999 cents) => max 15 users (15 allowed, 16 denied)
+  const exp30d = Date.now() + 29 * 24 * 60 * 60 * 1000;
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      proMember: true,
+      proTier: "PRO",
+      proExpiresAtMillis: exp30d,
+      totalSpentCents: 999,
+      updatedAt: pastDate(8500),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      participantIds: makeParticipants(15),
+      updatedAt: pastDate(8450),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      participantIds: makeParticipants(16),
+      updatedAt: pastDate(8400),
+    })
+  );
+
+  // 4) Upgrade Alice to VIP Pro ($29.99/mo -> +2999 cents) => max 25 users (16 & 25 allowed, 26 denied)
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      proMember: true,
+      proTier: "VIP_PRO",
+      proExpiresAtMillis: exp30d,
+      totalSpentCents: 999 + 2999,
+      updatedAt: pastDate(8350),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      participantIds: makeParticipants(25),
+      updatedAt: pastDate(8300),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      participantIds: makeParticipants(26),
+      updatedAt: pastDate(8250),
+    })
+  );
+
+  // 5) >15-member PTT speaker control (currently 25 members!)
+  // Charlie is NOT selected in pttAllowedUserIds -> DENIED turning on live PTT & DENIED sending voice clip
+  await assertFails(
+    charlieDb.collection("directThreads").doc(freeGroupId).update({
+      pttEnabledUserIds: [charlieUid],
+      updatedAt: pastDate(8200),
+    })
+  );
+  await assertFails(
+    charlieDb.collection("directThreads").doc(freeGroupId).collection("messages").doc("msg_ptt_denied").set({
+      threadId: freeGroupId,
+      participantIds: makeParticipants(25),
+      senderId: charlieUid,
+      senderName: "Charlie",
+      senderTier: "USER",
+      text: "",
+      audioBase64: "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=",
+      audioDurationSec: 3,
+      createdAt: pastDate(8190),
+    })
+  );
+  // Charlie CAN still send a regular text message
+  await assertSucceeds(
+    charlieDb.collection("directThreads").doc(freeGroupId).collection("messages").doc("msg_text_ok").set({
+      threadId: freeGroupId,
+      participantIds: makeParticipants(25),
+      senderId: charlieUid,
+      senderName: "Charlie",
+      senderTier: "USER",
+      text: "Text still works!",
+      createdAt: pastDate(8180),
+    })
+  );
+  // Group Support Staff Bob CANNOT modify pttAllowedUserIds
+  await assertFails(
+    bobDb.collection("directThreads").doc(freeGroupId).update({
+      pttAllowedUserIds: [charlieUid],
+      updatedAt: pastDate(8170),
+    })
+  );
+  // Group Admin Alice selects Charlie for PTT
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      pttAllowedUserIds: [charlieUid],
+      updatedAt: pastDate(8160),
+    })
+  );
+  // Now Charlie CAN enable Live PTT and CAN send a PTT audio clip!
+  await assertSucceeds(
+    charlieDb.collection("directThreads").doc(freeGroupId).update({
+      pttEnabledUserIds: [charlieUid],
+      updatedAt: pastDate(8150),
+    })
+  );
+  await assertSucceeds(
+    charlieDb.collection("directThreads").doc(freeGroupId).collection("messages").doc("msg_ptt_ok").set({
+      threadId: freeGroupId,
+      participantIds: makeParticipants(25),
+      senderId: charlieUid,
+      senderName: "Charlie",
+      senderTier: "USER",
+      text: "",
+      audioBase64: "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=",
+      audioDurationSec: 3,
+      createdAt: pastDate(8140),
+    })
+  );
+  // Group Admin Alice revokes Charlie's PTT & removes from pttEnabledUserIds
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      pttAllowedUserIds: [],
+      pttEnabledUserIds: [],
+      updatedAt: pastDate(8130),
+    })
+  );
+  await assertFails(
+    charlieDb.collection("directThreads").doc(freeGroupId).update({
+      pttEnabledUserIds: [charlieUid],
+      updatedAt: pastDate(8120),
+    })
+  );
+
+  // 6) Upgrade Alice to Elite Pro ($59.99/mo -> +5999 cents) => max 50 users (50 allowed, 51 denied)
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      proMember: true,
+      proTier: "ELITE_PRO",
+      proExpiresAtMillis: exp30d,
+      totalSpentCents: 999 + 2999 + 5999,
+      updatedAt: pastDate(8100),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      participantIds: makeParticipants(50),
+      updatedAt: pastDate(8050),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("directThreads").doc(freeGroupId).update({
+      participantIds: makeParticipants(51),
+      updatedAt: pastDate(8000),
+    })
+  );
+});
+
+
+
+
+
 
 
 

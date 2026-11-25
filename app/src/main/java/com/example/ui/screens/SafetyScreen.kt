@@ -23,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Campaign
@@ -72,23 +73,46 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.font.FontWeight
 import com.example.R
+import com.example.data.AdminNotification
 import com.example.data.AlertSeverity
 import com.example.data.AppBroadcast
 import com.example.data.AppConfig
+import com.example.data.AppPerkType
 import com.example.data.ChatRoom
+import com.example.data.CreatorSubscription
 import com.example.data.DirectoryEntry
+import com.example.data.PerkGrant
+import com.example.data.PointTransaction
 import com.example.data.PresenceStatus
+import com.example.data.RefundReport
+import com.example.data.RefundType
 import com.example.data.ReportStatus
 import com.example.data.SafetyReport
 import com.example.data.StaffCapabilities
 import com.example.data.StaffInvite
 import com.example.data.StaffRole
 import com.example.data.StaffTier
+import com.example.data.SuspensionRequest
+import com.example.data.SuspensionRequestStatus
 import com.example.data.UiState
 import com.example.data.UserAlert
+import com.example.data.UserFileNote
+import com.example.data.UserModerationFile
 import com.example.data.UserProfile
+import com.example.ui.components.AdminNotificationsCard
+import com.example.ui.components.AdminReviewSuspensionRequestDialog
+import com.example.ui.components.AppPerkGrantsSection
+import com.example.ui.components.GrantAppPerkDialog
+import com.example.ui.components.IssueRefundDialog
+import com.example.ui.components.PendingSuspensionRequestsCard
 import com.example.ui.components.PresenceStatusDot
+import com.example.ui.components.RefundsManagementSection
+import com.example.ui.components.RequestSuspensionDialog
+import com.example.ui.components.ResolveInvestigationDialog
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.SupportRequestSuspensionCard
+import com.example.ui.components.UserFileNotesDialog
+import com.example.ui.components.UserModerationFilesCard
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
@@ -97,6 +121,8 @@ import com.example.ui.theme.ModAmber
 import com.example.ui.theme.PresenceOnlineGreen
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.VoiceCyan
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 
 @Composable
 fun SafetyScreen(
@@ -128,7 +154,9 @@ fun SafetyScreen(
         disableMic: Boolean,
         disableVideo: Boolean,
         suspendedUntilMillis: Long,
-        suspensionReason: String
+        suspensionReason: String,
+        pointsBalance: Long?,
+        proLifetime: Boolean?
     ) -> Unit,
     onSuspendUser: (targetUserId: String, targetName: String, minutes: Long, reason: String) -> Unit,
     onSendDirectAlert: (targetUserId: String, targetName: String, title: String, message: String, severity: AlertSeverity) -> Unit,
@@ -150,7 +178,58 @@ fun SafetyScreen(
         severity: AlertSeverity,
         onSent: () -> Unit
     ) -> Unit = { _, _, _, _ -> },
-    onDeleteAppBroadcast: (String) -> Unit = {}
+    onDeleteAppBroadcast: (String) -> Unit = {},
+    onBack: (() -> Unit)? = null,
+    moderationFiles: List<UserModerationFile> = emptyList(),
+    onObserveUserFileNotes: (String) -> Flow<List<UserFileNote>> = { flowOf(emptyList()) },
+    onResolveInvestigation: (
+        targetUserId: String,
+        targetName: String,
+        resolutionNote: String,
+        resetReportCount: Boolean,
+        onResolved: () -> Unit
+    ) -> Unit = { _, _, _, _, _ -> },
+    suspensionRequests: List<SuspensionRequest> = emptyList(),
+    onSubmitSuspensionRequest: (
+        targetUserId: String,
+        targetName: String,
+        reason: String,
+        onSubmitted: () -> Unit
+    ) -> Unit = { _, _, _, _ -> },
+    onAdminReviewSuspensionRequest: (
+        request: SuspensionRequest,
+        decision: SuspensionRequestStatus,
+        timedHours: Int,
+        adminNote: String,
+        onReviewed: () -> Unit
+    ) -> Unit = { _, _, _, _, _ -> },
+    refundReports: List<RefundReport> = emptyList(),
+    perkGrants: List<PerkGrant> = emptyList(),
+    adminNotifications: List<AdminNotification> = emptyList(),
+    allTransactions: List<PointTransaction> = emptyList(),
+    allCreatorSubscriptions: List<CreatorSubscription> = emptyList(),
+    onIssueRefund: (
+        targetUserId: String,
+        targetName: String,
+        refundType: RefundType,
+        itemLabel: String,
+        amountCents: Long,
+        transactionId: String,
+        subscriptionId: String,
+        reason: String,
+        onIssued: () -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _, _, _ -> },
+    onAcknowledgeRefundReport: (String) -> Unit = {},
+    onMarkAdminNotificationRead: (String) -> Unit = {},
+    onGrantAppPerk: (
+        targetUserId: String,
+        targetName: String,
+        perkType: AppPerkType,
+        detailValue: String,
+        pointsAmount: Long,
+        reason: String,
+        onGranted: () -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _ -> }
 ) {
     val reports = (reportsState as? UiState.Success)?.data.orEmpty()
     val openCount = reports.count { it.statusEnum() == ReportStatus.OPEN }
@@ -188,6 +267,12 @@ fun SafetyScreen(
     var userBeingSentToSupport by remember { mutableStateOf<UserProfile?>(null) }
     var alertBeingEdited by remember { mutableStateOf<UserAlert?>(null) }
     var showSendBroadcastDialog by remember { mutableStateOf(false) }
+    var inspectingModerationFile by remember { mutableStateOf<UserModerationFile?>(null) }
+    var resolvingModerationFile by remember { mutableStateOf<UserModerationFile?>(null) }
+    var supportRequestTarget by remember { mutableStateOf<DirectoryEntry?>(null) }
+    var reviewingSuspensionRequest by remember { mutableStateOf<SuspensionRequest?>(null) }
+    var showIssueRefundDialog by remember { mutableStateOf(false) }
+    var showGrantPerkDialog by remember { mutableStateOf(false) }
 
     val filteredUsers = remember(allUsers, userSearch, staffTierByUid) {
         val q = userSearch.trim()
@@ -212,27 +297,47 @@ fun SafetyScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item(key = "header") {
-                Column {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = if (staffCapabilities.isAdmin) "Admin & Safety Command" else "Safety Center",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        StaffTierBadge(tier = staffCapabilities.tier)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (onBack != null) {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("safety_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "Back",
+                                tint = MaterialTheme.colorScheme.onBackground
+                            )
+                        }
                     }
-                    Text(
-                        text = if (staffCapabilities.isAdmin) {
-                            "Manage Support Staff, user permissions, alerts, and safety reports"
-                        } else {
-                            "Incident reports, community shield & personal blocklist"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = if (staffCapabilities.isAdmin) "Admin & Safety Command" else "Safety Center",
+                                style = MaterialTheme.typography.headlineMedium,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            StaffTierBadge(tier = staffCapabilities.tier)
+                        }
+                        Text(
+                            text = if (staffCapabilities.isAdmin) {
+                                "Manage Support Staff, user files, investigations, alerts, and safety reports"
+                            } else {
+                                "Incident reports, community shield & personal blocklist"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
@@ -939,7 +1044,7 @@ fun SafetyScreen(
                                         value = bannerTitleDraft,
                                         onValueChange = { bannerTitleDraft = it.take(80) },
                                         label = { Text("Banner Headline") },
-                                        placeholder = { Text("e.g., Welcome to VoxStage v2!") },
+                                        placeholder = { Text("e.g., Welcome to VOX v2!") },
                                         singleLine = true,
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -1005,6 +1110,58 @@ fun SafetyScreen(
                 }
             }
 
+            // Staff-only Support Suspension Requests, Refunds, App Perks & Admin Alerts
+            if (staffCapabilities.isStaff) {
+                if (staffCapabilities.isAdmin) {
+                    item(key = "admin_notifications_section") {
+                        AdminNotificationsCard(
+                            notifications = adminNotifications,
+                            onMarkRead = onMarkAdminNotificationRead
+                        )
+                    }
+                }
+                item(key = "staff_refunds_section") {
+                    RefundsManagementSection(
+                        isAdmin = staffCapabilities.isAdmin,
+                        isSupport = staffCapabilities.isSupport,
+                        refundReports = refundReports,
+                        onOpenIssueRefund = { showIssueRefundDialog = true },
+                        onAcknowledgeReport = onAcknowledgeRefundReport
+                    )
+                }
+                item(key = "staff_app_perks_section") {
+                    AppPerkGrantsSection(
+                        perkGrants = perkGrants,
+                        onOpenGrantPerk = { showGrantPerkDialog = true }
+                    )
+                }
+                item(key = "staff_suspension_requests_queue") {
+                    PendingSuspensionRequestsCard(
+                        requests = suspensionRequests,
+                        isAdmin = staffCapabilities.isAdmin,
+                        onReviewRequest = { req -> reviewingSuspensionRequest = req }
+                    )
+                }
+                if (staffCapabilities.isSupport) {
+                    item(key = "support_request_suspension_section") {
+                        SupportRequestSuspensionCard(
+                            directoryEntries = directoryEntries,
+                            currentUserId = currentUserId,
+                            onSelectTarget = { entry -> supportRequestTarget = entry }
+                        )
+                    }
+                }
+                item(key = "staff_moderation_files_section") {
+                    UserModerationFilesCard(
+                        moderationFiles = moderationFiles,
+                        nowMillis = nowMillis,
+                        isAdmin = staffCapabilities.isAdmin,
+                        onInspectFile = { file -> inspectingModerationFile = file },
+                        onResolveFile = { file -> resolvingModerationFile = file }
+                    )
+                }
+            }
+
             item(key = "stats_row") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1064,7 +1221,7 @@ fun SafetyScreen(
                                 color = SafetyEmerald
                             )
                             Text(
-                                text = "Admins (Red) · Support Staff (Green) · Members (Blue). Room Creators act as Room Admins and can appoint Co-Admins.",
+                                text = "Admins (Red) · Support Staff (Green) · Pro (Blue) · Room Admins/Co-Admins (Purple). Report limit: up to 3 different users, 1 report per user per hour.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -1250,10 +1407,96 @@ fun SafetyScreen(
         }
     }
 
+    inspectingModerationFile?.let { file ->
+        val notesFlow = remember(file.userId) { onObserveUserFileNotes(file.userId) }
+        UserFileNotesDialog(
+            file = file,
+            notesFlow = notesFlow,
+            isAdmin = staffCapabilities.isAdmin,
+            onDismiss = { inspectingModerationFile = null },
+            onResolveClick = {
+                inspectingModerationFile = null
+                resolvingModerationFile = file
+            }
+        )
+    }
+
+    resolvingModerationFile?.let { file ->
+        ResolveInvestigationDialog(
+            file = file,
+            onConfirmResolve = { resolutionNote, resetReportCount ->
+                onResolveInvestigation(
+                    file.userId,
+                    file.targetName.ifBlank { "User" },
+                    resolutionNote,
+                    resetReportCount
+                ) {
+                    resolvingModerationFile = null
+                }
+            },
+            onDismiss = { resolvingModerationFile = null }
+        )
+    }
+
+    supportRequestTarget?.let { target ->
+        RequestSuspensionDialog(
+            targetName = target.displayName.ifBlank { target.userId.take(10) },
+            onSubmit = { reason ->
+                onSubmitSuspensionRequest(
+                    target.userId,
+                    target.displayName.ifBlank { "User" },
+                    reason
+                ) {
+                    supportRequestTarget = null
+                }
+            },
+            onDismiss = { supportRequestTarget = null }
+        )
+    }
+
+    reviewingSuspensionRequest?.let { req ->
+        AdminReviewSuspensionRequestDialog(
+            request = req,
+            onSubmitDecision = { decision, timedHours, adminNote ->
+                onAdminReviewSuspensionRequest(req, decision, timedHours, adminNote) {
+                    reviewingSuspensionRequest = null
+                }
+            },
+            onDismiss = { reviewingSuspensionRequest = null }
+        )
+    }
+
+    if (showIssueRefundDialog && staffCapabilities.isStaff) {
+        IssueRefundDialog(
+            directoryEntries = directoryEntries,
+            allTransactions = allTransactions,
+            allCreatorSubscriptions = allCreatorSubscriptions,
+            isSupportOnly = staffCapabilities.isSupport && !staffCapabilities.isAdmin,
+            onDismiss = { showIssueRefundDialog = false },
+            onConfirmRefund = { targetUid, targetName, refundType, itemLabel, amountCents, txId, subId, reason ->
+                onIssueRefund(targetUid, targetName, refundType, itemLabel, amountCents, txId, subId, reason) {
+                    showIssueRefundDialog = false
+                }
+            }
+        )
+    }
+
+    if (showGrantPerkDialog && staffCapabilities.isStaff) {
+        GrantAppPerkDialog(
+            directoryEntries = directoryEntries,
+            onDismiss = { showGrantPerkDialog = false },
+            onConfirmGrant = { targetUid, targetName, perkType, detailValue, pts, reason ->
+                onGrantAppPerk(targetUid, targetName, perkType, detailValue, pts, reason) {
+                    showGrantPerkDialog = false
+                }
+            }
+        )
+    }
+
     userBeingEdited?.let { target ->
         EditUserAdminDialog(
             profile = target,
-            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason ->
+            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason, pointsBalance, proLifetime ->
                 onAdminEditUser(
                     target.userId,
                     displayName,
@@ -1265,7 +1508,9 @@ fun SafetyScreen(
                     disableMic,
                     disableVideo,
                     suspendedUntilMillis,
-                    suspensionReason
+                    suspensionReason,
+                    pointsBalance,
+                    proLifetime
                 )
             },
             onDismiss = { userBeingEdited = null }
@@ -1468,7 +1713,7 @@ fun SafetyScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        text = "This announcement will appear live for every signed-in user across VoxStage.",
+                        text = "This announcement will appear live for every signed-in user across VOX.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

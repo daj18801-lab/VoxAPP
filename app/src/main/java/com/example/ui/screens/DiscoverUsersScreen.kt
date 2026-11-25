@@ -95,6 +95,7 @@ import com.example.ui.components.ProfilePostCard
 import com.example.ui.components.SharePostDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
+import com.example.ui.components.TopBarSafetyShieldButton
 import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
@@ -158,7 +159,9 @@ fun DiscoverUsersScreen(
         onInsufficientPoints: () -> Unit,
         onPosted: () -> Unit
     ) -> Unit = { _, _, _, _, _, _ -> },
-    followerCountsByUserId: Map<String, Int> = emptyMap()
+    followerCountsByUserId: Map<String, Int> = emptyMap(),
+    safetyBadgeCount: Int = 0,
+    onOpenSafety: () -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedTab by remember { mutableIntStateOf(0) } // 0=People, 1=Recent Photos, 2=Posts, 3=Suggested, 4=Friends, 5=Support, 6=Top 10
@@ -441,20 +444,10 @@ fun DiscoverUsersScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Surface(
-                            shape = CircleShape,
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            modifier = Modifier.size(46.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Explore,
-                                    contentDescription = "Discover users",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                        }
+                        TopBarSafetyShieldButton(
+                            badgeCount = safetyBadgeCount,
+                            onClick = onOpenSafety
+                        )
                     }
 
                     OutlinedTextField(
@@ -1633,7 +1626,7 @@ fun DiscoverUsersScreen(
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                     Text(
-                                        text = "Members ranked live by total followers across VoxStage.",
+                                        text = "Members ranked live by total followers across VOX.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )

@@ -121,7 +121,8 @@ enum class MessageType {
 enum class ModActionType(val label: String) {
     MUTE("Muted user"),
     UNMUTE("Unmuted user"),
-    BOUNCE("Bounced from room"),
+    BOUNCE("Bounced from room (24h)"),
+    UNBOUNCE("Removed 24h room bounce"),
     KICK("Kicked from room"),
     SUSPEND("Suspended user"),
     BAN("Banned user"),
@@ -129,6 +130,7 @@ enum class ModActionType(val label: String) {
     DELETE_MSG("Redacted message"),
     AUTO_MOD("Auto-Mod triggered"),
     LOCK_ROOM("Toggled room lock"),
+    PIN_LOCK("Updated 4-digit room PIN"),
     STAGE_MUTE("Toggled stage mic lock"),
     PROMOTE_MOD("Added Room Co-Admin"),
     DEMOTE_MOD("Removed Room Co-Admin"),
@@ -316,6 +318,7 @@ enum class UserSex(val label: String) {
 
 enum class AgeFilterRange(val label: String, val minAge: Int, val maxAge: Int) {
     ALL("Any Age", 0, 999),
+    AGE_13_17("13–17", 13, 17),
     AGE_18_24("18–24", 18, 24),
     AGE_25_34("25–34", 25, 34),
     AGE_35_44("35–44", 35, 44),
@@ -352,6 +355,42 @@ fun formatAppTimeSpent(totalSeconds: Long): String {
     }
 }
 
+enum class ProTier(
+    val label: String,
+    val priceCents: Long,
+    val priceLabel: String,
+    val maxGroupDmMembers: Int,
+    val playProductId: String
+) {
+    FREE("Free", 0L, "$0", 7, ""),
+    PRO("VOX Pro", 999L, "$9.99/mo", 15, "voxstage_pro_monthly"),
+    VIP_PRO("VIP Pro", 2999L, "$29.99/mo", 25, "voxstage_vip_pro_monthly"),
+    ELITE_PRO("Elite Pro", 5999L, "$59.99/mo", 50, "voxstage_elite_pro_monthly");
+
+    fun isPaidPro(): Boolean = this != FREE
+
+    fun transactionType(): PointTransactionType = when (this) {
+        VIP_PRO -> PointTransactionType.VIP_PRO_MEMBERSHIP
+        ELITE_PRO -> PointTransactionType.ELITE_PRO_MEMBERSHIP
+        else -> PointTransactionType.PRO_MEMBERSHIP
+    }
+
+    companion object {
+        fun fromRaw(raw: String?): ProTier =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: FREE
+
+        fun fromProductId(productId: String?): ProTier =
+            entries.firstOrNull { it.playProductId.isNotEmpty() && it.playProductId == productId } ?: PRO
+
+        fun requiredTierForGroupSize(memberCount: Int): ProTier = when {
+            memberCount <= FREE.maxGroupDmMembers -> FREE
+            memberCount <= PRO.maxGroupDmMembers -> PRO
+            memberCount <= VIP_PRO.maxGroupDmMembers -> VIP_PRO
+            else -> ELITE_PRO
+        }
+    }
+}
+
 @Keep
 @IgnoreExtraProperties
 data class UserProfile(
@@ -380,6 +419,10 @@ data class UserProfile(
     val totalSpentCents: Long = 0L,
     val proMember: Boolean = false,
     val proExpiresAtMillis: Long = 0L,
+    val proLifetime: Boolean = false,
+    val proTier: String = ProTier.FREE.name,
+    val profileViewersUnlockedUntilMillis: Long = 0L,
+    val priorityChirpOptIn: Boolean = false,
     val profileBoostedUntilMillis: Long = 0L,
     val spotlightFrameUntilMillis: Long = 0L,
     val spotlightFrameColorHex: String = SpotlightFrameColor.ELECTRIC_CYAN.primaryHex,
@@ -395,6 +438,7 @@ data class UserProfile(
     val ownedPttChirps: List<String> = emptyList(),
     val selectedPttChirp: String = PttChirpStyle.STANDARD.id,
     val dmPolicy: String = DmPolicy.OPEN.name,
+    val age13Verified: Boolean = false,
     val adultVerified: Boolean = false,
     val birthYear: Long = 0L,
     val sex: String = UserSex.UNSPECIFIED.name,
@@ -436,26 +480,50 @@ data class UserProfile(
     fun ownsPttChirp(chirp: PttChirpStyle): Boolean =
         chirp == PttChirpStyle.STANDARD || ownedPttChirps.contains(chirp.id)
     fun effectiveAge(): Int {
-        if (age in 18L..120L) return age.toInt()
+        if (age in 13L..120L) return age.toInt()
         if (birthYear >= 1900L) {
             val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
             val derived = currentYear - birthYear.toInt()
-            if (derived in 18..120) return derived
+            if (derived in 13..120) return derived
         }
         return 0
     }
     fun isProActive(
         tier: StaffTier = StaffTier.USER,
         nowMs: Long = System.currentTimeMillis()
-    ): Boolean = tier.isStaff() || (proMember && proExpiresAtMillis > nowMs)
+    ): Boolean = tier.isStaff() || proLifetime || (proMember && proExpiresAtMillis > nowMs)
 
     fun isProSubscriberOnly(nowMs: Long = System.currentTimeMillis()): Boolean =
-        proMember && proExpiresAtMillis > nowMs
+        proLifetime || (proMember && proExpiresAtMillis > nowMs)
+
+    fun effectiveProTier(
+        tier: StaffTier = StaffTier.USER,
+        nowMs: Long = System.currentTimeMillis()
+    ): ProTier {
+        if (tier == StaffTier.ADMIN) return ProTier.ELITE_PRO
+        if (!isProSubscriberOnly(nowMs)) return ProTier.FREE
+        val parsed = ProTier.fromRaw(proTier)
+        return if (parsed == ProTier.FREE) ProTier.PRO else parsed
+    }
+
+    fun maxGroupDmMembers(
+        tier: StaffTier = StaffTier.USER,
+        nowMs: Long = System.currentTimeMillis()
+    ): Int = effectiveProTier(tier, nowMs).maxGroupDmMembers
 
     fun proDaysRemaining(nowMs: Long = System.currentTimeMillis()): Int {
+        if (proLifetime) return Int.MAX_VALUE
         val diff = (proExpiresAtMillis - nowMs).coerceAtLeast(0L)
         return ((diff + 86_399_999L) / 86_400_000L).toInt()
     }
+
+    fun hasProfileViewersUnlocked(
+        tier: StaffTier = StaffTier.USER,
+        nowMs: Long = System.currentTimeMillis()
+    ): Boolean = isProActive(tier, nowMs) || profileViewersUnlockedUntilMillis > nowMs
+
+    fun profileViewersUnlockRemainingLabel(nowMs: Long = System.currentTimeMillis()): String =
+        formatRemainingHoursLabel(profileViewersUnlockedUntilMillis, nowMs)
 
     /** Free members: 5-second PTT clips; Pro members & Staff: 1-minute (60s) PTT clips. */
     fun pttMaxDurationSeconds(
@@ -469,6 +537,23 @@ data class UserProfile(
         if (!adultVerified || birthYear < 1900L) return false
         val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
         return (currentYear - birthYear.toInt()) >= 18
+    }
+
+    fun isAge13Plus(): Boolean {
+        val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+        if (birthYear >= 1900L) {
+            val derived = currentYear - birthYear.toInt()
+            if (derived < 13) return false
+            if (derived >= 13) return true
+        }
+        if (age13Verified || isAdult18Plus()) return true
+        return age in 13L..120L
+    }
+
+    fun isConfirmedUnder13(): Boolean {
+        if (birthYear < 1900L) return false
+        val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+        return (currentYear - birthYear.toInt()) < 13
     }
     fun recentPictureUploadsCount(nowMs: Long = System.currentTimeMillis()): Int =
         pictureUploadTimestamps.count { nowMs - it < PICTURE_UPLOAD_WINDOW_MS }
@@ -604,7 +689,11 @@ data class ChatRoom(
     val participantCount: Long = 0L,
     val moderatorIds: List<String> = emptyList(),
     val bannedUserIds: List<String> = emptyList(),
+    val bannedNamesByUserId: Map<String, String> = emptyMap(),
     val bouncedUntilByUserId: Map<String, Long> = emptyMap(),
+    val bouncedNamesByUserId: Map<String, String> = emptyMap(),
+    val pinLocked: Boolean = false,
+    val roomPinCode: String = "",
     val mutedUserIds: List<String> = emptyList(),
     val blockedWords: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
@@ -622,13 +711,33 @@ data class ChatRoom(
         hostId == uid || moderatorIds.contains(uid) || staffTier.isStaff()
     fun canBanInRoom(uid: String, staffTier: StaffTier = StaffTier.USER): Boolean =
         hostId == uid || staffTier == StaffTier.ADMIN
+    fun canManageBansAndBounces(uid: String, staffTier: StaffTier = StaffTier.USER): Boolean =
+        hostId == uid || staffTier == StaffTier.ADMIN
+    fun canManagePinLock(uid: String, staffTier: StaffTier = StaffTier.USER): Boolean =
+        hostId == uid || staffTier == StaffTier.ADMIN
     fun canManageCoAdmins(uid: String, staffTier: StaffTier = StaffTier.USER): Boolean =
         hostId == uid || staffTier == StaffTier.ADMIN
     fun canEditOrCloseRoom(uid: String, staffTier: StaffTier = StaffTier.USER): Boolean =
         hostId == uid || staffTier == StaffTier.ADMIN
+    fun canEnterInvisibleInRoom(uid: String, staffCapabilities: StaffCapabilities): Boolean =
+        hostId == uid || staffCapabilities.effectiveCanEnterInvisible
+    fun requiresPinForUser(uid: String, staffTier: StaffTier = StaffTier.USER): Boolean =
+        pinLocked && roomPinCode.length == 4 && !hasModPrivileges(uid, staffTier)
 
     fun isBouncedOut(uid: String, nowMs: Long = System.currentTimeMillis()): Boolean =
         (bouncedUntilByUserId[uid] ?: 0L) > nowMs
+
+    fun activeBounces(nowMs: Long = System.currentTimeMillis()): List<Triple<String, String, Long>> =
+        bouncedUntilByUserId.entries
+            .filter { it.value > nowMs }
+            .sortedByDescending { it.value }
+            .map { (uid, untilMs) ->
+                val name = bouncedNamesByUserId[uid].orEmpty().ifBlank { "User ${uid.take(8)}" }
+                Triple(uid, name, untilMs)
+            }
+
+    fun bannedDisplayName(uid: String): String =
+        bannedNamesByUserId[uid].orEmpty().ifBlank { "User ${uid.take(8)}" }
 
     fun remainingBounceLabel(uid: String, nowMs: Long = System.currentTimeMillis()): String {
         val untilMs = bouncedUntilByUserId[uid] ?: 0L
@@ -763,6 +872,9 @@ data class DirectoryEntry(
     val staffTier: String = StaffTier.USER.name,
     val proMember: Boolean = false,
     val proExpiresAtMillis: Long = 0L,
+    val proLifetime: Boolean = false,
+    val proTier: String = ProTier.FREE.name,
+    val priorityChirpOptIn: Boolean = false,
     val profileBoostedUntilMillis: Long = 0L,
     val spotlightFrameUntilMillis: Long = 0L,
     val spotlightFrameColorHex: String = SpotlightFrameColor.ELECTRIC_CYAN.primaryHex,
@@ -780,7 +892,15 @@ data class DirectoryEntry(
 ) {
     fun tierEnum(): StaffTier = StaffTier.fromRaw(staffTier)
     fun isProActive(nowMs: Long = System.currentTimeMillis()): Boolean =
-        proMember && proExpiresAtMillis > nowMs
+        proLifetime || (proMember && proExpiresAtMillis > nowMs)
+    fun effectiveProTier(nowMs: Long = System.currentTimeMillis()): ProTier {
+        if (tierEnum() == StaffTier.ADMIN) return ProTier.ELITE_PRO
+        if (!isProActive(nowMs)) return ProTier.FREE
+        val parsed = ProTier.fromRaw(proTier)
+        return if (parsed == ProTier.FREE) ProTier.PRO else parsed
+    }
+    fun maxGroupDmMembers(nowMs: Long = System.currentTimeMillis()): Int =
+        effectiveProTier(nowMs).maxGroupDmMembers
     fun isProfileBoosted(nowMs: Long = System.currentTimeMillis()): Boolean =
         profileBoostedUntilMillis > nowMs
     fun hasActiveSpotlightFrame(nowMs: Long = System.currentTimeMillis()): Boolean =
@@ -791,7 +911,7 @@ data class DirectoryEntry(
     fun sexEnum(): UserSex = UserSex.fromRaw(sex)
     fun appearanceStatusEnum(): PresenceStatus = PresenceStatus.fromRaw(appearanceStatus)
     fun formattedTimeSpent(): String = formatAppTimeSpent(totalTimeSpentSec)
-    fun effectiveAge(): Int = if (age in 18L..120L) age.toInt() else 0
+    fun effectiveAge(): Int = if (age in 13L..120L) age.toInt() else 0
 
     /**
      * Returns true only if the user explicitly has online = true AND their last heartbeat
@@ -872,8 +992,16 @@ data class DirectThread(
     val participantIds: List<String> = emptyList(),
     val isGroup: Boolean = false,
     val groupName: String = "",
+    val groupAdminId: String = "",
+    val groupSupportIds: List<String> = emptyList(),
+    val pttAllowedUserIds: List<String> = emptyList(),
     val participantNamesById: Map<String, String> = emptyMap(),
     val kickedUserIds: List<String> = emptyList(),
+    val mutedUserIds: List<String> = emptyList(),
+    val bouncedUntilByUserId: Map<String, Long> = emptyMap(),
+    val bouncedNamesByUserId: Map<String, String> = emptyMap(),
+    val bannedUserIds: List<String> = emptyList(),
+    val bannedNamesByUserId: Map<String, String> = emptyMap(),
     val blockedByUserIds: List<String> = emptyList(),
     val userAId: String = "",
     val userAName: String = "",
@@ -902,6 +1030,18 @@ data class DirectThread(
     val talkStreakCount: Int = 0,
     val talkStreakLastMutualDay: String = "",
     val lastMessageDayByUserId: Map<String, String> = emptyMap(),
+    val priorityChirpOptInUserIds: List<String> = emptyList(),
+    val lastPriorityChirpAtMillis: Long = 0L,
+    val lastPriorityChirpSenderId: String = "",
+    val lastPriorityChirpSenderName: String = "",
+    val lastPriorityChirpMessage: String = "",
+    val lastPriorityChirpPoints: Int = 0,
+    val lastPriorityChirpAcknowledgedBy: List<String> = emptyList(),
+    val bannerText: String = "",
+    val bannerAuthorId: String = "",
+    val bannerAuthorName: String = "",
+    val bannerColorHex: String = "",
+    val bannerExpiresAtMillis: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -913,6 +1053,44 @@ data class DirectThread(
     )
     fun isUnreadFor(myUid: String): Boolean = unreadByUserIds.contains(myUid)
     fun isUserKicked(uid: String): Boolean = kickedUserIds.contains(uid)
+    fun effectiveGroupAdminId(): String =
+        groupAdminId.ifBlank { userAId.ifBlank { participantIds.firstOrNull().orEmpty() } }
+    fun isGroupAdmin(uid: String): Boolean = isGroup && uid.isNotBlank() && effectiveGroupAdminId() == uid
+    fun isGroupSupport(uid: String): Boolean = isGroup && uid.isNotBlank() && groupSupportIds.contains(uid)
+    fun canModerateGroup(uid: String): Boolean = isGroupAdmin(uid) || isGroupSupport(uid)
+    fun requiresAdminPttSelection(): Boolean = isGroup && participantIds.size > PTT_ADMIN_SELECTION_THRESHOLD
+    fun isPttAllowedInGroup(uid: String, isAppAdmin: Boolean = false): Boolean =
+        !requiresAdminPttSelection() || isGroupAdmin(uid) || isAppAdmin || pttAllowedUserIds.contains(uid)
+    fun isMutedInGroup(uid: String): Boolean = isGroup && mutedUserIds.contains(uid)
+    fun isBannedInGroup(uid: String): Boolean = isGroup && bannedUserIds.contains(uid)
+    fun groupBounceUntilMillis(uid: String): Long = bouncedUntilByUserId[uid] ?: 0L
+    fun isBouncedInGroup(uid: String, nowMs: Long = System.currentTimeMillis()): Boolean =
+        isGroup && groupBounceUntilMillis(uid) > nowMs
+    fun activeGroupBounces(nowMs: Long = System.currentTimeMillis()): List<Pair<String, Long>> =
+        bouncedUntilByUserId.entries
+            .filter { it.value > nowMs }
+            .sortedBy { it.value }
+            .map { it.key to it.value }
+    fun bouncedGroupDisplayName(uid: String): String =
+        bouncedNamesByUserId[uid]?.takeIf { it.isNotBlank() }
+            ?: participantNamesById[uid]?.takeIf { it.isNotBlank() }
+            ?: "Member"
+    fun bannedGroupDisplayName(uid: String): String =
+        bannedNamesByUserId[uid]?.takeIf { it.isNotBlank() }
+            ?: participantNamesById[uid]?.takeIf { it.isNotBlank() }
+            ?: "Member"
+    fun remainingGroupBounceLabel(uid: String, nowMs: Long = System.currentTimeMillis()): String {
+        val diffMs = (groupBounceUntilMillis(uid) - nowMs).coerceAtLeast(0L)
+        if (diffMs <= 0L) return ""
+        val totalMinutes = ((diffMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+        val hours = totalMinutes / 60L
+        val mins = totalMinutes % 60L
+        return when {
+            hours > 0L && mins > 0L -> "${hours}h ${mins}m remaining"
+            hours > 0L -> "${hours}h remaining"
+            else -> "${mins}m remaining"
+        }
+    }
     fun isBlockedBy(uid: String): Boolean = blockedByUserIds.contains(uid)
     fun hasAnyBlock(): Boolean = blockedByUserIds.isNotEmpty()
     fun isPttEnabledFor(uid: String): Boolean = pttEnabledUserIds.contains(uid)
@@ -939,6 +1117,18 @@ data class DirectThread(
         todayKey: String = utcDayKey(),
         yesterdayKey: String = utcYesterdayKey()
     ): Boolean = activeTalkStreakCount(todayKey, yesterdayKey) >= 3 && talkStreakLastMutualDay == yesterdayKey
+    fun isPriorityChirpOptedIn(uid: String): Boolean = priorityChirpOptInUserIds.contains(uid)
+    fun hasActivePriorityChirpFor(uid: String, nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (isGroup || lastPriorityChirpAtMillis <= 0L) return false
+        if (lastPriorityChirpSenderId.isBlank() || lastPriorityChirpSenderId == uid) return false
+        if (lastPriorityChirpAcknowledgedBy.contains(uid)) return false
+        // Keep unacknowledged priority chirp pinned at top for up to 24 hours
+        return (nowMs - lastPriorityChirpAtMillis) <= 24L * 60L * 60L * 1000L
+    }
+    fun hasActiveBanner(nowMs: Long = System.currentTimeMillis()): Boolean =
+        bannerText.isNotBlank() && bannerExpiresAtMillis > nowMs
+    fun bannerRemainingLabel(nowMs: Long = System.currentTimeMillis()): String =
+        formatRemainingHoursLabel(bannerExpiresAtMillis, nowMs)
     fun displayTitle(myUid: String): String {
         if (!isGroup) return otherName(myUid)
         if (groupName.isNotBlank()) return groupName
@@ -958,6 +1148,13 @@ data class DirectThread(
     }
 
     companion object {
+        const val FREE_MAX_GROUP_MEMBERS = 7
+        const val PRO_MAX_GROUP_MEMBERS = 15
+        const val VIP_PRO_MAX_GROUP_MEMBERS = 25
+        const val ELITE_PRO_MAX_GROUP_MEMBERS = 50
+        const val MAX_GROUP_MEMBERS = 50
+        const val PTT_ADMIN_SELECTION_THRESHOLD = 15
+
         val DISAPPEARING_OPTIONS_SEC = listOf(0L, 30L, 300L, 3600L, 86400L)
 
         fun formatDisappearingDuration(seconds: Long): String = when (seconds) {
@@ -1005,15 +1202,18 @@ data class DirectMessage(
     val expiresAtMillis: Long = 0L,
     val messageType: String = TYPE_TEXT,
     val reactionsByUserId: Map<String, String> = emptyMap(),
+    val hideSenderName: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     fun senderTierEnum(): StaffTier = StaffTier.fromRaw(senderTier)
+    fun isNameHiddenFor(viewerUid: String): Boolean = hideSenderName && senderId != viewerUid
     fun hasVoiceNote(): Boolean = audioBase64.isNotBlank()
     fun isScreenshotNotice(): Boolean = messageType == TYPE_SCREENSHOT
     fun isSupportHandoffNotice(): Boolean = messageType == TYPE_SUPPORT_HANDOFF
+    fun isPriorityChirp(): Boolean = messageType == TYPE_PRIORITY_CHIRP
     fun isSystemNotice(): Boolean = isScreenshotNotice() || isSupportHandoffNotice()
     fun isStandaloneThumbsUp(): Boolean =
-        !isSystemNotice() && imageBase64.isBlank() && audioBase64.isBlank() && text.trim() == "👍"
+        !isSystemNotice() && !isPriorityChirp() && imageBase64.isBlank() && audioBase64.isBlank() && text.trim() == "👍"
     fun myReaction(myUid: String): String? = reactionsByUserId[myUid]?.takeIf { it.isNotBlank() }
     fun groupedReactions(): List<Pair<String, Int>> =
         reactionsByUserId.values
@@ -1041,6 +1241,7 @@ data class DirectMessage(
         const val TYPE_TEXT = "TEXT"
         const val TYPE_SCREENSHOT = "SCREENSHOT"
         const val TYPE_SUPPORT_HANDOFF = "SUPPORT_HANDOFF"
+        const val TYPE_PRIORITY_CHIRP = "PRIORITY_CHIRP"
         val ALLOWED_REACTIONS = listOf("❤️", "👍", "😂", "😮", "😢", "🔥")
     }
 }
@@ -1126,7 +1327,12 @@ enum class PointTransactionType(val label: String) {
     DAILY_STREAK_BONUS("7-Day Login Streak (+0.5 pt)"),
     REFERRAL_BONUS("Invite-a-Friend Bonus (+2 pts)"),
     UNLOCK_DM("Paid Private Message (\$5)"),
-    PRO_MEMBERSHIP("VoxStage Pro (\$9.99/mo)");
+    PRO_MEMBERSHIP("VOX Pro (\$9.99/mo)"),
+    VIP_PRO_MEMBERSHIP("VIP Pro (\$29.99/mo)"),
+    ELITE_PRO_MEMBERSHIP("Elite Pro (\$59.99/mo)"),
+    UNLOCK_PROFILE_VIEWERS("Who Viewed My Profile Unlock (2 pts)"),
+    PRIORITY_CHIRP("Priority Break-In Chirp"),
+    DM_SCROLLING_BANNER("24h DM Scrolling Banner (1 pt)");
 
     companion object {
         fun fromRaw(raw: String?): PointTransactionType =
@@ -1146,11 +1352,12 @@ data class CreatorSubscription(
     val platformShareCents: Long = 1500L,
     val active: Boolean = true,
     val expiresAtMillis: Long = 0L,
+    val refunded: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun isCurrentlyActive(nowMs: Long = System.currentTimeMillis()): Boolean =
-        active && expiresAtMillis > nowMs
+        active && !refunded && expiresAtMillis > nowMs
 
     fun daysRemaining(nowMs: Long = System.currentTimeMillis()): Int {
         val diff = (expiresAtMillis - nowMs).coerceAtLeast(0L)
@@ -1174,6 +1381,11 @@ data class PointTransaction(
     val platformShareCents: Long = 0L,
     val playOrderId: String = "",
     val playProductId: String = "",
+    val refunded: Boolean = false,
+    val refundedAtMillis: Long = 0L,
+    val refundedById: String = "",
+    val refundedByName: String = "",
+    val refundReason: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     fun typeEnum(): PointTransactionType = PointTransactionType.fromRaw(type)
@@ -1396,6 +1608,50 @@ data class ReferralRecord(
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
 
+@Keep
+@IgnoreExtraProperties
+data class ProfileViewRecord(
+    @DocumentId val id: String = "",
+    val targetUserId: String = "",
+    val viewerId: String = "",
+    val viewerName: String = "",
+    val viewerHandle: String = "",
+    val viewerColorHex: String = "#0088FF",
+    val viewerPhotoBase64: String = "",
+    val viewerTier: String = StaffTier.USER.name,
+    val viewerProMember: Boolean = false,
+    val viewedAtMillis: Long = 0L,
+    val viewedDayKey: String = "",
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun viewerTierEnum(): StaffTier = StaffTier.fromRaw(viewerTier)
+    fun isToday(todayKey: String = utcDayKey()): Boolean = viewedDayKey == todayKey
+
+    companion object {
+        const val UNLOCK_PRICE_POINTS = 2L
+        const val UNLOCK_DURATION_MS = 24L * 60L * 60L * 1000L
+    }
+}
+
+enum class DmBannerColor(
+    val label: String,
+    val hex: String
+) {
+    ELECTRIC_CYAN("Electric Cyan", "#0088FF"),
+    NEON_MAGENTA("Neon Pink", "#E11D74"),
+    SOLAR_GOLD("Solar Gold", "#D97706"),
+    LASER_EMERALD("Emerald Pulse", "#059669"),
+    ROYAL_VIOLET("Royal Violet", "#7C3AED");
+
+    companion object {
+        const val PRICE_POINTS = 1L
+        const val DURATION_MS = 24L * 60L * 60L * 1000L
+
+        fun fromHex(hex: String?): DmBannerColor =
+            entries.firstOrNull { it.hex.equals(hex, ignoreCase = true) } ?: ELECTRIC_CYAN
+    }
+}
+
 fun utcDayKey(nowMs: Long = System.currentTimeMillis()): String {
     val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
     cal.timeInMillis = nowMs
@@ -1436,5 +1692,270 @@ fun generateReferralCode(uid: String): String {
         "VOX-$fallback"
     }
 }
+
+enum class InvestigationStatus(val label: String) {
+    NONE("Clear"),
+    INVESTIGATING("Under Investigation"),
+    WARNING_ISSUED("Warning Issued"),
+    SUSPENDED_1H("1-Hour Suspension"),
+    SUSPENDED_2H("2-Hour Suspension"),
+    SUSPENDED_PENDING_REVIEW("Suspended · Pending Review"),
+    SUSPENDED_PENDING_ADMIN_REVIEW("Suspended · Pending Admin Review"),
+    RESOLVED("Investigation Resolved");
+
+    companion object {
+        fun fromRaw(raw: String?): InvestigationStatus =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: NONE
+    }
+}
+
+enum class FileNoteAction(val label: String) {
+    INVESTIGATION_STARTED("1st Report · Investigation Started"),
+    WARNING_ISSUED("2nd Report · Formal Warning Issued"),
+    SUSPENDED_1H("3rd Report · 1-Hour Suspension"),
+    SUSPENDED_2H("4th Report · 2-Hour Suspension"),
+    SUSPENDED_PENDING_REVIEW("5th+ Report · Suspended Until Resolved"),
+    INVESTIGATION_RESOLVED("Investigation Resolved by Staff"),
+    SUPPORT_SUSPENSION_REQUESTED("Support Requested Suspension (Pending Admin Review)"),
+    ADMIN_REVIEW_COMPLETED("Admin Reviewed Suspension Request");
+
+    companion object {
+        fun fromRaw(raw: String?): FileNoteAction =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: INVESTIGATION_STARTED
+    }
+}
+
+enum class SuspensionRequestStatus(val label: String) {
+    PENDING("Pending Admin Review"),
+    APPROVED_BAN("Approved · Account Banned"),
+    APPROVED_TIMED("Approved · Timed Suspension"),
+    DISMISSED_LIFTED("Dismissed · Suspension Lifted");
+
+    companion object {
+        fun fromRaw(raw: String?): SuspensionRequestStatus =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: PENDING
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class SuspensionRequest(
+    @DocumentId val id: String = "",
+    val targetUserId: String = "",
+    val targetName: String = "",
+    val requestedById: String = "",
+    val requestedByName: String = "",
+    val reason: String = "",
+    val roomId: String = "",
+    val status: String = SuspensionRequestStatus.PENDING.name,
+    val reviewedByAdminId: String = "",
+    val reviewedByAdminName: String = "",
+    val adminDecisionNote: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun statusEnum(): SuspensionRequestStatus = SuspensionRequestStatus.fromRaw(status)
+}
+
+@Keep
+@IgnoreExtraProperties
+data class ReportRateLimit(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val recentTargetTimestamps: Map<String, Long> = emptyMap(),
+    val lastTargetUserId: String = "",
+    val lastReportId: String = "",
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    companion object {
+        const val MAX_DISTINCT_TARGETS_PER_HOUR = 3
+        const val REPORT_WINDOW_MS = 60L * 60L * 1000L
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class UserModerationFile(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val targetName: String = "",
+    val reportCount: Int = 0,
+    val warningCount: Int = 0,
+    val investigationActive: Boolean = false,
+    val investigationStatus: String = InvestigationStatus.NONE.name,
+    val suspendedUntilMillis: Long = 0L,
+    val suspendedUntilInvestigationResolved: Boolean = false,
+    val pendingAdminReview: Boolean = false,
+    val pendingSuspensionRequestId: String = "",
+    val suspensionReason: String = "",
+    val lastWarningMessage: String = "",
+    val lastWarningAtMillis: Long = 0L,
+    val lastWarningAcknowledgedAtMillis: Long = 0L,
+    val lastReportId: String = "",
+    val lastResolvedById: String = "",
+    val lastResolvedByName: String = "",
+    val lastResolutionNote: String = "",
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun statusEnum(): InvestigationStatus = InvestigationStatus.fromRaw(investigationStatus)
+
+    fun isTimedSuspended(nowMs: Long = System.currentTimeMillis()): Boolean =
+        suspendedUntilMillis > nowMs
+
+    fun isCurrentlySuspended(nowMs: Long = System.currentTimeMillis()): Boolean =
+        suspendedUntilInvestigationResolved || isTimedSuspended(nowMs)
+
+    fun hasUnacknowledgedWarning(): Boolean =
+        lastWarningAtMillis > 0L && lastWarningAtMillis > lastWarningAcknowledgedAtMillis
+
+    fun remainingSuspensionLabel(nowMs: Long = System.currentTimeMillis()): String {
+        if (pendingAdminReview && suspendedUntilInvestigationResolved) {
+            return "Suspended pending Admin review"
+        }
+        if (suspendedUntilInvestigationResolved) return "Until Support/Admin resolves investigation"
+        val diffMs = (suspendedUntilMillis - nowMs).coerceAtLeast(0L)
+        if (diffMs <= 0L) return ""
+        val totalMinutes = ((diffMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+        val hours = totalMinutes / 60L
+        val mins = totalMinutes % 60L
+        return when {
+            hours > 0L && mins > 0L -> "${hours}h ${mins}m remaining"
+            hours > 0L -> "${hours}h remaining"
+            else -> "${mins}m remaining"
+        }
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class UserFileNote(
+    @DocumentId val id: String = "",
+    val targetUserId: String = "",
+    val reportId: String = "",
+    val strikeNumber: Int = 0,
+    val actionTaken: String = FileNoteAction.INVESTIGATION_STARTED.name,
+    val category: String = "",
+    val reason: String = "",
+    val reporterId: String = "",
+    val reporterName: String = "",
+    val actorRole: String = "REPORTER",
+    @ServerTimestamp val createdAt: Timestamp? = null
+) {
+    fun actionEnum(): FileNoteAction = FileNoteAction.fromRaw(actionTaken)
+}
+
+enum class RefundType(val label: String, val revokesMembership: Boolean) {
+    VOX_PRO("VOX Pro Membership", true),
+    CREATOR_SUBSCRIPTION("Creator Subscription", true),
+    PAID_DM("Paid DM Access Pass", true),
+    POINTS_TRANSACTION("Points / In-App Purchase", false);
+
+    companion object {
+        fun fromRaw(raw: String?): RefundType =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: POINTS_TRANSACTION
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class RefundReport(
+    @DocumentId val id: String = "",
+    val targetUserId: String = "",
+    val targetName: String = "",
+    val refundType: String = RefundType.VOX_PRO.name,
+    val itemLabel: String = "",
+    val amountCents: Long = 0L,
+    val transactionId: String = "",
+    val subscriptionId: String = "",
+    val membershipRevoked: Boolean = false,
+    val reason: String = "",
+    val issuedById: String = "",
+    val issuedByName: String = "",
+    val issuedByTier: String = StaffTier.ADMIN.name,
+    val reportedToAdmins: Boolean = false,
+    val acknowledgedByAdmin: Boolean = false,
+    val acknowledgedByAdminName: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun refundTypeEnum(): RefundType = RefundType.fromRaw(refundType)
+    fun issuedByTierEnum(): StaffTier = StaffTier.fromRaw(issuedByTier)
+}
+
+enum class AppPerkType(val label: String, val shortDesc: String) {
+    VOX_PRO_30D("VOX Pro (30 Days)", "1m PTT, Reels upload, Who Viewed My Profile & Group DMs up to 15 users"),
+    VOX_PRO_LIFETIME("VOX Pro (Lifetime)", "Permanent VOX Pro membership that never expires"),
+    VIP_PRO_30D("VIP Pro (30 Days)", "All VOX Pro perks + Group DMs up to 25 users (\$29.99/mo tier)"),
+    ELITE_PRO_30D("Elite Pro (30 Days)", "All VIP Pro perks + Group DMs up to 50 users (\$59.99/mo tier)"),
+    SPOTLIGHT_FRAME_24H("24h Spotlight Frame", "Glowing neon border around avatar in Discover & Chats"),
+    PTT_THEME("Custom PTT Theme", "Unlock & equip any glowing floating PTT theme"),
+    PTT_CHIRP("Custom Walkie Chirp", "Unlock & equip any custom radio squawk/beep chirp"),
+    BONUS_POINTS("Bonus Points", "Add usable VOX points to the user's balance"),
+    PROFILE_VIEWERS_24H("24h Profile Viewers", "Unlock full Who Viewed My Profile list for 24 hours"),
+    PROFILE_BOOST_24H("24h Profile Boost", "Pin user's profile to the top of Discovery for 24 hours");
+
+    companion object {
+        fun fromRaw(raw: String?): AppPerkType =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: BONUS_POINTS
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class PerkGrant(
+    @DocumentId val id: String = "",
+    val targetUserId: String = "",
+    val targetName: String = "",
+    val perkType: String = AppPerkType.BONUS_POINTS.name,
+    val perkLabel: String = "",
+    val perkDetail: String = "",
+    val reason: String = "",
+    val grantedById: String = "",
+    val grantedByName: String = "",
+    val grantedByTier: String = StaffTier.ADMIN.name,
+    val createdAtMillis: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null
+) {
+    fun perkTypeEnum(): AppPerkType = AppPerkType.fromRaw(perkType)
+    fun grantedByTierEnum(): StaffTier = StaffTier.fromRaw(grantedByTier)
+
+    companion object {
+        const val SUPPORT_ALERT_THRESHOLD = 30
+        const val SUPPORT_ALERT_WINDOW_MS = 5L * 24L * 60L * 60L * 1000L
+    }
+}
+
+enum class AdminNotificationType(val label: String) {
+    SUPPORT_REFUND_REPORT("Support Refund Report"),
+    SUPPORT_PERK_THRESHOLD_30_IN_5D("Support 30-Perk Alert (5 Days)");
+
+    companion object {
+        fun fromRaw(raw: String?): AdminNotificationType =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: SUPPORT_REFUND_REPORT
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class AdminNotification(
+    @DocumentId val id: String = "",
+    val type: String = AdminNotificationType.SUPPORT_REFUND_REPORT.name,
+    val title: String = "",
+    val message: String = "",
+    val createdById: String = "",
+    val createdByName: String = "",
+    val targetUserId: String = "",
+    val targetName: String = "",
+    val referenceId: String = "",
+    val countValue: Int = 0,
+    val read: Boolean = false,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun typeEnum(): AdminNotificationType = AdminNotificationType.fromRaw(type)
+}
+
+
+
 
 

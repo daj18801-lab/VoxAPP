@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -21,13 +22,11 @@ import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.PersonOutline
-import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Person
-import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -99,6 +98,9 @@ import com.example.billing.PlayBillingManager
 import com.example.data.AlertSeverity
 import com.example.data.AppConfig
 import com.example.data.DirectThread
+import com.example.data.ProTier
+import com.example.data.ReportStatus
+import com.example.data.SuspensionRequestStatus
 import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.data.VoxStageRepository
@@ -113,12 +115,16 @@ import com.example.ui.screens.ReelsScreen
 import com.example.ui.screens.RoomScreen
 import com.example.ui.screens.SafetyScreen
 import com.example.ui.screens.TrialVoxStageApp
+import com.example.ui.components.AccountSuspendedGateScreen
+import com.example.ui.components.Age13GateDialog
 import com.example.ui.components.AgeVerificationDialog
 import com.example.ui.components.FloatingPttOverlayBubble
 import com.example.ui.components.LocalProUserIds
 import com.example.ui.components.LocalSpotlightFrameByUserId
+import com.example.ui.components.StrikeWarningModalDialog
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.formatTimestampShort
+import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.showTopMessage
 import com.example.ui.screens.UserProfileScreen
 import androidx.compose.ui.text.style.TextOverflow
@@ -165,7 +171,6 @@ private val topDestinations = listOf(
     TopDestination(ROUTE_REELS, "Reels", Icons.Rounded.VideoLibrary, Icons.Outlined.VideoLibrary, "nav_reels"),
     TopDestination(ROUTE_DISCOVER_USERS, "Discover", Icons.Rounded.Explore, Icons.Outlined.Explore, "nav_discover_users"),
     TopDestination(ROUTE_DISCOVER, "Rooms", Icons.Rounded.GraphicEq, Icons.Outlined.GraphicEq, "nav_discover"),
-    TopDestination(ROUTE_SAFETY, "Safety", Icons.Rounded.Shield, Icons.Outlined.Shield, "nav_safety"),
     TopDestination(ROUTE_PROFILE, "Profile", Icons.Rounded.Person, Icons.Outlined.PersonOutline, "nav_profile")
 )
 
@@ -177,7 +182,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleNotificationIntent(intent)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
+        )
         setContent {
             val targetDmThreadId by pendingDmThreadId.collectAsStateWithLifecycle()
             VoxStageRoot(
@@ -282,6 +296,18 @@ fun VoxStageRoot(
     var trialNoticeMessage by remember { mutableStateOf<String?>(null) }
 
     if (user == null) {
+        LaunchedEffect(Unit) {
+            (context as? ComponentActivity)?.enableEdgeToEdge(
+                statusBarStyle = SystemBarStyle.light(
+                    android.graphics.Color.TRANSPARENT,
+                    android.graphics.Color.TRANSPARENT
+                ),
+                navigationBarStyle = SystemBarStyle.light(
+                    android.graphics.Color.TRANSPARENT,
+                    android.graphics.Color.TRANSPARENT
+                )
+            )
+        }
         val currentTrial = activeTrialSession
         VoxStageTheme(darkTheme = false) {
             if (currentTrial != null && appConfig.trialLoginsEnabled && !currentTrial.isExpired()) {
@@ -399,6 +425,15 @@ private fun AuthenticatedVoxStageApp(
     val isUploadingReel by mainViewModel.isUploadingReel.collectAsStateWithLifecycle()
     val incomingReferral by mainViewModel.incomingReferralState.collectAsStateWithLifecycle()
     val invitedReferrals by mainViewModel.invitedReferralsState.collectAsStateWithLifecycle()
+    val profileViews by mainViewModel.profileViewsState.collectAsStateWithLifecycle()
+    val myModerationFile by mainViewModel.myModerationFileState.collectAsStateWithLifecycle()
+    val allModerationFiles by mainViewModel.allModerationFilesState.collectAsStateWithLifecycle()
+    val suspensionRequests by mainViewModel.suspensionRequestsState.collectAsStateWithLifecycle()
+    val allCreatorSubscriptions by mainViewModel.allCreatorSubscriptionsState.collectAsStateWithLifecycle()
+    val refundReports by mainViewModel.refundReportsState.collectAsStateWithLifecycle()
+    val perkGrants by mainViewModel.perkGrantsState.collectAsStateWithLifecycle()
+    val adminNotifications by mainViewModel.adminNotificationsState.collectAsStateWithLifecycle()
+    val nowClockMs = rememberPresenceClockMillis()
 
     // Google Play Store Billing client for buying points
     val playBillingManager = remember(context) { PlayBillingManager(context) }
@@ -415,6 +450,7 @@ private fun AuthenticatedVoxStageApp(
     }
     var profileInitialTab by remember { mutableIntStateOf(0) }
     var showAgeVerificationDialog by remember { mutableStateOf(false) }
+    var showAge13PurchaseGate by remember { mutableStateOf(false) }
     var incomingQuickReplyThread by remember { mutableStateOf<DirectThread?>(null) }
     var quickReplyDraft by remember { mutableStateOf("") }
     var incomingFriendAlertThread by remember { mutableStateOf<DirectThread?>(null) }
@@ -509,9 +545,59 @@ private fun AuthenticatedVoxStageApp(
         ROUTE_DISCOVER_USERS,
         ROUTE_FRIENDS,
         ROUTE_DISCOVER,
-        ROUTE_SAFETY,
         ROUTE_PROFILE
     )
+
+    val openSafetyReportsCount = remember(safetyReportsState) {
+        (safetyReportsState as? UiState.Success)?.data?.count { it.statusEnum() == ReportStatus.OPEN } ?: 0
+    }
+    val activeInvestigationsCount = remember(allModerationFiles) {
+        allModerationFiles.count { it.investigationActive || it.suspendedUntilInvestigationResolved }
+    }
+    val pendingSuspensionRequestsCount = remember(suspensionRequests) {
+        suspensionRequests.count { it.statusEnum() == SuspensionRequestStatus.PENDING }
+    }
+    val unreadAdminNotificationsCount = remember(adminNotifications) {
+        adminNotifications.count { !it.read }
+    }
+    val safetyBadgeCount = when {
+        staffCapabilities.isAdmin ->
+            openSafetyReportsCount + activeInvestigationsCount + pendingSuspensionRequestsCount + unreadAdminNotificationsCount + unreadAlerts.size
+        staffCapabilities.isStaff ->
+            openSafetyReportsCount + activeInvestigationsCount + unreadAlerts.size
+        else ->
+            unreadAlerts.size + if (myModerationFile?.hasUnacknowledgedWarning() == true) 1 else 0
+    }
+
+    val isSuspendedNow = !staffCapabilities.isAdmin && (
+        userProfile?.globallyBanned == true ||
+            userProfile?.currentlySuspended(nowClockMs) == true ||
+            myModerationFile?.isCurrentlySuspended(nowClockMs) == true
+        )
+
+    // Keep system status bar & navigation bar icon contrast crisp in Light Theme and Dark Theme
+    val forceDarkStatusBar = currentRoute == ROUTE_REELS
+    LaunchedEffect(nightModeEnabled, forceDarkStatusBar) {
+        val useLightStatusBar = !nightModeEnabled && !forceDarkStatusBar
+        (context as? ComponentActivity)?.enableEdgeToEdge(
+            statusBarStyle = if (useLightStatusBar) {
+                SystemBarStyle.light(
+                    android.graphics.Color.TRANSPARENT,
+                    android.graphics.Color.TRANSPARENT
+                )
+            } else {
+                SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            },
+            navigationBarStyle = if (!nightModeEnabled) {
+                SystemBarStyle.light(
+                    android.graphics.Color.TRANSPARENT,
+                    android.graphics.Color.TRANSPARENT
+                )
+            } else {
+                SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            }
+        )
+    }
 
     fun navigateToTopTab(route: String) {
         if (currentRoute != route) {
@@ -521,6 +607,23 @@ private fun AuthenticatedVoxStageApp(
                 restoreState = true
             }
         }
+    }
+
+    fun openSafetyCenter() {
+        navController.navigate(ROUTE_SAFETY) {
+            launchSingleTop = true
+        }
+    }
+
+    fun requireAge13ForPurchase(): Boolean {
+        if (staffCapabilities.isStaff || userProfile?.isAge13Plus() == true) return true
+        showAge13PurchaseGate = true
+        scope.launch {
+            snackbarHostState.showTopMessage(
+                "You must be 13 or older to buy VOX Pro membership or points."
+            )
+        }
+        return false
     }
 
     fun openUserProfile(targetUid: String) {
@@ -628,9 +731,20 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
+    // Automatically disconnect live PTT if the user becomes suspended
+    LaunchedEffect(isSuspendedNow) {
+        if (isSuspendedNow) {
+            LivePttSessionManager.disconnect(context)
+        }
+    }
+
     // Automatically manage the persistent Live Walkie-Talkie PTT channel whenever
     // BOTH users in a private chat have Push-to-Talk selected.
-    LaunchedEffect(directThreadsState, userProfile, staffCapabilities.isAdmin, currentUserId) {
+    LaunchedEffect(directThreadsState, userProfile, staffCapabilities.isAdmin, isSuspendedNow, currentUserId) {
+        if (isSuspendedNow) {
+            LivePttSessionManager.disconnect(context)
+            return@LaunchedEffect
+        }
         val threads = (directThreadsState as? UiState.Success)?.data ?: return@LaunchedEffect
         val micBlocked = !staffCapabilities.isAdmin && userProfile?.disableMic == true
         val activeTid = LivePttSessionManager.activeThreadId.value
@@ -660,8 +774,32 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
-    // Keep Live PTT clip duration synchronized with Free (5s) vs Pro/Staff (60s)
-    LaunchedEffect(userProfile?.proMember, userProfile?.proExpiresAtMillis, staffCapabilities.tier) {
+    // Play the distinct two-tone radio alert whenever a close friend sends a Priority Break-In Chirp
+    var lastAlertedPriorityChirpMs by remember(currentUserId) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(directThreadsState, currentUserId) {
+        val threads = (directThreadsState as? UiState.Success)?.data ?: return@LaunchedEffect
+        val newest = threads
+            .filter { it.hasActivePriorityChirpFor(currentUserId) && it.lastPriorityChirpAtMillis > lastAlertedPriorityChirpMs }
+            .maxByOrNull { it.lastPriorityChirpAtMillis }
+        if (newest != null) {
+            lastAlertedPriorityChirpMs = newest.lastPriorityChirpAtMillis
+            com.example.media.PttChirpSoundEngine.playPriorityBreakInChirp(
+                urgent = newest.lastPriorityChirpPoints >= 2
+            )
+            LivePttSessionManager.triggerPttHaptic(context)
+            snackbarHostState.showTopMessage(
+                "🚨 Priority Break-In Chirp from ${newest.lastPriorityChirpSenderName}: ${newest.lastPriorityChirpMessage}"
+            )
+        }
+    }
+
+    // Keep Live PTT clip duration synchronized with Free (5s) vs Pro/Lifetime Pro/Staff (60s)
+    LaunchedEffect(
+        userProfile?.proMember,
+        userProfile?.proExpiresAtMillis,
+        userProfile?.proLifetime,
+        staffCapabilities.tier
+    ) {
         val maxSec = (userProfile ?: UserProfile()).pttMaxDurationSeconds(staffCapabilities.tier)
         LivePttSessionManager.setMaxDurationSeconds(maxSec)
     }
@@ -699,10 +837,12 @@ private fun AuthenticatedVoxStageApp(
                     )
                 }
                 is PlayBillingEvent.ProSubscriptionVerified -> {
+                    val purchasedTier = ProTier.fromProductId(event.productId)
                     mainViewModel.activateProMembership(
                         paidWithPoints = false,
                         playOrderId = event.orderId,
-                        playProductId = event.productId
+                        playProductId = event.productId,
+                        targetTier = purchasedTier
                     )
                 }
                 is PlayBillingEvent.Message -> {
@@ -760,12 +900,15 @@ private fun AuthenticatedVoxStageApp(
         LocalProUserIds provides proUserIds,
         LocalSpotlightFrameByUserId provides activeSpotlightFramesByUserId
     ) {
-    VoxStageTheme(darkTheme = nightModeEnabled) {
+    VoxStageTheme(
+        darkTheme = nightModeEnabled,
+        forceDarkStatusBarBackground = forceDarkStatusBar
+    ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val useRail = maxWidth >= 600.dp
 
             Scaffold(
-                containerColor = MaterialTheme.colorScheme.background,
+                containerColor = if (currentRoute == ROUTE_REELS) Color.Black else MaterialTheme.colorScheme.background,
                 bottomBar = {
                     if (showTopNav && !useRail) {
                         NavigationBar(
@@ -831,7 +974,11 @@ private fun AuthenticatedVoxStageApp(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(
-                            top = if (showTopNav) innerPadding.calculateTopPadding() else 0.dp,
+                            top = if ((showTopNav && currentRoute != ROUTE_REELS) || currentRoute == ROUTE_SAFETY) {
+                                innerPadding.calculateTopPadding()
+                            } else {
+                                0.dp
+                            },
                             bottom = if (showTopNav && !useRail) innerPadding.calculateBottomPadding() else 0.dp
                         )
                 ) {
@@ -914,7 +1061,9 @@ private fun AuthenticatedVoxStageApp(
                                     onOpenUserProfile = ::openUserProfile,
                                     onOpenFriendsTab = { navigateToTopTab(ROUTE_FRIENDS) },
                                     onOpenRoomsTab = { navigateToTopTab(ROUTE_DISCOVER) },
-                                    onOpenProfileTab = { navigateToTopTab(ROUTE_PROFILE) }
+                                    onOpenProfileTab = { navigateToTopTab(ROUTE_PROFILE) },
+                                    safetyBadgeCount = safetyBadgeCount,
+                                    onOpenSafety = ::openSafetyCenter
                                 )
                             }
 
@@ -954,7 +1103,9 @@ private fun AuthenticatedVoxStageApp(
                                     onOpenUpgradeToPro = ::openProfileBuyPoints,
                                     onShowMessage = { msg ->
                                         scope.launch { snackbarHostState.showTopMessage(msg) }
-                                    }
+                                    },
+                                    safetyBadgeCount = safetyBadgeCount,
+                                    onOpenSafety = ::openSafetyCenter
                                 )
                             }
 
@@ -1004,7 +1155,9 @@ private fun AuthenticatedVoxStageApp(
                                     myUserProfile = userProfile,
                                     isPublishingPost = isPublishingPost,
                                     onCreateDiscoveryPhotoPost = mainViewModel::createProfilePost,
-                                    followerCountsByUserId = followerCountsByUserId
+                                    followerCountsByUserId = followerCountsByUserId,
+                                    safetyBadgeCount = safetyBadgeCount,
+                                    onOpenSafety = ::openSafetyCenter
                                 )
                             }
 
@@ -1052,9 +1205,12 @@ private fun AuthenticatedVoxStageApp(
                                             navController.navigate("room/${room.id}")
                                         }
                                     },
+                                    onRoomPinVerified = { rId, pin ->
+                                        mainViewModel.setVerifiedPinForRoom(rId, pin)
+                                    },
                                     onEditRoom = mainViewModel::editRoomDetails,
                                     onCloseRoom = mainViewModel::closeRoomFromLobby,
-                                    onCreateRoom = { title, topic, category, coverKey, visibility, videoEnabled, autoModEnabled, autoModBlockMode, linksBlocked, slowModeSeconds, maxSpeakers ->
+                                    onCreateRoom = { title, topic, category, coverKey, visibility, videoEnabled, autoModEnabled, autoModBlockMode, linksBlocked, slowModeSeconds, maxSpeakers, pinLocked, roomPinCode ->
                                         mainViewModel.createRoom(
                                             title = title,
                                             topic = topic,
@@ -1067,11 +1223,15 @@ private fun AuthenticatedVoxStageApp(
                                             linksBlocked = linksBlocked,
                                             slowModeSeconds = slowModeSeconds,
                                             maxSpeakers = maxSpeakers,
+                                            pinLocked = pinLocked,
+                                            roomPinCode = roomPinCode,
                                             onCreated = { newRoomId ->
                                                 navController.navigate("room/$newRoomId")
                                             }
                                         )
-                                    }
+                                    },
+                                    safetyBadgeCount = safetyBadgeCount,
+                                    onOpenSafety = ::openSafetyCenter
                                 )
                             }
 
@@ -1112,7 +1272,52 @@ private fun AuthenticatedVoxStageApp(
                                     },
                                     appBroadcasts = appBroadcasts,
                                     onSendAppBroadcast = mainViewModel::sendAppBroadcastToAllUsers,
-                                    onDeleteAppBroadcast = mainViewModel::deleteAppBroadcast
+                                    onDeleteAppBroadcast = mainViewModel::deleteAppBroadcast,
+                                    onBack = { navController.popBackStack() },
+                                    moderationFiles = allModerationFiles,
+                                    onObserveUserFileNotes = mainViewModel::observeUserFileNotes,
+                                    onResolveInvestigation = mainViewModel::resolveUserInvestigation,
+                                    suspensionRequests = suspensionRequests,
+                                    onSubmitSuspensionRequest = { targetUid, targetName, reason, onSubmitted ->
+                                        mainViewModel.submitSupportSuspensionRequest(
+                                            targetUserId = targetUid,
+                                            targetName = targetName,
+                                            reason = reason,
+                                            onSubmitted = onSubmitted
+                                        )
+                                    },
+                                    onAdminReviewSuspensionRequest = mainViewModel::adminReviewSuspensionRequest,
+                                    refundReports = refundReports,
+                                    perkGrants = perkGrants,
+                                    adminNotifications = adminNotifications,
+                                    allTransactions = allTransactions,
+                                    allCreatorSubscriptions = allCreatorSubscriptions,
+                                    onIssueRefund = { targetUid, targetName, refundType, itemLabel, amountCents, txId, subId, reason, onIssued ->
+                                        mainViewModel.issueRefund(
+                                            targetUserId = targetUid,
+                                            targetName = targetName,
+                                            refundType = refundType,
+                                            itemLabel = itemLabel,
+                                            amountCents = amountCents,
+                                            transactionId = txId,
+                                            subscriptionId = subId,
+                                            reason = reason,
+                                            onIssued = onIssued
+                                        )
+                                    },
+                                    onAcknowledgeRefundReport = mainViewModel::acknowledgeRefundReport,
+                                    onMarkAdminNotificationRead = mainViewModel::markAdminNotificationRead,
+                                    onGrantAppPerk = { targetUid, targetName, perkType, detailValue, pts, reason, onGranted ->
+                                        mainViewModel.grantAppPerk(
+                                            targetUserId = targetUid,
+                                            targetName = targetName,
+                                            perkType = perkType,
+                                            detailValue = detailValue,
+                                            pointsAmount = pts,
+                                            reason = reason,
+                                            onGranted = onGranted
+                                        )
+                                    }
                                 )
                             }
 
@@ -1146,32 +1351,65 @@ private fun AuthenticatedVoxStageApp(
                                     onToggleLikePost = mainViewModel::toggleLikePost,
                                     onDeletePost = mainViewModel::deleteProfilePost,
                                     onBuyPoints = { pointsToBuy ->
-                                        val hostActivity = context as? Activity
-                                        if (hostActivity != null) {
-                                            playBillingManager.launchPointsPurchase(hostActivity, pointsToBuy)
-                                        } else {
-                                            scope.launch {
-                                                snackbarHostState.showTopMessage("Unable to open Google Play checkout.")
+                                        if (requireAge13ForPurchase()) {
+                                            val hostActivity = context as? Activity
+                                            if (hostActivity != null) {
+                                                playBillingManager.launchPointsPurchase(hostActivity, pointsToBuy)
+                                            } else {
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage("Unable to open Google Play checkout.")
+                                                }
                                             }
                                         }
                                     },
                                     onUpgradeToProPlay = {
-                                        val hostActivity = context as? Activity
-                                        if (hostActivity != null) {
-                                            playBillingManager.launchProSubscription(hostActivity)
-                                        } else {
-                                            scope.launch {
-                                                snackbarHostState.showTopMessage("Unable to open Google Play Pro checkout.")
+                                        if (requireAge13ForPurchase()) {
+                                            val hostActivity = context as? Activity
+                                            if (hostActivity != null) {
+                                                playBillingManager.launchSubscription(hostActivity, ProTier.PRO)
+                                            } else {
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage("Unable to open Google Play Pro checkout.")
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onUpgradeToVipProPlay = {
+                                        if (requireAge13ForPurchase()) {
+                                            val hostActivity = context as? Activity
+                                            if (hostActivity != null) {
+                                                playBillingManager.launchSubscription(hostActivity, ProTier.VIP_PRO)
+                                            } else {
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage("Unable to open Google Play VIP Pro checkout.")
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onUpgradeToEliteProPlay = {
+                                        if (requireAge13ForPurchase()) {
+                                            val hostActivity = context as? Activity
+                                            if (hostActivity != null) {
+                                                playBillingManager.launchSubscription(hostActivity, ProTier.ELITE_PRO)
+                                            } else {
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage("Unable to open Google Play Elite Pro checkout.")
+                                                }
                                             }
                                         }
                                     },
                                     onActivateProWithPoints = {
-                                        mainViewModel.activateProMembership(paidWithPoints = true)
+                                        if (requireAge13ForPurchase()) {
+                                            mainViewModel.activateProMembership(paidWithPoints = true)
+                                        }
                                     },
                                     onBoostMyProfile = mainViewModel::boostMyProfile,
                                     onSelectOrBuyPttTheme = mainViewModel::purchaseOrSelectPttTheme,
                                     onSelectOrBuyPttChirp = mainViewModel::purchaseOrSelectPttChirp,
                                     onBuySpotlightFrame = mainViewModel::buySpotlightFrame,
+                                    profileViews = profileViews,
+                                    onUnlockProfileViewers = mainViewModel::unlockProfileViewers,
+                                    onSetPriorityChirpOptIn = mainViewModel::setPriorityChirpOptIn,
                                     incomingReferral = incomingReferral,
                                     invitedReferrals = invitedReferrals,
                                     userEmailVerified = initialEmailVerified,
@@ -1192,7 +1430,9 @@ private fun AuthenticatedVoxStageApp(
                                                 scope = scope
                                             )
                                         }
-                                    }
+                                    },
+                                    safetyBadgeCount = safetyBadgeCount,
+                                    onOpenSafety = ::openSafetyCenter
                                 )
                             }
 
@@ -1266,7 +1506,8 @@ private fun AuthenticatedVoxStageApp(
                                             reason = reason,
                                             onSent = onSent
                                         )
-                                    }
+                                    },
+                                    viewerProfile = userProfile
                                 )
                             }
 
@@ -1330,6 +1571,7 @@ private fun AuthenticatedVoxStageApp(
                                         mainViewModel.sendFriendAttentionAlert(context, targetThread)
                                     },
                                     onOpenUserProfile = ::openUserProfile,
+                                    onOpenBuyPoints = ::openProfileBuyPoints,
                                     onBack = { navController.popBackStack() }
                                 )
                             }
@@ -1349,7 +1591,8 @@ private fun AuthenticatedVoxStageApp(
                                                 repository = VoxStageRepository(db),
                                                 currentUserId = currentUserId,
                                                 roomId = roomId,
-                                                initialStaffCapabilities = staffCapabilities
+                                                initialStaffCapabilities = staffCapabilities,
+                                                enteredPin = mainViewModel.getVerifiedPinForRoom(roomId)
                                             )
                                         }
                                     }
@@ -1644,6 +1887,77 @@ private fun AuthenticatedVoxStageApp(
                     dismissButton = {
                         TextButton(onClick = { incomingFriendAlertThread = null }) {
                             Text("Dismiss")
+                        }
+                    }
+                )
+            }
+
+            // Mandatory 13+ Age Gate before using VOX (non-staff users without 13+ verification)
+            val needsMandatoryAge13Gate = !isSuspendedNow &&
+                !staffCapabilities.isStaff &&
+                userProfile != null &&
+                !userProfile.isAge13Plus()
+            if (needsMandatoryAge13Gate) {
+                Age13GateDialog(
+                    allowDismiss = false,
+                    onConfirmBirthYear = { year ->
+                        mainViewModel.verifyAge13Plus(year)
+                    },
+                    onSignOut = {
+                        scope.launch {
+                            flushForegroundAppTime(keepRunning = false)
+                            mainViewModel.setOnlinePresenceNow(false)
+                            signOutFromVoxStage(
+                                credentialManager = credentialManager,
+                                scope = scope
+                            )
+                        }
+                    }
+                )
+            } else if (showAge13PurchaseGate) {
+                Age13GateDialog(
+                    reasonMessage = "You must be 13 or older to buy VOX Pro membership or points. Confirm your birth year to continue.",
+                    allowDismiss = true,
+                    onConfirmBirthYear = { year ->
+                        mainViewModel.verifyAge13Plus(year) {
+                            showAge13PurchaseGate = false
+                        }
+                    },
+                    onSignOut = { showAge13PurchaseGate = false },
+                    onDismiss = { showAge13PurchaseGate = false }
+                )
+            }
+
+            // Automated Strike 2+ Formal Warning Modal
+            val activeModFile = myModerationFile
+            if (!isSuspendedNow &&
+                !needsMandatoryAge13Gate &&
+                !staffCapabilities.isAdmin &&
+                activeModFile != null &&
+                activeModFile.hasUnacknowledgedWarning()
+            ) {
+                StrikeWarningModalDialog(
+                    moderationFile = activeModFile,
+                    onAcknowledge = mainViewModel::acknowledgeStrikeWarning
+                )
+            }
+
+            // Automated Strike 3 (1h), Strike 4 (2h), Strike 5+ (Pending Support/Admin Review), or Staff Suspension Gate
+            if (isSuspendedNow) {
+                AccountSuspendedGateScreen(
+                    moderationFile = myModerationFile,
+                    manualSuspendedUntilMillis = userProfile?.suspendedUntilMillis ?: 0L,
+                    manualSuspensionReason = userProfile?.suspensionReason.orEmpty(),
+                    globallyBanned = userProfile?.globallyBanned == true,
+                    nowMillis = nowClockMs,
+                    onSignOut = {
+                        scope.launch {
+                            flushForegroundAppTime(keepRunning = false)
+                            mainViewModel.setOnlinePresenceNow(false)
+                            signOutFromVoxStage(
+                                credentialManager = credentialManager,
+                                scope = scope
+                            )
                         }
                     }
                 )

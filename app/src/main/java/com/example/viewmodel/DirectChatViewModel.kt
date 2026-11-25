@@ -108,7 +108,8 @@ class DirectChatViewModel(
             thread.lastMessageSenderId.isNotBlank() &&
             thread.lastMessageSenderId != currentUserId &&
             (needsClearUnread || myLastReadMs < threadUpdatedMs)
-        if (!needsClearUnread && !needsReceipt) return
+        val needsAckChirp = thread.hasActivePriorityChirpFor(currentUserId)
+        if (!needsClearUnread && !needsReceipt && !needsAckChirp) return
         viewModelScope.launch {
             repository.markDirectThreadRead(thread, sendReadReceipt = sendReadReceipt)
         }
@@ -170,7 +171,8 @@ class DirectChatViewModel(
         text: String,
         imageBase64: String = "",
         audioBase64: String = "",
-        audioDurationSec: Long = 0L
+        audioDurationSec: Long = 0L,
+        hideSenderName: Boolean = false
     ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
         val clean = text.trim()
@@ -186,7 +188,8 @@ class DirectChatViewModel(
                 text = clean,
                 imageBase64 = cleanImage,
                 audioBase64 = cleanAudio,
-                audioDurationSec = audioDurationSec
+                audioDurationSec = audioDurationSec,
+                hideSenderName = hideSenderName
             ).onSuccess {
                 if (cleanAudio.isNotEmpty()) {
                     repository.completeReferralBonusOnFirstPttClip(senderName)
@@ -411,6 +414,185 @@ class DirectChatViewModel(
             _isInCall.value = false
             PrivateCallForegroundService.stop(appContext)
             _snackbarEvents.tryEmit("Private call ended")
+        }
+    }
+
+    fun setPriorityChirpOptIn(optIn: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setDirectThreadPriorityChirpOptIn(thread, optIn)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (optIn) "Priority Break-In Chirps enabled for this chat."
+                        else "Priority Break-In Chirps turned off for this chat."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Priority Chirp setting")
+                }
+        }
+    }
+
+    fun sendPriorityBreakInChirp(
+        senderName: String,
+        senderTier: StaffTier,
+        messageText: String,
+        pointsCost: Int,
+        onInsufficientPoints: () -> Unit = {}
+    ) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        if (_isSending.value) return
+        viewModelScope.launch {
+            _isSending.value = true
+            repository.sendPriorityBreakInChirp(
+                thread = thread,
+                senderName = senderName,
+                senderTier = senderTier,
+                messageText = messageText,
+                pointsCost = pointsCost
+            ).onSuccess {
+                _snackbarEvents.tryEmit(
+                    if (pointsCost >= 2) "Urgent Break-In Chirp sent! (-2 pts)"
+                    else "Priority Chirp sent! (-1 pt)"
+                )
+            }.onFailure { err ->
+                val msg = err.message ?: "Could not send Priority Chirp"
+                _snackbarEvents.tryEmit(msg)
+                if (msg.contains("need", ignoreCase = true) && msg.contains("point", ignoreCase = true)) {
+                    onInsufficientPoints()
+                }
+            }
+            _isSending.value = false
+        }
+    }
+
+    fun purchaseScrollingBanner(
+        bannerText: String,
+        colorHex: String,
+        buyerName: String,
+        onInsufficientPoints: () -> Unit = {},
+        onSuccess: () -> Unit = {}
+    ) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        if (_isSending.value) return
+        viewModelScope.launch {
+            _isSending.value = true
+            repository.purchaseDirectThreadBanner(
+                thread = thread,
+                bannerText = bannerText,
+                colorHex = colorHex,
+                buyerName = buyerName
+            ).onSuccess {
+                _snackbarEvents.tryEmit("24-Hour Scrolling Banner is LIVE in this DM! (-1 pt)")
+                onSuccess()
+            }.onFailure { err ->
+                val msg = err.message ?: "Could not set scrolling banner"
+                _snackbarEvents.tryEmit(msg)
+                if (msg.contains("need", ignoreCase = true) && msg.contains("point", ignoreCase = true)) {
+                    onInsufficientPoints()
+                }
+            }
+            _isSending.value = false
+        }
+    }
+
+    fun setGroupMemberMuted(targetUserId: String, targetName: String, mute: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setGroupDmUserMuted(thread, targetUserId, targetName, mute)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (mute) "$targetName has been muted in this group DM."
+                        else "$targetName has been unmuted."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update mute state")
+                }
+        }
+    }
+
+    fun bounceGroupMember(targetUserId: String, targetName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.bounceGroupDmUser(thread, targetUserId, targetName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("$targetName bounced from this group DM for 24 hours.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not bounce member")
+                }
+        }
+    }
+
+    fun removeGroupBounce(targetUserId: String, targetName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.removeGroupDmBounce(thread, targetUserId)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Removed 24h bounce for $targetName.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not remove bounce")
+                }
+        }
+    }
+
+    fun banGroupMember(targetUserId: String, targetName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.banGroupDmUser(thread, targetUserId, targetName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("$targetName banned from this group DM.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not ban member")
+                }
+        }
+    }
+
+    fun unbanGroupMember(targetUserId: String, targetName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.unbanGroupDmUser(thread, targetUserId)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Unbanned $targetName from this group DM.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not unban member")
+                }
+        }
+    }
+
+    fun setGroupSupportStaff(targetUserId: String, targetName: String, promote: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setGroupDmSupportStaff(thread, targetUserId, promote)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (promote) "$targetName is now Support Staff in this group DM (can mute & bounce)."
+                        else "Removed $targetName from Group DM Support Staff."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Group DM Support Staff")
+                }
+        }
+    }
+
+    fun setGroupPttAllowed(targetUserId: String, targetName: String, allowed: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setGroupDmPttAllowed(thread, targetUserId, allowed)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (allowed) "$targetName can now use Push-to-Talk in this group DM."
+                        else "Revoked Push-to-Talk access for $targetName in this group DM."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update PTT speaker permissions")
+                }
         }
     }
 

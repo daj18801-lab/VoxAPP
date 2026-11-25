@@ -116,7 +116,7 @@ fun AuthScreen(
         ) {
             Image(
                 painter = painterResource(id = R.drawable.img_lounge_hero_1795298732457),
-                contentDescription = "VoxStage live broadcast lounge background",
+                contentDescription = "VOX live broadcast lounge background",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
@@ -181,7 +181,7 @@ fun AuthScreen(
                             }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = appConfig.bannerTitle.ifBlank { "VoxStage News & Updates" },
+                                    text = appConfig.bannerTitle.ifBlank { "VOX News & Updates" },
                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
@@ -234,7 +234,7 @@ fun AuthScreen(
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 imageVector = Icons.Rounded.GraphicEq,
-                                contentDescription = "VoxStage emblem",
+                                contentDescription = "VOX emblem",
                                 tint = MaterialTheme.colorScheme.onPrimary,
                                 modifier = Modifier.size(30.dp)
                             )
@@ -413,7 +413,7 @@ fun AuthScreen(
                                 modifier = Modifier.size(20.dp)
                             )
                             Text(
-                                text = "Try VoxStage for 1 Day",
+                                text = "Try VOX for 1 Day",
                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -430,7 +430,7 @@ fun AuthScreen(
                             }
                             hasExpiredTrial -> {
                                 Text(
-                                    text = "Your 1-day trial period has ended. Sign in with your Google email above to continue using VoxStage.",
+                                    text = "Your 1-day trial period has ended. Sign in with your Google email above to continue using VOX.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = LiveCoral,
                                     modifier = Modifier.testTag("trial_expired_notice")

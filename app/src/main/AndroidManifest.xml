@@ -40,6 +40,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".media.LockScreenPttActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:theme="@style/Theme.MyApplication" />
+
         <service
             android:name=".media.PrivateCallForegroundService"
             android:exported="false"

@@ -46,6 +46,7 @@ import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.Pin
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Videocam
@@ -98,6 +99,7 @@ import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.media.LiveCameraPreview
 import com.example.ui.components.LivePulseBadge
+import com.example.ui.components.RequestSuspensionDialog
 import com.example.ui.components.RolePillBadge
 import com.example.ui.components.SafetyTagChip
 import com.example.ui.components.SpeakingAvatarCircle
@@ -153,6 +155,7 @@ fun RoomScreen(
     var actionTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var reportTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var suspendTarget by remember { mutableStateOf<ActionTarget?>(null) }
+    var supportSuspensionTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var alertTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var transferTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var editUserProfileTarget by remember { mutableStateOf<UserProfile?>(null) }
@@ -286,15 +289,20 @@ fun RoomScreen(
                             .navigationBarsPadding()
                             .imePadding()
                     ) {
+                        val isRoomAdmin = activeRoom.isRoomAdmin(viewModel.currentUserId)
+                        val invisibleTint = usernameColor(
+                            staffCapabilities.tier,
+                            isRoomLeader = isRoomAdmin
+                        )
                         // Top Live Room Header Bar
                         RoomTopBar(
                             room = activeRoom,
                             participantCount = visibleParticipants.size.coerceAtLeast(activeRoom.participantCount.toInt()),
                             isMod = isMod,
                             canEditRoom = canEditRoom,
-                            canToggleInvisible = staffCapabilities.effectiveCanEnterInvisible,
+                            canToggleInvisible = activeRoom.canEnterInvisibleInRoom(viewModel.currentUserId, staffCapabilities),
                             isCurrentlyInvisible = isCurrentlyInvisible,
-                            staffTier = staffCapabilities.tier,
+                            invisibleAccent = invisibleTint,
                             onBack = { viewModel.leaveRoomAndExit(onExitRoom) },
                             onEditRoomName = { showEditRoomDialog = true },
                             onToggleInvisible = { viewModel.toggleInRoomInvisible() },
@@ -302,10 +310,10 @@ fun RoomScreen(
                             onOpenModCenter = { showModCenter = true }
                         )
 
-                        // Stealth Invisible Mode Banner (only shown to the invisible Admin / Support user)
+                        // Stealth Invisible Mode Banner (shown to the invisible Admin / Support / Room Admin)
                         if (isCurrentlyInvisible) {
                             Surface(
-                                color = usernameColor(staffCapabilities.tier).copy(alpha = 0.16f),
+                                color = invisibleTint.copy(alpha = 0.16f),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Row(
@@ -322,18 +330,21 @@ fun RoomScreen(
                                         Icon(
                                             imageVector = Icons.Rounded.VisibilityOff,
                                             contentDescription = "Invisible mode active",
-                                            tint = usernameColor(staffCapabilities.tier),
+                                            tint = invisibleTint,
                                             modifier = Modifier.size(18.dp)
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Text(
-                                            text = if (staffCapabilities.isAdmin) {
-                                                "INVISIBLE MODE · Hidden from room (Admin can speak on mic anytime)"
-                                            } else {
-                                                "INVISIBLE MODE · Hidden from room (Go Visible to use mic)"
+                                            text = when {
+                                                staffCapabilities.isAdmin ->
+                                                    "INVISIBLE MODE · Hidden from room (Admin can speak on mic anytime)"
+                                                isRoomAdmin && !staffCapabilities.isStaff ->
+                                                    "INVISIBLE MODE · Hidden from room users (App Admins & Support can see you)"
+                                                else ->
+                                                    "INVISIBLE MODE · Hidden from room (Go Visible to use mic)"
                                             },
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = usernameColor(staffCapabilities.tier)
+                                            color = invisibleTint
                                         )
                                     }
                                     OutlinedButton(
@@ -567,6 +578,21 @@ fun RoomScreen(
                 onUnbanUser = { uid ->
                     viewModel.unbanUser(uid, userProfile.displayName)
                 },
+                onRemoveBounce = { uid, name ->
+                    viewModel.removeBounce(uid, name, userProfile.displayName)
+                },
+                onBanBouncedUser = { uid, name ->
+                    viewModel.kickOrBanUser(
+                        targetUserId = uid,
+                        targetName = name,
+                        actorName = userProfile.displayName,
+                        ban = true,
+                        reason = "Banned from room by ${userProfile.displayName}"
+                    )
+                },
+                onUpdateRoomPinLock = { pinLocked, pinCode ->
+                    viewModel.updateRoomPinLock(pinLocked, pinCode, userProfile.displayName)
+                },
                 onCloseRoom = {
                     showModCenter = false
                     viewModel.closeRoomAsHostOrAdmin(userProfile.displayName, onExitRoom)
@@ -656,6 +682,7 @@ fun RoomScreen(
                     )
                 },
                 onSuspend = { suspendTarget = currentTarget },
+                onRequestSupportSuspension = { supportSuspensionTarget = currentTarget },
                 onSendAlert = { alertTarget = currentTarget },
                 onSetStaffTier = { nextTier ->
                     viewModel.setStaffTierInRoom(
@@ -746,6 +773,22 @@ fun RoomScreen(
         )
     }
 
+    supportSuspensionTarget?.let { target ->
+        RequestSuspensionDialog(
+            targetName = target.displayName,
+            onSubmit = { reason ->
+                viewModel.requestSupportSuspension(
+                    targetUserId = target.userId,
+                    targetName = target.displayName,
+                    actorName = userProfile.displayName,
+                    reason = reason
+                )
+                supportSuspensionTarget = null
+            },
+            onDismiss = { supportSuspensionTarget = null }
+        )
+    }
+
     alertTarget?.let { target ->
         SendOrEditAlertDialog(
             existingAlert = null,
@@ -767,7 +810,7 @@ fun RoomScreen(
     editUserProfileTarget?.let { loadedProfile ->
         EditUserAdminDialog(
             profile = loadedProfile,
-            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason ->
+            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason, pointsBalance, proLifetime ->
                 viewModel.adminEditUserInRoom(
                     targetUserId = loadedProfile.userId,
                     displayName = displayName,
@@ -780,7 +823,9 @@ fun RoomScreen(
                     disableVideo = disableVideo,
                     suspendedUntilMillis = suspendedUntilMillis,
                     suspensionReason = suspensionReason,
-                    actorName = userProfile.displayName
+                    actorName = userProfile.displayName,
+                    pointsBalance = pointsBalance,
+                    proLifetime = proLifetime
                 )
             },
             onDismiss = { editUserProfileTarget = null }
@@ -796,7 +841,7 @@ private fun RoomTopBar(
     canEditRoom: Boolean,
     canToggleInvisible: Boolean,
     isCurrentlyInvisible: Boolean,
-    staffTier: StaffTier,
+    invisibleAccent: Color,
     onBack: () -> Unit,
     onEditRoomName: () -> Unit,
     onToggleInvisible: () -> Unit,
@@ -844,6 +889,30 @@ private fun RoomTopBar(
                         style = MaterialTheme.typography.bodySmall,
                         color = VoiceCyan
                     )
+                    if (room.pinLocked) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = ModAmber.copy(alpha = 0.16f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Pin,
+                                    contentDescription = "PIN locked room",
+                                    tint = ModAmber,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Text(
+                                    text = "PIN",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ModAmber
+                                )
+                            }
+                        }
+                    }
                     if (room.roomLocked) {
                         Icon(
                             imageVector = Icons.Rounded.Lock,
@@ -884,7 +953,7 @@ private fun RoomTopBar(
                     Icon(
                         imageVector = if (isCurrentlyInvisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
                         contentDescription = if (isCurrentlyInvisible) "Switch to visible" else "Switch to invisible",
-                        tint = if (isCurrentlyInvisible) usernameColor(staffTier) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (isCurrentlyInvisible) invisibleAccent else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(20.dp)
                     )
                 }

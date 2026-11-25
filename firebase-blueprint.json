@@ -26,8 +26,12 @@
         "halfPointsBalance": { "type": "integer", "description": "Half-point remainder (0 or 1, representing +0.5 pt from free-user 7-day login streaks; two halves merge into +1 full point)." },
         "creatorEarnedPoints": { "type": "integer", "description": "Cumulative spendable in-app points earned as a creator (+1 pt per 2-pt photo unlock, +1 pt per $5 paid DM unlock, +8 pts per creator subscription). Credited directly to pointsBalance; app owner earns 100% of money." },
         "creatorEarningsCents": { "type": "integer", "description": "Legacy deprecated counter retained for backward compatibility. App owner earns 100% of money; creators earn spendable in-app points in pointsBalance / creatorEarnedPoints." },
-        "proMember": { "type": "boolean", "description": "Whether the user has an active $9.99/month Pro membership (1-min PTT, 30s Reels uploads, Blue username color, unlimited Discovery photos)." },
+        "proMember": { "type": "boolean", "description": "Whether the user has an active VOX Pro ($9.99/mo), VIP Pro ($29.99/mo), or Elite Pro ($59.99/mo) membership." },
+        "proTier": { "type": "string", "enum": ["FREE", "PRO", "VIP_PRO", "ELITE_PRO"], "description": "Active membership tier determining Group DM max members: FREE (7), PRO (15), VIP_PRO (25), ELITE_PRO (50)." },
         "proExpiresAtMillis": { "type": "integer", "description": "Epoch milliseconds when Pro membership expires (0 = not Pro)." },
+        "proLifetime": { "type": "boolean", "description": "Admin-granted Lifetime Pro status that never expires or requires renewal." },
+        "profileViewersUnlockedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which a free user has unlocked the full Who Viewed My Profile list (2 points per 24h unlock)." },
+        "priorityChirpOptIn": { "type": "boolean", "description": "Whether the user opts in to allow close friends to send 1-2 point Priority Break-In Chirps." },
         "profileBoostedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which this user's profile is promoted to the top of Discovery People (5 points per 24h boost)." },
         "spotlightFrameUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which a glowing neon Spotlight Frame border appears around this user's avatar in Discover and Chats (5 points per 24h)." },
         "spotlightFrameColorHex": { "type": "string", "description": "Hex color (#RRGGBB) of the user's active 24-hour glowing neon Spotlight Frame." },
@@ -144,7 +148,11 @@
         "participantCount": { "type": "integer" },
         "moderatorIds": { "type": "array" },
         "bannedUserIds": { "type": "array" },
+        "bannedNamesByUserId": { "type": "object", "description": "Map of banned userId -> displayName visible to Room Admins." },
         "bouncedUntilByUserId": { "type": "object", "description": "Map of userId -> epoch millis until which a bounced user is locked out of entering the room (24h)." },
+        "bouncedNamesByUserId": { "type": "object", "description": "Map of bounced userId -> displayName visible in the Room Admin Bounce List." },
+        "pinLocked": { "type": "boolean", "description": "Whether the room requires a 4-digit numeric PIN code to enter." },
+        "roomPinCode": { "type": "string", "description": "4-digit numeric PIN code required to enter when pinLocked is true." },
         "mutedUserIds": { "type": "array" },
         "blockedWords": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -171,6 +179,7 @@
         "role": { "type": "string", "enum": ["HOST", "MODERATOR", "SPEAKER", "LISTENER"] },
         "staffTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
         "invisible": { "type": "boolean" },
+        "enteredPin": { "type": "string", "description": "Optional 4-digit PIN verified on room join when room.pinLocked is true." },
         "micActive": { "type": "boolean" },
         "camActive": { "type": "boolean" },
         "handRaised": { "type": "boolean" },
@@ -222,8 +231,8 @@
         "actionType": {
           "type": "string",
           "enum": [
-            "MUTE", "UNMUTE", "BOUNCE", "KICK", "SUSPEND", "BAN", "UNBAN",
-            "DELETE_MSG", "AUTO_MOD", "LOCK_ROOM", "STAGE_MUTE",
+            "MUTE", "UNMUTE", "BOUNCE", "UNBOUNCE", "KICK", "SUSPEND", "BAN", "UNBAN",
+            "DELETE_MSG", "AUTO_MOD", "LOCK_ROOM", "PIN_LOCK", "STAGE_MUTE",
             "PROMOTE_MOD", "DEMOTE_MOD", "SEND_ALERT", "STAFF_ROLE",
             "EDIT_USER", "EDIT_ROOM", "CLOSE_ROOM", "SETTINGS"
           ]
@@ -270,8 +279,11 @@
         "avatarColorHex": { "type": "string" },
         "photoBase64": { "type": "string" },
         "staffTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
-        "proMember": { "type": "boolean", "description": "Whether the user has an active $9.99/month Pro membership (displays Blue username)." },
+        "proMember": { "type": "boolean", "description": "Whether the user has an active VOX Pro, VIP Pro, or Elite Pro membership (displays Blue username)." },
+        "proTier": { "type": "string", "enum": ["FREE", "PRO", "VIP_PRO", "ELITE_PRO"], "description": "Public membership tier for Group DM capacity checks (FREE=7, PRO=15, VIP_PRO=25, ELITE_PRO=50)." },
         "proExpiresAtMillis": { "type": "integer", "description": "Epoch milliseconds when Pro membership expires." },
+        "proLifetime": { "type": "boolean", "description": "Admin-granted Lifetime Pro status that never expires." },
+        "priorityChirpOptIn": { "type": "boolean", "description": "Whether this user opts in to receive Priority Break-In Chirps from close friends." },
         "profileBoostedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which this profile is promoted to the top of Discovery People." },
         "spotlightFrameUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which a glowing neon Spotlight Frame border appears around this user's avatar in Discover and Chats." },
         "spotlightFrameColorHex": { "type": "string", "description": "Hex color (#RRGGBB) for the user's active glowing neon Spotlight Frame." },
@@ -320,9 +332,12 @@
       "description": "Private 1-on-1 or multi-user group message thread supporting live calls, camera snaps, and paid-DM kick enforcement.",
       "type": "object",
       "properties": {
-        "participantIds": { "type": "array", "description": "2 to 15 participant UIDs for array-contains queries." },
+        "participantIds": { "type": "array", "description": "2 to 50 participant UIDs (Free max 7, Pro max 15, VIP Pro max 25, Elite Pro max 50)." },
         "isGroup": { "type": "boolean", "description": "True when 3+ users or created as a group chat." },
         "groupName": { "type": "string", "description": "Optional display name for a group private chat." },
+        "groupAdminId": { "type": "string", "description": "UID of the Group DM creator/administrator who can mute, bounce, ban, appoint Group Support Staff, and assign PTT speakers (>15 users)." },
+        "groupSupportIds": { "type": "array", "description": "UIDs appointed by the Group DM Administrator as Group DM Support Staff (can mute and 24h bounce regular members)." },
+        "pttAllowedUserIds": { "type": "array", "description": "UIDs authorized by the Group DM Administrator to use Push-to-Talk when the group has more than 15 members." },
         "participantNamesById": { "type": "object", "description": "Map of UID to display name for group chat participants." },
         "kickedUserIds": { "type": "array", "description": "UIDs kicked from sending messages in this thread." },
         "blockedByUserIds": { "type": "array", "description": "UIDs of participants who have blocked the other participant in this 1-on-1 thread." },
@@ -353,6 +368,18 @@
         "talkStreakCount": { "type": "integer", "description": "Consecutive UTC days both participants exchanged at least one DM or PTT clip (displayed with flame/radio-tower icon at 3+ days)." },
         "talkStreakLastMutualDay": { "type": "string", "description": "UTC date (YYYY-MM-DD) when both participants last exchanged a message or PTT clip." },
         "lastMessageDayByUserId": { "type": "object", "description": "Map of participant UID to most recent UTC date (YYYY-MM-DD) they sent a message or PTT clip in this thread." },
+        "priorityChirpOptInUserIds": { "type": "array", "description": "Participant UIDs who opted in to receive Priority Break-In Chirps in this DM." },
+        "lastPriorityChirpAtMillis": { "type": "integer", "description": "Epoch ms of the most recent Priority Break-In Chirp sent in this thread." },
+        "lastPriorityChirpSenderId": { "type": "string", "description": "UID of the sender of the most recent Priority Break-In Chirp." },
+        "lastPriorityChirpSenderName": { "type": "string", "description": "Display name of the sender of the most recent Priority Break-In Chirp." },
+        "lastPriorityChirpMessage": { "type": "string", "description": "Short alert text accompanying the Priority Break-In Chirp." },
+        "lastPriorityChirpPoints": { "type": "integer", "description": "Points spent on the Priority Break-In Chirp (1 = Priority, 2 = Urgent Break-In)." },
+        "lastPriorityChirpAcknowledgedBy": { "type": "array", "description": "Participant UIDs who have opened/acknowledged the latest Priority Break-In Chirp." },
+        "bannerText": { "type": "string", "description": "Active 24-hour scrolling banner text displayed near the top of the DM (1 point)." },
+        "bannerAuthorId": { "type": "string", "description": "UID of the user who purchased the active DM scrolling banner." },
+        "bannerAuthorName": { "type": "string", "description": "Display name of the user who purchased the active DM scrolling banner." },
+        "bannerColorHex": { "type": "string", "description": "Hex color (#RRGGBB) of the active DM scrolling banner." },
+        "bannerExpiresAtMillis": { "type": "integer", "description": "Epoch ms when the active 24-hour DM scrolling banner expires." },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -378,7 +405,7 @@
         "audioBase64": { "type": "string", "description": "Optional compressed M4A/AAC voice note encoded as Base64." },
         "audioDurationSec": { "type": "integer", "description": "Duration of the attached voice note in seconds (0-60)." },
         "expiresAtMillis": { "type": "integer", "description": "Optional epoch ms when a disappearing message expires (0 = permanent)." },
-        "messageType": { "type": "string", "enum": ["TEXT", "SCREENSHOT", "SUPPORT_HANDOFF"], "description": "Optional message type for normal text/media, screenshot alert notices, or admin-to-support handoffs." },
+        "messageType": { "type": "string", "enum": ["TEXT", "SCREENSHOT", "SUPPORT_HANDOFF", "PRIORITY_CHIRP"], "description": "Optional message type for normal text/media, screenshot alert notices, admin-to-support handoffs, or Priority Break-In Chirps." },
         "reactionsByUserId": { "type": "object", "description": "Map of participant UID to emoji reaction ('❤️', '👍', '😂', '😮', '😢', '🔥')." },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -487,7 +514,7 @@
       "description": "Immutable ledger entry recording point purchases, Pro memberships ($9.99/mo or 10 pts), 2-point photo unlocks (creator earns +1 usable pt), 5-point Picture/Reel/Profile boosts, custom PTT themes & chirps, $5 paid DMs (full $5 to app owner; recipient earns +1 usable pt), and $15/mo creator subscriptions (full $15 to app owner; creator earns +8 usable pts).",
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["BUY_POINTS", "UNLOCK_PHOTO", "SUBSCRIBE_CREATOR", "BOOST_POST", "BOOST_REEL", "BOOST_PROFILE", "BUY_PTT_ITEM", "BUY_SPOTLIGHT_FRAME", "DAILY_STREAK_BONUS", "REFERRAL_BONUS", "UNLOCK_DM", "PRO_MEMBERSHIP"] },
+        "type": { "type": "string", "enum": ["BUY_POINTS", "UNLOCK_PHOTO", "SUBSCRIBE_CREATOR", "BOOST_POST", "BOOST_REEL", "BOOST_PROFILE", "BUY_PTT_ITEM", "BUY_SPOTLIGHT_FRAME", "DAILY_STREAK_BONUS", "REFERRAL_BONUS", "UNLOCK_DM", "PRO_MEMBERSHIP", "VIP_PRO_MEMBERSHIP", "ELITE_PRO_MEMBERSHIP", "UNLOCK_PROFILE_VIEWERS", "PRIORITY_CHIRP", "DM_SCROLLING_BANNER"] },
         "buyerId": { "type": "string" },
         "buyerName": { "type": "string" },
         "creatorId": { "type": "string" },
@@ -674,6 +701,203 @@
         "accountVerified", "firstPttSent", "bonusClaimed", "bonusPointsEach",
         "createdAt", "updatedAt"
       ]
+    },
+    "ProfileViewRecord": {
+      "title": "ProfileViewRecord",
+      "description": "Records when a user visits another user's profile to power Who Viewed My Profile teaser & unlocked viewer list.",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "viewerId": { "type": "string" },
+        "viewerName": { "type": "string" },
+        "viewerHandle": { "type": "string" },
+        "viewerColorHex": { "type": "string" },
+        "viewerPhotoBase64": { "type": "string" },
+        "viewerTier": { "type": "string", "enum": ["USER", "SUPPORT", "ADMIN"] },
+        "viewerProMember": { "type": "boolean" },
+        "viewedAtMillis": { "type": "integer" },
+        "viewedDayKey": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "targetUserId", "viewerId", "viewerName", "viewerHandle", "viewerColorHex",
+        "viewerTier", "viewedAtMillis", "viewedDayKey", "updatedAt"
+      ]
+    },
+    "UserModerationFile": {
+      "title": "UserModerationFile",
+      "description": "Automated 5-strike safety report escalation file tracking report count, active investigation, warnings, timed suspensions (1h on 3rd, 2h on 4th), and indefinite suspension pending Support/Admin resolution on 5th+ report.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "reportCount": { "type": "integer" },
+        "warningCount": { "type": "integer" },
+        "investigationActive": { "type": "boolean" },
+        "investigationStatus": {
+          "type": "string",
+          "enum": ["NONE", "INVESTIGATING", "WARNING_ISSUED", "SUSPENDED_1H", "SUSPENDED_2H", "SUSPENDED_PENDING_REVIEW", "SUSPENDED_PENDING_ADMIN_REVIEW", "RESOLVED"]
+        },
+        "suspendedUntilMillis": { "type": "integer" },
+        "suspendedUntilInvestigationResolved": { "type": "boolean" },
+        "pendingAdminReview": { "type": "boolean", "description": "True when Support staff requested suspension and the user is suspended until an Admin reviews." },
+        "pendingSuspensionRequestId": { "type": "string" },
+        "suspensionReason": { "type": "string" },
+        "lastWarningMessage": { "type": "string" },
+        "lastWarningAtMillis": { "type": "integer" },
+        "lastWarningAcknowledgedAtMillis": { "type": "integer" },
+        "lastReportId": { "type": "string" },
+        "lastResolvedById": { "type": "string" },
+        "lastResolvedByName": { "type": "string" },
+        "lastResolutionNote": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "targetName", "reportCount", "warningCount", "investigationActive",
+        "investigationStatus", "suspendedUntilMillis", "suspendedUntilInvestigationResolved",
+        "suspensionReason", "lastWarningMessage", "lastWarningAtMillis",
+        "lastWarningAcknowledgedAtMillis", "lastReportId", "updatedAt"
+      ]
+    },
+    "UserFileNote": {
+      "title": "UserFileNote",
+      "description": "Append-only moderation file note logged for every safety report (strikes 1-5+) and staff investigation resolution, readable only by Support and Admin.",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "reportId": { "type": "string" },
+        "strikeNumber": { "type": "integer" },
+        "actionTaken": {
+          "type": "string",
+          "enum": ["INVESTIGATION_STARTED", "WARNING_ISSUED", "SUSPENDED_1H", "SUSPENDED_2H", "SUSPENDED_PENDING_REVIEW", "INVESTIGATION_RESOLVED", "SUPPORT_SUSPENSION_REQUESTED", "ADMIN_REVIEW_COMPLETED"]
+        },
+        "category": { "type": "string" },
+        "reason": { "type": "string" },
+        "reporterId": { "type": "string" },
+        "reporterName": { "type": "string" },
+        "actorRole": { "type": "string", "enum": ["REPORTER", "SUPPORT", "ADMIN"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "targetUserId", "reportId", "strikeNumber", "actionTaken", "category",
+        "reason", "reporterId", "reporterName", "actorRole", "createdAt"
+      ]
+    },
+    "ReportRateLimit": {
+      "title": "ReportRateLimit",
+      "description": "Rolling 1-hour report rate limiter per user (max 3 different targets, 1 report per target per hour).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "recentTargetTimestamps": { "type": "object" },
+        "lastTargetUserId": { "type": "string" },
+        "lastReportId": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "recentTargetTimestamps", "lastTargetUserId", "lastReportId", "updatedAt"]
+    },
+    "SuspensionRequest": {
+      "title": "SuspensionRequest",
+      "description": "Support-submitted suspension request with mandatory reason that immediately suspends the user until reviewed by an Admin.",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "requestedById": { "type": "string" },
+        "requestedByName": { "type": "string" },
+        "reason": { "type": "string" },
+        "roomId": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED_BAN", "APPROVED_TIMED", "DISMISSED_LIFTED"] },
+        "reviewedByAdminId": { "type": "string" },
+        "reviewedByAdminName": { "type": "string" },
+        "adminDecisionNote": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "targetUserId", "targetName", "requestedById", "requestedByName", "reason",
+        "roomId", "status", "reviewedByAdminId", "reviewedByAdminName",
+        "adminDecisionNote", "createdAt", "updatedAt"
+      ]
+    },
+    "RefundReport": {
+      "title": "RefundReport",
+      "description": "Record-keeping report for every membership or purchase refund issued by an App Admin or Support Staff member.",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "refundType": { "type": "string", "enum": ["VOX_PRO", "CREATOR_SUBSCRIPTION", "PAID_DM", "POINTS_TRANSACTION"] },
+        "itemLabel": { "type": "string" },
+        "amountCents": { "type": "integer" },
+        "transactionId": { "type": "string" },
+        "subscriptionId": { "type": "string" },
+        "membershipRevoked": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "issuedById": { "type": "string" },
+        "issuedByName": { "type": "string" },
+        "issuedByTier": { "type": "string", "enum": ["ADMIN", "SUPPORT"] },
+        "reportedToAdmins": { "type": "boolean" },
+        "acknowledgedByAdmin": { "type": "boolean" },
+        "acknowledgedByAdminName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "targetUserId", "targetName", "refundType", "itemLabel", "amountCents",
+        "transactionId", "subscriptionId", "membershipRevoked", "reason",
+        "issuedById", "issuedByName", "issuedByTier", "reportedToAdmins",
+        "acknowledgedByAdmin", "acknowledgedByAdminName", "createdAt", "updatedAt"
+      ]
+    },
+    "PerkGrant": {
+      "title": "PerkGrant",
+      "description": "Audit record of any app perk granted to a user by App Admin or Support Staff, tracked for the 30-perks-in-5-days Support Staff alert.",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "perkType": {
+          "type": "string",
+          "enum": ["VOX_PRO_30D", "VOX_PRO_LIFETIME", "SPOTLIGHT_FRAME_24H", "PTT_THEME", "PTT_CHIRP", "BONUS_POINTS", "PROFILE_VIEWERS_24H", "PROFILE_BOOST_24H"]
+        },
+        "perkLabel": { "type": "string" },
+        "perkDetail": { "type": "string" },
+        "reason": { "type": "string" },
+        "grantedById": { "type": "string" },
+        "grantedByName": { "type": "string" },
+        "grantedByTier": { "type": "string", "enum": ["ADMIN", "SUPPORT"] },
+        "createdAtMillis": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "targetUserId", "targetName", "perkType", "perkLabel", "perkDetail",
+        "reason", "grantedById", "grantedByName", "grantedByTier", "createdAtMillis", "createdAt"
+      ]
+    },
+    "AdminNotification": {
+      "title": "AdminNotification",
+      "description": "Real-time record-keeping and threshold notifications delivered to App Admins (Support refunds and Support 30-perks-in-5-days alerts).",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["SUPPORT_REFUND_REPORT", "SUPPORT_PERK_THRESHOLD_30_IN_5D"] },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "createdById": { "type": "string" },
+        "createdByName": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "countValue": { "type": "integer" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "type", "title", "message", "createdById", "createdByName",
+        "targetUserId", "targetName", "referenceId", "countValue",
+        "read", "createdAt", "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -784,6 +1008,38 @@
     "/referrals/{inviteeId}": {
       "schema": { "$ref": "#/entities/ReferralRecord" },
       "description": "Invite-a-Friend referral records granting +2 points to both inviter and new user once verified and first PTT clip is sent."
+    },
+    "/profileViews/{viewId}": {
+      "schema": { "$ref": "#/entities/ProfileViewRecord" },
+      "description": "Profile visit records keyed by {targetUserId}_{viewerId} powering Who Viewed My Profile."
+    },
+    "/userModerationFiles/{userId}": {
+      "schema": { "$ref": "#/entities/UserModerationFile" },
+      "description": "Automated 5-strike report escalation state and investigation status per user."
+    },
+    "/userModerationFiles/{userId}/notes/{noteId}": {
+      "schema": { "$ref": "#/entities/UserFileNote" },
+      "description": "Private append-only moderation file notes per user readable only by Support and Admin."
+    },
+    "/reportRateLimits/{userId}": {
+      "schema": { "$ref": "#/entities/ReportRateLimit" },
+      "description": "Rolling 1-hour per-user report rate limiter (max 3 different target users, 1 report each per hour)."
+    },
+    "/suspensionRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/SuspensionRequest" },
+      "description": "Support-submitted suspension requests with mandatory reasons pending Admin review."
+    },
+    "/refundReports/{reportId}": {
+      "schema": { "$ref": "#/entities/RefundReport" },
+      "description": "Refund audit reports issued by Admins and Support Staff (Support refunds also notify App Admins)."
+    },
+    "/perkGrants/{grantId}": {
+      "schema": { "$ref": "#/entities/PerkGrant" },
+      "description": "App perk grant log used by Admins and Support Staff and monitored for the 30-perks-in-5-days Support threshold."
+    },
+    "/adminNotifications/{notifId}": {
+      "schema": { "$ref": "#/entities/AdminNotification" },
+      "description": "Admin-only record-keeping and threshold notifications from Support Staff actions."
     }
   }
 }

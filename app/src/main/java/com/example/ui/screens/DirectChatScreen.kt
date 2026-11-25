@@ -50,6 +50,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Cameraswitch
@@ -75,8 +76,11 @@ import androidx.compose.material.icons.rounded.Screenshot
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SupportAgent
 import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material.icons.rounded.TimerOff
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
+import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -134,6 +138,7 @@ import com.example.data.DirectoryEntry
 import com.example.data.DmAccessPass
 import com.example.data.DmPolicy
 import com.example.data.PresenceStatus
+import com.example.data.ProTier
 import com.example.data.ReportCategory
 import com.example.data.StaffTier
 import com.example.data.UiState
@@ -184,6 +189,7 @@ fun DirectChatScreen(
     onUnblockContact: (targetUserId: String) -> Unit = {},
     onSendFriendAttentionAlert: (DirectThread) -> Unit = {},
     onOpenUserProfile: (String) -> Unit = {},
+    onOpenBuyPoints: () -> Unit = {},
     onBack: () -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -214,6 +220,10 @@ fun DirectChatScreen(
     var showKickPaidMemberDialog by remember { mutableStateOf(false) }
     var showBlockContactDialog by remember { mutableStateOf(false) }
     var showChatPrivacyDialog by remember { mutableStateOf(false) }
+    var showDmBannerDialog by remember { mutableStateOf(false) }
+    var showPriorityChirpDialog by remember { mutableStateOf(false) }
+    var showGroupAdminSheet by remember { mutableStateOf(false) }
+    var hideMyNameInGroup by remember { mutableStateOf(false) }
     var actionTargetMessage by remember { mutableStateOf<DirectMessage?>(null) }
     var reportTargetMessage by remember { mutableStateOf<DirectMessage?>(null) }
     var lastScreenshotNotifiedMs by remember { mutableLongStateOf(0L) }
@@ -290,7 +300,8 @@ fun DirectChatScreen(
                     senderTier = myStaffTier,
                     text = caption,
                     audioBase64 = note.audioBase64,
-                    audioDurationSec = note.durationSec
+                    audioDurationSec = note.durationSec,
+                    hideSenderName = hideMyNameInGroup && ((threadState as? UiState.Success)?.data?.isGroup == true)
                 )
             } else {
                 snackbarHostState.showTopMessage("Recording was too short or could not be saved.")
@@ -422,6 +433,17 @@ fun DirectChatScreen(
     }
 
     fun requestVoiceNoteStart() {
+        val currentThread = (threadState as? UiState.Success)?.data
+        if (currentThread != null && (currentThread.isGroup || currentThread.participantIds.size > 2) &&
+            !currentThread.isPttAllowedInGroup(viewModel.currentUserId, myStaffTier == StaffTier.ADMIN)
+        ) {
+            scope.launch {
+                snackbarHostState.showTopMessage(
+                    "Push-to-Talk in groups over ${DirectThread.PTT_ADMIN_SELECTION_THRESHOLD} users is restricted to speakers selected by the Group DM Admin."
+                )
+            }
+            return
+        }
         if (!myStaffTier.isAdmin() && userProfile.disableMic) {
             scope.launch { snackbarHostState.showTopMessage("Microphone access is disabled on your account.") }
             return
@@ -541,6 +563,17 @@ fun DirectChatScreen(
     val otherHidingTrueOnline = !isGroup && myStaffTier.isStaff() &&
         (otherDirectoryEntry?.isHidingTrueOnlineStatus(nowMillis) == true)
     val amIKicked = thread?.isUserKicked(viewModel.currentUserId) == true
+    val isGroupAdmin = thread?.isGroupAdmin(viewModel.currentUserId) == true
+    val isGroupSupport = isGroup && (thread?.isGroupSupport(viewModel.currentUserId) == true)
+    val isGroupAdminOrAppAdmin = isGroup && (isGroupAdmin || myStaffTier == StaffTier.ADMIN)
+    val canManageGroupDm = isGroup && (isGroupAdmin || isGroupSupport || myStaffTier == StaffTier.ADMIN)
+    val requiresGroupPttSelection = isGroup && (thread?.requiresAdminPttSelection() == true)
+    val canUseGroupPtt = !isGroup || thread == null ||
+        thread.isPttAllowedInGroup(viewModel.currentUserId, myStaffTier == StaffTier.ADMIN)
+    val amIBannedInGroup = isGroup && (thread?.isBannedInGroup(viewModel.currentUserId) == true)
+    val amIBouncedInGroup = isGroup && (thread?.isBouncedInGroup(viewModel.currentUserId, nowMillis) == true)
+    val amIMutedInGroup = isGroup && (thread?.isMutedInGroup(viewModel.currentUserId) == true)
+    val isGroupLockedOut = amIBannedInGroup || amIBouncedInGroup
     val iBlockedOther = !isGroup && (
         thread?.isBlockedBy(viewModel.currentUserId) == true ||
             (otherUid.isNotBlank() && userProfile.blockedUserIds.contains(otherUid))
@@ -555,9 +588,11 @@ fun DirectChatScreen(
         (otherPaidPass != null || (userProfile.dmPolicyEnum() == DmPolicy.PAID && thread?.isUserKicked(otherUid) != true))
     val isMyPttEnabled = thread?.isPttEnabledFor(viewModel.currentUserId) == true
     val isOtherPttEnabled = thread?.isOtherPttEnabled(viewModel.currentUserId) == true
-    val isMutualPttActive = !amIKicked && !isBlockedThread && (thread?.isMutualPttActive(viewModel.currentUserId) == true)
+    val isMutualPttActive = !amIKicked && !isBlockedThread && !isGroupLockedOut && !amIMutedInGroup &&
+        canUseGroupPtt && (thread?.isMutualPttActive(viewModel.currentUserId) == true)
     val remoteVideoTrack = remoteVideoTracks.values.firstOrNull()
-    val canSend = !amIKicked && !isBlockedThread && (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
+    val canSend = !amIKicked && !isBlockedThread && !isGroupLockedOut && !amIMutedInGroup &&
+        (composerText.isNotBlank() || draftSnapBase64.isNotBlank()) && !isSending && !isEncodingSnap
     val remainingPictureQuota = remember(userProfile.pictureUploadTimestamps) {
         userProfile.remainingPictureUploads()
     }
@@ -758,8 +793,33 @@ fun DirectChatScreen(
                                 }
                             }
 
+                            // Group DM Admin / Support Staff Controls
+                            if (canManageGroupDm && thread != null) {
+                                IconButton(
+                                    onClick = { showGroupAdminSheet = true },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .testTag("dm_group_admin_controls_button")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isGroupAdminOrAppAdmin) ModAmber.copy(alpha = 0.22f) else SafetyEmerald.copy(alpha = 0.22f),
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isGroupAdminOrAppAdmin) Icons.Rounded.AdminPanelSettings else Icons.Rounded.SupportAgent,
+                                                contentDescription = if (isGroupAdminOrAppAdmin) "Group DM Admin Controls" else "Group DM Support Controls",
+                                                tint = if (isGroupAdminOrAppAdmin) ModAmber else SafetyEmerald,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
                             // Add Person -> Creates Group Chat (or adds to Group Chat)
-                            if (!amIKicked && !isBlockedThread && thread != null) {
+                            if (!amIKicked && !isBlockedThread && !isGroupLockedOut && thread != null) {
                                 IconButton(
                                     onClick = { showAddPersonSheet = true },
                                     modifier = Modifier
@@ -788,6 +848,14 @@ fun DirectChatScreen(
                                 IconButton(
                                     onClick = {
                                         val next = !isMyPttEnabled
+                                        if (next && !canUseGroupPtt) {
+                                            scope.launch {
+                                                snackbarHostState.showTopMessage(
+                                                    "Only speakers selected by the Group DM Admin can use Push-to-Talk in groups over ${DirectThread.PTT_ADMIN_SELECTION_THRESHOLD} users."
+                                                )
+                                            }
+                                            return@IconButton
+                                        }
                                         if (next) {
                                             val micGranted = ContextCompat.checkSelfPermission(
                                                 context,
@@ -807,6 +875,7 @@ fun DirectChatScreen(
                                     Surface(
                                         shape = CircleShape,
                                         color = when {
+                                            !canUseGroupPtt && !isMyPttEnabled -> MaterialTheme.colorScheme.surfaceVariant
                                             isMutualPttActive -> SafetyEmerald
                                             isMyPttEnabled -> SnapBlue
                                             isOtherPttEnabled -> ModAmber.copy(alpha = 0.25f)
@@ -816,9 +885,14 @@ fun DirectChatScreen(
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
-                                                imageVector = Icons.Rounded.RecordVoiceOver,
-                                                contentDescription = if (isMyPttEnabled) "Disable Live Push to Talk" else "Enable Live Push to Talk",
+                                                imageVector = if (!canUseGroupPtt && !isMyPttEnabled) Icons.Rounded.MicOff else Icons.Rounded.RecordVoiceOver,
+                                                contentDescription = when {
+                                                    !canUseGroupPtt && !isMyPttEnabled -> "PTT restricted to selected speakers"
+                                                    isMyPttEnabled -> "Disable Live Push to Talk"
+                                                    else -> "Enable Live Push to Talk"
+                                                },
                                                 tint = when {
+                                                    !canUseGroupPtt && !isMyPttEnabled -> MaterialTheme.colorScheme.onSurfaceVariant
                                                     isMutualPttActive || isMyPttEnabled -> Color.White
                                                     isOtherPttEnabled -> ModAmber
                                                     else -> MaterialTheme.colorScheme.primary
@@ -955,6 +1029,60 @@ fun DirectChatScreen(
                                 }
                             }
                         }
+                        if (!amIKicked && !isBlockedThread && thread != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .clickable { showDmBannerDialog = true }
+                                        .testTag("dm_open_banner_dialog_button")
+                                ) {
+                                    Text(
+                                        text = if (thread.hasActiveBanner()) "★ Edit Banner (1 pt)" else "★ Scrolling Banner (1 pt)",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    )
+                                }
+                                if (!isGroup) {
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = LiveCoral.copy(alpha = 0.14f),
+                                        border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.45f)),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .clickable { showPriorityChirpDialog = true }
+                                            .testTag("dm_open_priority_chirp_button")
+                                    ) {
+                                        Text(
+                                            text = "📡 Priority Chirp (1–2 pts)",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = LiveCoral,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (thread?.hasActiveBanner() == true) {
+                            com.example.ui.components.DmScrollingBannerBar(
+                                thread = thread,
+                                onTapEdit = {
+                                    if (!amIKicked && !isBlockedThread) {
+                                        showDmBannerDialog = true
+                                    }
+                                }
+                            )
+                        }
                         if (thread?.isDisappearingEnabled() == true) {
                             Row(
                                 modifier = Modifier
@@ -1062,7 +1190,74 @@ fun DirectChatScreen(
                     Column {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                        if (amIKicked) {
+                        if (amIBannedInGroup) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(LiveCoral.copy(alpha = 0.14f))
+                                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                                    .testTag("dm_group_banned_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Block,
+                                    contentDescription = "Banned from Group DM",
+                                    tint = LiveCoral,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "You have been banned from this Group DM by the Group Admin.",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = LiveCoral
+                                )
+                            }
+                        } else if (amIBouncedInGroup) {
+                            val remLabel = thread?.remainingGroupBounceLabel(viewModel.currentUserId, nowMillis).orEmpty()
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(ModAmber.copy(alpha = 0.16f))
+                                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                                    .testTag("dm_group_bounced_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.TimerOff,
+                                    contentDescription = "Bounced from Group DM",
+                                    tint = ModAmber,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "You were bounced from this Group DM for 24h ($remLabel).",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = ModAmber
+                                )
+                            }
+                        } else if (amIMutedInGroup) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(ModAmber.copy(alpha = 0.14f))
+                                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                                    .testTag("dm_group_muted_banner"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.VolumeOff,
+                                    contentDescription = "Muted in Group DM",
+                                    tint = ModAmber,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "You are muted in this Group DM by the Group Admin. You can read messages but cannot send.",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = ModAmber
+                                )
+                            }
+                        } else if (amIKicked) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1124,8 +1319,57 @@ fun DirectChatScreen(
                                 }
                             }
                         } else {
+                        // Group DM >15 Members PTT Speaker Selection Notice
+                        if (requiresGroupPttSelection && thread != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        if (canUseGroupPtt) SafetyEmerald.copy(alpha = 0.12f)
+                                        else ModAmber.copy(alpha = 0.12f)
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    .testTag("dm_group_ptt_speaker_status_bar"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (canUseGroupPtt) Icons.Rounded.RecordVoiceOver else Icons.Rounded.MicOff,
+                                    contentDescription = "Group PTT speaker mode",
+                                    tint = if (canUseGroupPtt) SafetyEmerald else ModAmber,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = when {
+                                        isGroupAdminOrAppAdmin ->
+                                            "Large Group PTT (${thread.participantIds.size} users): ${thread.pttAllowedUserIds.size} speaker(s) selected."
+                                        canUseGroupPtt ->
+                                            "Large Group PTT (${thread.participantIds.size} users): You are an approved PTT speaker."
+                                        else ->
+                                            "Large Group PTT (${thread.participantIds.size} users): Listen-only. Ask the Group Admin for PTT access."
+                                    },
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isGroupAdminOrAppAdmin) {
+                                    TextButton(
+                                        onClick = { showGroupAdminSheet = true },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("dm_group_select_ptt_speakers_button")
+                                    ) {
+                                        Text(
+                                            text = "Speakers",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    }
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        }
+
                         // Mutual Live Push-to-Talk Walkie-Talkie Strip (Live stream audio — never chat-log voice notes)
-                        if (isOtherPttEnabled && !isMyPttEnabled && thread != null) {
+                        if (isOtherPttEnabled && !isMyPttEnabled && canUseGroupPtt && thread != null) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1334,6 +1578,37 @@ fun DirectChatScreen(
                                             )
                                         }
                                     }
+
+                                    // Lock-Screen PTT Mode quick launch button
+                                    androidx.compose.material3.OutlinedButton(
+                                        onClick = {
+                                            val lockIntent = Intent(
+                                                context,
+                                                com.example.media.LockScreenPttActivity::class.java
+                                            ).apply {
+                                                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                            }
+                                            runCatching { context.startActivity(lockIntent) }
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("dm_open_lock_screen_ptt_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Lock,
+                                            contentDescription = "Open Lock-Screen PTT mode",
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Lock-Screen PTT Mode (also auto-shows when screen locks)",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 } else {
                                     // Only current user has PTT enabled so far — waiting on the other user
                                     Surface(
@@ -1520,6 +1795,50 @@ fun DirectChatScreen(
                                 }
                             }
                         } else {
+                        if (isGroup) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = hideMyNameInGroup,
+                                    onClick = { hideMyNameInGroup = !hideMyNameInGroup },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Rounded.VisibilityOff,
+                                            contentDescription = "Hide my name",
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = if (hideMyNameInGroup) "Hide Name: ON" else "Hide Name",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                    ),
+                                    modifier = Modifier.testTag("dm_hide_name_toggle")
+                                )
+                                Text(
+                                    text = if (hideMyNameInGroup) {
+                                        "Others won't see your name (still reportable)"
+                                    } else {
+                                        "Tap Hide Name to send anonymously"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1571,7 +1890,7 @@ fun DirectChatScreen(
                                 )
                             }
 
-                            // Record Voice Note
+                            // Record Voice Note / PTT Clip
                             IconButton(
                                 onClick = ::requestVoiceNoteStart,
                                 enabled = !isSending && !isEncodingSnap,
@@ -1580,9 +1899,9 @@ fun DirectChatScreen(
                                     .testTag("dm_voice_note_button")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Rounded.Mic,
-                                    contentDescription = "Record voice note",
-                                    tint = MaterialTheme.colorScheme.primary,
+                                    imageVector = if (canUseGroupPtt) Icons.Rounded.Mic else Icons.Rounded.MicOff,
+                                    contentDescription = if (canUseGroupPtt) "Record voice note" else "PTT restricted to selected speakers",
+                                    tint = if (canUseGroupPtt) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(21.dp)
                                 )
                             }
@@ -1627,7 +1946,8 @@ fun DirectChatScreen(
                                                     senderName = userProfile.displayName,
                                                     senderTier = myStaffTier,
                                                     text = toSend,
-                                                    imageBase64 = snapToSend
+                                                    imageBase64 = snapToSend,
+                                                    hideSenderName = isGroup && hideMyNameInGroup
                                                 )
                                             }
                                         },
@@ -1644,7 +1964,7 @@ fun DirectChatScreen(
                                 }
                             } else {
                                 // 1-Tap Thumbs Up 👍 Quick Send Button
-                                val canSendThumbsUp = !amIKicked && !isBlockedThread && !isSending && !isEncodingSnap
+                                val canSendThumbsUp = !amIKicked && !isBlockedThread && !isGroupLockedOut && !amIMutedInGroup && !isSending && !isEncodingSnap
                                 Surface(
                                     shape = CircleShape,
                                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -1655,7 +1975,8 @@ fun DirectChatScreen(
                                             viewModel.sendMessage(
                                                 senderName = userProfile.displayName,
                                                 senderTier = myStaffTier,
-                                                text = "👍"
+                                                text = "👍",
+                                                hideSenderName = isGroup && hideMyNameInGroup
                                             )
                                         },
                                         enabled = canSendThumbsUp,
@@ -1886,14 +2207,52 @@ fun DirectChatScreen(
                     }
                 }
 
-                // MESSAGES LIST
+                // MESSAGES LIST (or Group DM Bounce / Ban Lockout)
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
                     contentAlignment = Alignment.TopCenter
                 ) {
-                    when (messagesState) {
+                    if (isGroupLockedOut) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(32.dp)
+                                .testTag("dm_group_lockout_card"),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = if (amIBannedInGroup) Icons.Rounded.Block else Icons.Rounded.TimerOff,
+                                contentDescription = if (amIBannedInGroup) "Banned from Group DM" else "Bounced from Group DM",
+                                tint = if (amIBannedInGroup) LiveCoral else ModAmber,
+                                modifier = Modifier.size(56.dp)
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                text = if (amIBannedInGroup) "Banned from Group DM" else "Bounced for 24 Hours",
+                                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                                color = if (amIBannedInGroup) LiveCoral else ModAmber,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = if (amIBannedInGroup) {
+                                    "The Group DM Administrator has banned you from participating in this group chat."
+                                } else {
+                                    "You were bounced by the Group DM Administrator. Remaining time: ${thread?.remainingGroupBounceLabel(viewModel.currentUserId, nowMillis).orEmpty()}."
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(16.dp))
+                            Button(onClick = onBack) {
+                                Text("Back to Chats")
+                            }
+                        }
+                    } else when (messagesState) {
                         is UiState.Loading -> {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
@@ -2031,6 +2390,50 @@ fun DirectChatScreen(
         )
     }
 
+    if (showDmBannerDialog && thread != null) {
+        com.example.ui.components.PurchaseDmBannerDialog(
+            pointsBalance = userProfile.pointsBalance,
+            isSending = isSending,
+            existingBannerText = if (thread.hasActiveBanner()) thread.bannerText else "",
+            onBuyBanner = { bannerText, colorHex ->
+                viewModel.purchaseScrollingBanner(
+                    bannerText = bannerText,
+                    colorHex = colorHex,
+                    buyerName = userProfile.displayName,
+                    onInsufficientPoints = onOpenBuyPoints,
+                    onSuccess = { showDmBannerDialog = false }
+                )
+            },
+            onGoBuyPoints = onOpenBuyPoints,
+            onDismiss = { showDmBannerDialog = false }
+        )
+    }
+
+    if (showPriorityChirpDialog && thread != null && !isGroup) {
+        val recipientDirEntry = directoryEntries.firstOrNull { it.userId == otherUid }
+        val recipientOptedIn = thread.isPriorityChirpOptedIn(otherUid) ||
+            (recipientDirEntry?.priorityChirpOptIn == true)
+        com.example.ui.components.PriorityBreakInChirpDialog(
+            recipientName = otherName,
+            recipientOptedIn = recipientOptedIn,
+            myThreadOptIn = thread.isPriorityChirpOptedIn(viewModel.currentUserId) || userProfile.priorityChirpOptIn,
+            pointsBalance = userProfile.pointsBalance,
+            isSending = isSending,
+            onToggleMyThreadOptIn = { optIn -> viewModel.setPriorityChirpOptIn(optIn) },
+            onSendPriorityChirp = { msg, cost ->
+                viewModel.sendPriorityBreakInChirp(
+                    senderName = userProfile.displayName,
+                    senderTier = myStaffTier,
+                    messageText = msg,
+                    pointsCost = cost,
+                    onInsufficientPoints = onOpenBuyPoints
+                )
+            },
+            onGoBuyPoints = onOpenBuyPoints,
+            onDismiss = { showPriorityChirpDialog = false }
+        )
+    }
+
     if (showKickPaidMemberDialog && otherUid.isNotBlank()) {
         AlertDialog(
             onDismissRequest = { showKickPaidMemberDialog = false },
@@ -2100,6 +2503,28 @@ fun DirectChatScreen(
         val candidates = remember(directoryEntries, currentMemberIds) {
             directoryEntries.filter { it.userId !in currentMemberIds }
         }
+        val groupOwnerUid = if (isGroup) thread.effectiveGroupAdminId() else viewModel.currentUserId
+        val ownerTier = remember(groupOwnerUid, userProfile, myStaffTier, directoryEntries) {
+            if (groupOwnerUid == viewModel.currentUserId) {
+                userProfile.effectiveProTier(myStaffTier)
+            } else {
+                directoryEntries.firstOrNull { it.userId == groupOwnerUid }?.effectiveProTier() ?: ProTier.FREE
+            }
+        }
+        val maxGroupMembers = ownerTier.maxGroupDmMembers
+        val isAtMemberCap = thread.participantIds.size >= maxGroupMembers
+        val upgradeMessage = when {
+            thread.participantIds.size >= DirectThread.MAX_GROUP_MEMBERS ->
+                "This Group DM has reached the maximum limit of ${DirectThread.MAX_GROUP_MEMBERS} users."
+            ownerTier == ProTier.FREE ->
+                "Free Group DMs max out at ${DirectThread.FREE_MAX_GROUP_MEMBERS} users. Upgrade to VOX Pro (\$9.99/mo) for up to ${DirectThread.PRO_MAX_GROUP_MEMBERS} users."
+            ownerTier == ProTier.PRO ->
+                "VOX Pro Group DMs max out at ${DirectThread.PRO_MAX_GROUP_MEMBERS} users. Upgrade to VIP Pro (\$29.99/mo) for up to ${DirectThread.VIP_PRO_MAX_GROUP_MEMBERS} users."
+            ownerTier == ProTier.VIP_PRO ->
+                "VIP Pro Group DMs max out at ${DirectThread.VIP_PRO_MAX_GROUP_MEMBERS} users. Upgrade to Elite Pro (\$59.99/mo) for up to ${DirectThread.ELITE_PRO_MAX_GROUP_MEMBERS} users."
+            else ->
+                "This Group DM has reached the maximum limit of ${DirectThread.MAX_GROUP_MEMBERS} users."
+        }
         var pickerQuery by remember { mutableStateOf("") }
         val filteredCandidates = remember(candidates, pickerQuery) {
             val q = pickerQuery.trim()
@@ -2127,13 +2552,31 @@ fun DirectChatScreen(
                 )
                 Text(
                     text = if (isGroup) {
-                        "Current members (${thread.participantIds.size}/15): ${thread.memberNamesSummary()}"
+                        "Members (${thread.participantIds.size}/$maxGroupMembers · ${ownerTier.label}): ${thread.memberNamesSummary()}"
                     } else {
-                        "Pick another user to add to your chat with $otherName — this creates a group chat automatically!"
+                        "Pick another user to start a Group DM (your ${ownerTier.label} plan supports up to $maxGroupMembers users; Free max 7, Pro 15, VIP Pro 25, Elite Pro 50)."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                if (isAtMemberCap) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = ModAmber.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.55f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dm_group_capacity_limit_banner")
+                    ) {
+                        Text(
+                            text = upgradeMessage,
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
 
                 OutlinedTextField(
                     value = pickerQuery,
@@ -2165,10 +2608,12 @@ fun DirectChatScreen(
                             val candTier = candidate.tierEnum()
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(
+                                    alpha = if (isAtMemberCap) 0.25f else 0.5f
+                                ),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable {
+                                    .clickable(enabled = !isAtMemberCap) {
                                         showAddPersonSheet = false
                                         onAddUserToChat(thread, candidate)
                                     }
@@ -2405,7 +2850,11 @@ fun DirectChatScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        text = "Report this message from ${reportingMsg.senderName} to Admins & Support for review.",
+                        text = if (reportingMsg.isNameHiddenFor(viewModel.currentUserId)) {
+                            "Report this hidden-name group message to Admins & Support for review."
+                        } else {
+                            "Report this message from ${reportingMsg.senderName} to Admins & Support for review."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2472,6 +2921,36 @@ fun DirectChatScreen(
                 ) {
                     Text("Cancel")
                 }
+            }
+        )
+    }
+
+    if (showGroupAdminSheet && thread != null && canManageGroupDm) {
+        com.example.ui.components.GroupDmAdminControlsSheet(
+            thread = thread,
+            currentUserId = viewModel.currentUserId,
+            isGroupAdminOrAppAdmin = isGroupAdminOrAppAdmin,
+            onDismiss = { showGroupAdminSheet = false },
+            onToggleMute = { uid, name, mute ->
+                viewModel.setGroupMemberMuted(uid, name, mute)
+            },
+            onBounce24h = { uid, name ->
+                viewModel.bounceGroupMember(uid, name)
+            },
+            onRemoveBounce = { uid, name ->
+                viewModel.removeGroupBounce(uid, name)
+            },
+            onBanUser = { uid, name ->
+                viewModel.banGroupMember(uid, name)
+            },
+            onUnbanUser = { uid, name ->
+                viewModel.unbanGroupMember(uid, name)
+            },
+            onToggleSupportStaff = { uid, name, promote ->
+                viewModel.setGroupSupportStaff(uid, name, promote)
+            },
+            onTogglePttAllowed = { uid, name, allowed ->
+                viewModel.setGroupPttAllowed(uid, name, allowed)
             }
         )
     }
@@ -2623,6 +3102,11 @@ private fun SnapChatMessageBlock(
     onLongPressMessage: () -> Unit,
     onToggleReaction: (String) -> Unit
 ) {
+    if (message.isPriorityChirp()) {
+        com.example.ui.components.PriorityChirpMessageCard(message = message)
+        return
+    }
+
     // Centered system banners for Screenshot alerts and Admin-to-Support handoffs
     if (message.isSystemNotice()) {
         val isScreenshot = message.isScreenshotNotice()
@@ -2665,8 +3149,13 @@ private fun SnapChatMessageBlock(
         return
     }
 
+    val isHiddenForViewer = message.isNameHiddenFor(currentUserId)
     val tier = message.senderTierEnum()
-    val accentBarColor = usernameColor(tier, userId = message.senderId)
+    val accentBarColor = if (isHiddenForViewer) {
+        MaterialTheme.colorScheme.outline
+    } else {
+        usernameColor(tier, userId = message.senderId)
+    }
     val snapBitmap = rememberBase64ImageBitmap(message.imageBase64)
     val hasVoice = message.hasVoiceNote()
     val isStandaloneThumbsUp = message.isStandaloneThumbsUp()
@@ -2682,11 +3171,16 @@ private fun SnapChatMessageBlock(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                text = if (isMe) "ME" else message.senderName.uppercase(),
+                text = when {
+                    isMe && message.hideSenderName -> "ME · NAME HIDDEN"
+                    isMe -> "ME"
+                    isHiddenForViewer -> "HIDDEN MEMBER"
+                    else -> message.senderName.uppercase()
+                },
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
                 color = accentBarColor
             )
-            if (!isMe) {
+            if (!isMe && !isHiddenForViewer) {
                 StaffTierBadge(tier = tier)
             }
             Text(

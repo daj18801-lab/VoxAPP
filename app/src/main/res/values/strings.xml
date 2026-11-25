@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">VoxStage</string>
+    <string name="app_name">VOX</string>
     <string name="auth_tagline">Live voice stages, video rooms, and real-time chat — protected by built-in moderation.</string>
     <string name="auth_sign_in_google">Sign in with Google</string>
     <string name="auth_feature_voice">Push-to-Talk &amp; Open Mic Stages</string>

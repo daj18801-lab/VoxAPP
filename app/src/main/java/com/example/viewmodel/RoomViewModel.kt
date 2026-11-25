@@ -48,7 +48,8 @@ class RoomViewModel(
     private val repository: VoxStageRepository,
     val currentUserId: String,
     val roomId: String,
-    initialStaffCapabilities: StaffCapabilities
+    initialStaffCapabilities: StaffCapabilities,
+    private val enteredPin: String = ""
 ) : ViewModel() {
 
     val liveKitManager = LiveKitRoomManager(context.applicationContext)
@@ -252,14 +253,15 @@ class RoomViewModel(
         hasJoinedRoom = true
         _pushToTalkMode.value = profile.pushToTalkPreferred
         val caps = _staffCapabilities.value
-        val wantInvisible = profile.invisibleModePreferred && caps.effectiveCanEnterInvisible
+        val wantInvisible = profile.invisibleModePreferred && room.canEnterInvisibleInRoom(currentUserId, caps)
 
         viewModelScope.launch {
             repository.joinRoom(
                 room = room,
                 profile = profile,
                 staffCapabilities = caps,
-                enterInvisible = wantInvisible
+                enterInvisible = wantInvisible,
+                enteredPin = enteredPin
             ).onSuccess { enteredInvisibly ->
                 _isCurrentlyInvisible.value = enteredInvisibly
                 liveKitManager.connectToRoom(
@@ -271,7 +273,12 @@ class RoomViewModel(
                     _events.tryEmit("Audio/video server error: ${lkErr.message}")
                 }
                 if (enteredInvisibly) {
-                    _events.tryEmit("Entered room invisibly — nobody can see you.")
+                    val msg = if (room.isRoomAdmin(currentUserId) && !caps.isStaff) {
+                        "Entered room invisibly — hidden from users (App Admins & Support can see you)."
+                    } else {
+                        "Entered room invisibly — nobody can see you."
+                    }
+                    _events.tryEmit(msg)
                 }
             }.onFailure { err ->
                 hasJoinedRoom = false
@@ -285,8 +292,8 @@ class RoomViewModel(
         val room = (roomState.value as? UiState.Success)?.data ?: return
         val caps = _staffCapabilities.value
         val next = !_isCurrentlyInvisible.value
-        if (next && !caps.effectiveCanEnterInvisible) {
-            _events.tryEmit("Admin must allow invisible mode on your Support account first.")
+        if (next && !room.canEnterInvisibleInRoom(currentUserId, caps)) {
+            _events.tryEmit("Invisible mode is available to this room's Admin or authorized staff.")
             return
         }
         viewModelScope.launch {
@@ -306,6 +313,8 @@ class RoomViewModel(
                         when {
                             nowInvisible && caps.isAdmin ->
                                 "Invisible Mode ON — hidden from room (you can still use the mic anytime)"
+                            nowInvisible && room.isRoomAdmin(currentUserId) && !caps.isStaff ->
+                                "Invisible Mode ON — hidden from users (App Admins & Support can see you)"
                             nowInvisible ->
                                 "Invisible Mode ON — hidden from room (switch to Visible to use mic)"
                             else ->
@@ -692,14 +701,80 @@ class RoomViewModel(
                 actorTier = _staffCapabilities.value.tier,
                 reason = reason
             ).onSuccess {
-                val msg = if (_staffCapabilities.value.isStaff) {
-                    "Bounced $targetName from the room (locked out for 24 hours)"
-                } else {
-                    "Bounced $targetName from the room"
-                }
-                _events.tryEmit(msg)
+                _events.tryEmit("Bounced $targetName from the room (locked out for 24 hours)")
             }.onFailure { err ->
                 _events.tryEmit(err.message ?: "Could not bounce user")
+            }
+        }
+    }
+
+    fun removeBounce(
+        targetUserId: String,
+        targetName: String,
+        actorName: String
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.removeBounce(
+                room = room,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier
+            ).onSuccess {
+                _events.tryEmit("Removed 24-hour bounce for $targetName")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not remove bounce")
+            }
+        }
+    }
+
+    fun updateRoomPinLock(
+        pinLocked: Boolean,
+        pinCode: String,
+        actorName: String
+    ) {
+        val room = (roomState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.updateRoomPinLock(
+                room = room,
+                pinLocked = pinLocked,
+                pinCode = pinCode,
+                actorName = actorName,
+                actorTier = _staffCapabilities.value.tier
+            ).onSuccess {
+                _events.tryEmit(
+                    if (pinLocked) "4-digit Room PIN lock enabled" else "Room PIN lock removed"
+                )
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not update room PIN")
+            }
+        }
+    }
+
+    fun requestSupportSuspension(
+        targetUserId: String,
+        targetName: String,
+        actorName: String,
+        reason: String
+    ) {
+        val caps = _staffCapabilities.value
+        if (!caps.isStaff) {
+            _events.tryEmit("Only Support Staff or Admins can request a suspension.")
+            return
+        }
+        viewModelScope.launch {
+            repository.submitSupportSuspensionRequest(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                requestedByName = actorName,
+                requesterTier = caps.tier,
+                reason = reason,
+                roomId = roomId
+            ).onSuccess {
+                _events.tryEmit("$targetName suspended immediately pending Admin review.")
+            }.onFailure { err ->
+                _events.tryEmit(err.message ?: "Could not submit suspension request")
             }
         }
     }
@@ -722,7 +797,7 @@ class RoomViewModel(
                 reason = reason,
                 room = room
             ).onSuccess {
-                _events.tryEmit("Suspended $targetName for${durationMinutes}m")
+                _events.tryEmit("Suspended $targetName for ${durationMinutes}m")
             }.onFailure { err ->
                 _events.tryEmit(err.message ?: "Could not suspend user")
             }
@@ -808,7 +883,9 @@ class RoomViewModel(
         disableVideo: Boolean,
         suspendedUntilMillis: Long,
         suspensionReason: String,
-        actorName: String
+        actorName: String,
+        pointsBalance: Long? = null,
+        proLifetime: Boolean? = null
     ) {
         viewModelScope.launch {
             repository.adminEditUserProfileAndRestrictions(
@@ -824,7 +901,9 @@ class RoomViewModel(
                 suspendedUntilMillis = suspendedUntilMillis,
                 suspensionReason = suspensionReason,
                 actorName = actorName,
-                roomId = roomId
+                roomId = roomId,
+                pointsBalance = pointsBalance,
+                proLifetime = proLifetime
             ).onSuccess {
                 _events.tryEmit("Updated user $displayName")
             }.onFailure { err ->

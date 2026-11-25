@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,10 +28,13 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Eject
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.Gavel
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.ManageAccounts
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PersonRemove
+import androidx.compose.material.icons.rounded.Pin
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
@@ -66,6 +70,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.ChatMessage
 import com.example.data.ChatRoom
@@ -77,6 +82,7 @@ import com.example.data.RoomParticipant
 import com.example.data.RoomStatus
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
+import com.example.ui.components.ConfigureRoomPinDialog
 import com.example.ui.components.RolePillBadge
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
@@ -108,13 +114,22 @@ fun ModerationCenterSheetContent(
     onOpenEditRoom: () -> Unit,
     onUnmuteUser: (String) -> Unit,
     onUnbanUser: (String) -> Unit,
+    onRemoveBounce: (userId: String, userName: String) -> Unit = { _, _ -> },
+    onBanBouncedUser: (userId: String, userName: String) -> Unit = { _, _ -> },
+    onUpdateRoomPinLock: (pinLocked: Boolean, pinCode: String) -> Unit = { _, _ -> },
     onCloseRoom: () -> Unit
 ) {
     val isMod = room.hasModPrivileges(currentUserId, staffCapabilities.tier)
     val canBan = room.canBanInRoom(currentUserId, staffCapabilities.tier)
+    val canManageBansAndBounces = room.canManageBansAndBounces(currentUserId, staffCapabilities.tier)
+    val canManagePin = room.canManagePinLock(currentUserId, staffCapabilities.tier)
     val canEditOrClose = room.canEditOrCloseRoom(currentUserId, staffCapabilities.tier)
+    val activeBounces = remember(room.bouncedUntilByUserId, room.bouncedNamesByUserId) {
+        room.activeBounces()
+    }
     var selectedTab by remember { mutableIntStateOf(0) }
     var newWord by remember { mutableStateOf("") }
+    var showPinDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -144,9 +159,9 @@ fun ModerationCenterSheetContent(
                     Text(
                         text = when {
                             staffCapabilities.isAdmin -> "App Owner Administrator · Full Control"
-                            room.isRoomAdmin(currentUserId) -> "Room Administrator · Manage Room & Co-Admins"
-                            staffCapabilities.isSupport -> "Support Staff · Bounce, Kick, Mute & Suspend"
-                            room.isCoAdmin(currentUserId) -> "Room Co-Admin · Kick & Mute Controls"
+                            room.isRoomAdmin(currentUserId) -> "Room Administrator · Manage PIN, Bounces, Bans & Co-Admins"
+                            staffCapabilities.isSupport -> "Support Staff · Bounce, Kick, Mute & Request Suspension"
+                            room.isCoAdmin(currentUserId) -> "Room Co-Admin · Bounce, Kick & Mute Controls"
                             else -> "View-Only Safety Status"
                         },
                         style = MaterialTheme.typography.bodySmall,
@@ -165,7 +180,8 @@ fun ModerationCenterSheetContent(
             Tab(
                 selected = selectedTab == 1,
                 onClick = { selectedTab = 1 },
-                text = { Text("Restricted (${room.mutedUserIds.size + room.bannedUserIds.size})") }
+                text = { Text("Restricted (${room.mutedUserIds.size + activeBounces.size + room.bannedUserIds.size})") },
+                modifier = Modifier.testTag("mod_tab_restricted")
             )
             Tab(
                 selected = selectedTab == 2,
@@ -195,6 +211,67 @@ fun ModerationCenterSheetContent(
                             Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Change or Delete Room Name")
+                        }
+                    }
+
+                    if (canManagePin) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (room.pinLocked) ModAmber.copy(alpha = 0.14f)
+                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (room.pinLocked) ModAmber.copy(alpha = 0.45f)
+                                else MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = if (room.pinLocked) Icons.Rounded.Pin else Icons.Rounded.LockOpen,
+                                        contentDescription = "Room PIN lock status",
+                                        tint = if (room.pinLocked) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = if (room.pinLocked) "4-Digit PIN Locked (${room.roomPinCode})" else "4-Digit PIN Lock Off",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (room.pinLocked) ModAmber else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = if (room.pinLocked) {
+                                                "Users must enter PIN ${room.roomPinCode} to enter this room"
+                                            } else {
+                                                "Protect room entry with a 4-digit PIN code"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                OutlinedButton(
+                                    onClick = { showPinDialog = true },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier
+                                        .heightIn(min = 48.dp)
+                                        .testTag("mod_sheet_pin_lock_button")
+                                ) {
+                                    Text(if (room.pinLocked) "Edit PIN" else "Set PIN")
+                                }
+                            }
                         }
                     }
 
@@ -430,23 +507,86 @@ fun ModerationCenterSheetContent(
                 }
 
                 1 -> {
-                    Text("Muted Users (${room.mutedUserIds.size})", style = MaterialTheme.typography.titleSmall)
-                    if (room.mutedUserIds.isEmpty()) {
+                    Text(
+                        text = "Bounce List — 24h Lockout (${activeBounces.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = ModAmber
+                    )
+                    if (activeBounces.isEmpty()) {
                         Text(
-                            text = "No users are currently muted.",
+                            text = "No users are currently on the 24-hour bounce list.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
-                        room.mutedUserIds.forEach { mutedUid ->
-                            RestrictedUserRow(
-                                userId = mutedUid,
-                                badge = "MUTED",
-                                badgeColor = ModAmber,
-                                canLift = isMod,
-                                actionLabel = "Unmute",
-                                onLift = { onUnmuteUser(mutedUid) }
-                            )
+                        activeBounces.forEach { (bouncedUid, bouncedName, _) ->
+                            val remaining = room.remainingBounceLabel(bouncedUid)
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = ModAmber.copy(alpha = 0.10f),
+                                border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("bounce_list_row_$bouncedUid")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = bouncedName,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = "BOUNCED · $remaining remaining (24h lockout)",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = ModAmber
+                                            )
+                                        }
+                                    }
+                                    if (canManageBansAndBounces || canBan) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            if (canManageBansAndBounces) {
+                                                OutlinedButton(
+                                                    onClick = { onRemoveBounce(bouncedUid, bouncedName) },
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .heightIn(min = 48.dp)
+                                                        .testTag("remove_bounce_$bouncedUid")
+                                                ) {
+                                                    Text("Remove Bounce")
+                                                }
+                                            }
+                                            if (canBan) {
+                                                Button(
+                                                    onClick = { onBanBouncedUser(bouncedUid, bouncedName) },
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = LiveCoral,
+                                                        contentColor = Color.White
+                                                    ),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                                    modifier = Modifier
+                                                        .heightIn(min = 48.dp)
+                                                        .testTag("ban_bounced_user_$bouncedUid")
+                                                ) {
+                                                    Text("Ban")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -461,12 +601,33 @@ fun ModerationCenterSheetContent(
                     } else {
                         room.bannedUserIds.forEach { bannedUid ->
                             RestrictedUserRow(
-                                userId = bannedUid,
-                                badge = "BANNED",
+                                displayName = room.bannedDisplayName(bannedUid),
+                                badge = "PERMANENTLY BANNED",
                                 badgeColor = LiveCoral,
                                 canLift = canBan,
                                 actionLabel = "Unban",
                                 onLift = { onUnbanUser(bannedUid) }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("Muted Users (${room.mutedUserIds.size})", style = MaterialTheme.typography.titleSmall)
+                    if (room.mutedUserIds.isEmpty()) {
+                        Text(
+                            text = "No users are currently muted.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        room.mutedUserIds.forEach { mutedUid ->
+                            RestrictedUserRow(
+                                displayName = "User ${mutedUid.take(12)}…",
+                                badge = "MUTED",
+                                badgeColor = ModAmber,
+                                canLift = isMod,
+                                actionLabel = "Unmute",
+                                onLift = { onUnmuteUser(mutedUid) }
                             )
                         }
                     }
@@ -523,11 +684,23 @@ fun ModerationCenterSheetContent(
             }
         }
     }
+
+    if (showPinDialog && canManagePin) {
+        ConfigureRoomPinDialog(
+            currentlyLocked = room.pinLocked,
+            currentPin = room.roomPinCode,
+            onSave = { locked, pin ->
+                onUpdateRoomPinLock(locked, pin)
+                showPinDialog = false
+            },
+            onDismiss = { showPinDialog = false }
+        )
+    }
 }
 
 @Composable
 private fun RestrictedUserRow(
-    userId: String,
+    displayName: String,
     badge: String,
     badgeColor: Color,
     canLift: Boolean,
@@ -546,7 +719,7 @@ private fun RestrictedUserRow(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "User ${userId.take(12)}…",
+                    text = displayName,
                     style = MaterialTheme.typography.titleSmall
                 )
                 Text(
@@ -556,7 +729,10 @@ private fun RestrictedUserRow(
                 )
             }
             if (canLift) {
-                OutlinedButton(onClick = onLift) {
+                OutlinedButton(
+                    onClick = onLift,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
                     Text(actionLabel)
                 }
             }
@@ -575,7 +751,15 @@ fun ParticipantsSheetContent(
 ) {
     val isMod = room.hasModPrivileges(currentUserId, staffCapabilities.tier)
     val visibleParticipants = participants.filter { !it.invisible }
-    val invisibleStaff = if (staffCapabilities.isAdmin) participants.filter { it.invisible } else emptyList()
+    // App Admins see all invisible participants; Support Staff see invisible Room Admins (and themselves);
+    // regular users & Co-Admins cannot see invisible Room Admins or invisible Staff.
+    val invisibleVisibleToViewer = when {
+        staffCapabilities.isAdmin -> participants.filter { it.invisible }
+        staffCapabilities.isSupport -> participants.filter {
+            it.invisible && (it.userId == room.hostId || it.userId == currentUserId)
+        }
+        else -> emptyList()
+    }
 
     val onStage = visibleParticipants.filter { it.onStage() }
     val handRaised = visibleParticipants.filter { !it.onStage() && it.handRaised }
@@ -594,13 +778,18 @@ fun ParticipantsSheetContent(
             style = MaterialTheme.typography.headlineSmall
         )
 
-        if (invisibleStaff.isNotEmpty()) {
+        if (invisibleVisibleToViewer.isNotEmpty()) {
+            val invisibleHeader = if (staffCapabilities.isAdmin) {
+                "Invisible Staff & Room Admins (${invisibleVisibleToViewer.size} · Admin View)"
+            } else {
+                "Invisible Room Admin (${invisibleVisibleToViewer.size} · Support Staff View)"
+            }
             Text(
-                text = "Invisible Staff (${invisibleStaff.size} · Admin View Only)",
+                text = invisibleHeader,
                 style = MaterialTheme.typography.labelLarge,
-                color = usernameColor(StaffTier.ADMIN)
+                color = usernameColor(staffCapabilities.tier)
             )
-            invisibleStaff.forEach { p ->
+            invisibleVisibleToViewer.forEach { p ->
                 ParticipantRosterRow(
                     participant = p,
                     isSelf = p.userId == currentUserId,
@@ -760,6 +949,7 @@ fun UserModerationActionSheet(
     onKick: () -> Unit,
     onBan: () -> Unit,
     onSuspend: () -> Unit,
+    onRequestSupportSuspension: () -> Unit = {},
     onSendAlert: () -> Unit,
     onSetStaffTier: (StaffTier) -> Unit,
     onEditUserAdmin: () -> Unit,
@@ -853,11 +1043,7 @@ fun UserModerationActionSheet(
 
             SheetActionRow(
                 icon = Icons.Rounded.Eject,
-                label = if (staffCapabilities.isStaff) {
-                    "Bounce from Room (24h Lockout)"
-                } else {
-                    "Bounce from Room"
-                },
+                label = "Bounce from Room (24h Lockout)",
                 tint = ModAmber,
                 onClick = { onBounce(); onDismiss() }
             )
@@ -881,7 +1067,7 @@ fun UserModerationActionSheet(
             }
         }
 
-        // Staff-only actions: Suspend for X Time & Send Direct Alert
+        // Staff-only actions: Suspend (Admin) / Request Suspension (Support) & Send Direct Alert
         if (staffCapabilities.isStaff && !isSelf) {
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
             Text(
@@ -898,12 +1084,21 @@ fun UserModerationActionSheet(
             )
 
             if (targetTier != StaffTier.ADMIN) {
-                SheetActionRow(
-                    icon = Icons.Rounded.Timer,
-                    label = "Suspend for X Time",
-                    tint = ModAmber,
-                    onClick = { onDismiss(); onSuspend() }
-                )
+                if (staffCapabilities.isAdmin) {
+                    SheetActionRow(
+                        icon = Icons.Rounded.Timer,
+                        label = "Suspend for X Time",
+                        tint = ModAmber,
+                        onClick = { onDismiss(); onSuspend() }
+                    )
+                } else if (staffCapabilities.isSupport) {
+                    SheetActionRow(
+                        icon = Icons.Rounded.Gavel,
+                        label = "Request Suspension (Admin Review)",
+                        tint = LiveCoral,
+                        onClick = { onDismiss(); onRequestSupportSuspension() }
+                    )
+                }
             }
 
             if (staffCapabilities.isAdmin) {

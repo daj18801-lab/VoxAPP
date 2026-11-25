@@ -63,20 +63,20 @@ fun launchSystemPostShare(context: Context, post: ProfilePost) {
     if (post.locked) return
     val body = buildString {
         if (post.authorTierEnum() == StaffTier.ADMIN) {
-            append("${post.authorName} on VoxStage")
+            append("${post.authorName} on VOX")
         } else {
-            append("${post.authorName} (@${post.authorHandle}) on VoxStage")
+            append("${post.authorName} (@${post.authorHandle}) on VOX")
         }
         if (post.text.isNotBlank()) {
             append(":\n\n")
             append(post.text)
         } else if (post.imageBase64.isNotBlank()) {
-            append(" shared a photo on VoxStage!")
+            append(" shared a photo on VOX!")
         }
     }
     val intent = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
-        putExtra(Intent.EXTRA_SUBJECT, "Post by ${post.authorName} on VoxStage")
+        putExtra(Intent.EXTRA_SUBJECT, "Post by ${post.authorName} on VOX")
         putExtra(Intent.EXTRA_TEXT, body)
     }
     context.startActivity(Intent.createChooser(intent, "Share post"))
@@ -387,7 +387,7 @@ fun SharePostDialog(
                 ) {
                     Icon(Icons.Rounded.IosShare, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Share Outside VoxStage")
+                    Text("Share Outside VOX")
                 }
             }
         },
