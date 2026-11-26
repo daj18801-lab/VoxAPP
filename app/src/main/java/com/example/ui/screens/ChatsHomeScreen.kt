@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -30,7 +31,6 @@ import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Business
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MarkChatUnread
@@ -41,7 +41,6 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Verified
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -89,7 +88,6 @@ import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TalkStreakBadge
 import com.example.ui.components.TopBarSafetyShieldButton
 import com.example.ui.components.formatTimestampShort
-import com.example.ui.components.parseHexColor
 import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
@@ -138,7 +136,7 @@ fun ChatsHomeScreen(
     val isDndOn = userProfile?.doNotDisturb == true
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Unread, 2 = Friends
+    var selectedFilter by remember { mutableIntStateOf(0) }
     var showNewChatSheet by remember { mutableStateOf(false) }
     var showQuickCreateSheet by remember { mutableStateOf(false) }
     val nowMillis = rememberPresenceClockMillis()
@@ -221,7 +219,6 @@ fun ChatsHomeScreen(
                 .fillMaxSize()
                 .widthIn(max = 840.dp)
         ) {
-            // Snapchat-style crisp Blue & White top header
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 shadowElevation = 1.dp,
@@ -235,7 +232,6 @@ fun ChatsHomeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Left: Avatar button (opens Studio) + Search button
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -300,7 +296,6 @@ fun ChatsHomeScreen(
                             }
                         }
 
-                        // Center: Bold "Chat" (or Company Name) title + Staff tier badge
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -321,7 +316,6 @@ fun ChatsHomeScreen(
                             }
                         }
 
-                        // Right: Add Friends + Safety Shield (or DND quick toggle for sub-accounts)
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -569,107 +563,106 @@ fun ChatsHomeScreen(
                         }
                     }
                 }
-
-                // Snapchat-style Quick Friends Story/Message Carousel (hidden for sub-accounts)
-                if (!isSubAccount) {
+if (!isSubAccount) {
                     item(key = "quick_friends_strip") {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(vertical = 10.dp)) {
-                            LazyRow(
-                                contentPadding = PaddingValues(horizontal = 14.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                // Quick Add Friend circle
-                                item(key = "add_friend_circle") {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        modifier = Modifier
-                                            .width(66.dp)
-                                            .clickable(onClick = onOpenFriendsTab)
-                                            .testTag("quick_strip_add_friend")
-                                    ) {
-                                        Box(
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(vertical = 10.dp)) {
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 14.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    item(key = "add_friend_circle") {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
                                             modifier = Modifier
-                                                .size(56.dp)
-                                                .clip(CircleShape)
-                                                .background(MaterialTheme.colorScheme.primaryContainer)
-                                                .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape),
-                                            contentAlignment = Alignment.Center
+                                                .width(66.dp)
+                                                .clickable(onClick = onOpenFriendsTab)
+                                                .testTag("quick_strip_add_friend")
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.PersonAdd,
-                                                contentDescription = "Add Friends",
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(24.dp)
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(56.dp)
+                                                    .clip(CircleShape)
+                                                    .background(MaterialTheme.colorScheme.primaryContainer)
+                                                    .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.PersonAdd,
+                                                    contentDescription = "Add Friends",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(5.dp))
+                                            Text(
+                                                text = "Add Friend",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                         }
-                                        Spacer(modifier = Modifier.height(5.dp))
-                                        Text(
-                                            text = "Add Friend",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                    }
+
+                                    itemsIndexed(
+                                        acceptedFriends,
+                                        key = { idx, friendship -> "friend_circle_${idx}_${friendship.id}" }
+                                    ) { _, friendship ->
+                                        val otherId = friendship.otherUserId(currentUserId)
+                                        val otherName = friendship.otherName(currentUserId)
+                                        val otherColor = friendship.otherColorHex(currentUserId)
+                                        val otherTier = friendship.otherTier(currentUserId)
+                                        QuickFriendCircleItem(
+                                            userId = otherId,
+                                            name = otherName,
+                                            colorHex = otherColor,
+                                            photoBase64 = directoryPhotoByUid[otherId].orEmpty(),
+                                            tier = otherTier,
+                                            presenceStatus = directoryByUid[otherId]?.displayedStatusFor(
+                                                viewerIsStaff = staffCapabilities.isStaff,
+                                                nowMillis = nowMillis
+                                            ) ?: PresenceStatus.OFFLINE,
+                                            onClick = {
+                                                onStartChatWithUser(otherId, otherName, otherColor, otherTier)
+                                            }
                                         )
                                     }
                                 }
 
-                                items(acceptedFriends, key = { "friend_circle_${it.id}" }) { friendship ->
-                                    val otherId = friendship.otherUserId(currentUserId)
-                                    val otherName = friendship.otherName(currentUserId)
-                                    val otherColor = friendship.otherColorHex(currentUserId)
-                                    val otherTier = friendship.otherTier(currentUserId)
-                                    QuickFriendCircleItem(
-                                        userId = otherId,
-                                        name = otherName,
-                                        colorHex = otherColor,
-                                        photoBase64 = directoryPhotoByUid[otherId].orEmpty(),
-                                        tier = otherTier,
-                                        presenceStatus = directoryByUid[otherId]?.displayedStatusFor(
-                                            viewerIsStaff = staffCapabilities.isStaff,
-                                            nowMillis = nowMillis
-                                        ) ?: PresenceStatus.OFFLINE,
-                                        onClick = {
-                                            onStartChatWithUser(otherId, otherName, otherColor, otherTier)
-                                        }
-                                    )
-                                }
-                            }
+                                Spacer(modifier = Modifier.height(10.dp))
 
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            // Filter Pills: All · Unread · Friends
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                val tabs = listOf(
-                                    "All" to allThreads.size,
-                                    "Unread" to unreadCount,
-                                    "Friends" to acceptedFriends.size
-                                )
-                                tabs.forEachIndexed { idx, (label, count) ->
-                                    FilterChip(
-                                        selected = selectedFilter == idx,
-                                        onClick = { selectedFilter = idx },
-                                        label = {
-                                            Text(if (count > 0) "$label ($count)" else label)
-                                        },
-                                        shape = RoundedCornerShape(999.dp),
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                            selectedLabelColor = Color.White
-                                        ),
-                                        modifier = Modifier.testTag("chats_filter_$idx")
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    val tabs = listOf(
+                                        "All" to allThreads.size,
+                                        "Unread" to unreadCount,
+                                        "Friends" to acceptedFriends.size
                                     )
+                                    tabs.forEachIndexed { idx, (label, count) ->
+                                        FilterChip(
+                                            selected = selectedFilter == idx,
+                                            onClick = { selectedFilter = idx },
+                                            label = {
+                                                Text(if (count > 0) "$label ($count)" else label)
+                                            },
+                                            shape = RoundedCornerShape(999.dp),
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                                selectedLabelColor = Color.White
+                                            ),
+                                            modifier = Modifier.testTag("chats_filter_$idx")
+                                        )
+                                    }
                                 }
                             }
                         }
-                    }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     }
                 }
 
@@ -764,7 +757,10 @@ fun ChatsHomeScreen(
                             val regularThreads = filteredThreads.filterNot { it.hasActivePriorityChirpFor(currentUserId) }
 
                             if (priorityThreads.isNotEmpty()) {
-                                items(priorityThreads, key = { "priority_chirp_${it.id}" }) { thread ->
+                                itemsIndexed(
+                                    priorityThreads,
+                                    key = { idx, thread -> "priority_chirp_${idx}_${thread.id}" }
+                                ) { _, thread ->
                                     com.example.ui.components.PriorityChirpPinnedInboxCard(
                                         thread = thread,
                                         onOpenThread = { onOpenThread(thread.id) }
@@ -772,7 +768,10 @@ fun ChatsHomeScreen(
                                 }
                             }
 
-                            items(regularThreads, key = { it.id }) { thread ->
+                            itemsIndexed(
+                                regularThreads,
+                                key = { idx, thread -> "regular_thread_${idx}_${thread.id}" }
+                            ) { _, thread ->
                                 val otherUid = thread.otherUserId(currentUserId)
                                 SnapChatFeedRow(
                                     thread = thread,
@@ -804,7 +803,6 @@ fun ChatsHomeScreen(
         }
 
         if (!isSubAccount) {
-            // Snapchat-style Bottom-Center Quick Create (+) Button
             FloatingActionButton(
                 onClick = { showQuickCreateSheet = true },
                 containerColor = MaterialTheme.colorScheme.primary,
@@ -824,7 +822,6 @@ fun ChatsHomeScreen(
                 )
             }
 
-            // Snapchat-style Floating New Chat FAB
             FloatingActionButton(
                 onClick = { showNewChatSheet = true },
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -1136,7 +1133,6 @@ private fun SnapChatFeedRow(
 
                 Spacer(modifier = Modifier.height(3.dp))
 
-                // Snapchat-style status square/arrow + preview snippet + time
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1282,7 +1278,7 @@ private fun NewPrivateChatSheetContent(
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
-                items(filteredFriends, key = { "sf_${it.id}" }) { f ->
+                itemsIndexed(filteredFriends, key = { idx, f -> "sf_${idx}_${f.id}" }) { _, f ->
                     val uid = f.otherUserId(currentUserId)
                     val name = f.otherName(currentUserId)
                     val handle = f.otherHandle(currentUserId)
@@ -1312,7 +1308,7 @@ private fun NewPrivateChatSheetContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                items(filteredOthers, key = { "sd_${it.userId}" }) { entry ->
+                itemsIndexed(filteredOthers, key = { idx, entry -> "sd_${idx}_${entry.userId}" }) { _, entry ->
                     NewChatPickerRow(
                         userId = entry.userId,
                         name = entry.displayName,
