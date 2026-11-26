@@ -15,6 +15,7 @@ import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.RemoteAudioTrack
 import io.livekit.android.room.track.RemoteVideoTrack
 import io.livekit.android.room.track.Track
 import kotlinx.coroutines.CoroutineScope
@@ -77,26 +78,128 @@ class LiveKitRoomManager(
     private val _remoteActiveSpeakerName = MutableStateFlow<String?>(null)
     val remoteActiveSpeakerName: StateFlow<String?> = _remoteActiveSpeakerName.asStateFlow()
 
+    @Volatile
+    private var useLoudspeakerRoute: Boolean = forceLoudspeaker
+
+    @Volatile
+    private var remoteAudioMuted: Boolean = false
+
     suspend fun connectToRoom(
         roomName: String,
         participantIdentity: String,
         participantName: String
     ): Result<Unit> = runCatching {
         if (_isConnected.value) {
-            if (forceLoudspeaker) enforceLoudspeakerRoute()
+            if (forceLoudspeaker) applyCurrentAudioOutputRoute()
+            applyRemoteAudioMuteState()
             return@runCatching
         }
         val (serverUrl, token) = fetchConnectionDetails(roomName, participantIdentity, participantName)
         startObservingRoomEvents()
         room.connect(serverUrl, token, ConnectOptions(autoSubscribe = true))
         _isConnected.value = true
+        applyRemoteAudioMuteState()
         if (forceLoudspeaker) {
-            enforceLoudspeakerRoute()
+            applyCurrentAudioOutputRoute()
             // Re-apply shortly after WebRTC audio engine finishes starting its communication mode
             scope.launch {
                 delay(350L)
-                if (_isConnected.value) enforceLoudspeakerRoute()
+                if (_isConnected.value) {
+                    applyCurrentAudioOutputRoute()
+                    applyRemoteAudioMuteState()
+                }
             }
+        }
+    }
+
+    /**
+     * Switches audio output between built-in loudspeaker (true) and regular phone speaker / earpiece (false).
+     */
+    fun setAudioOutputLoudspeaker(useLoudspeaker: Boolean) {
+        useLoudspeakerRoute = useLoudspeaker
+        audioHandler.preferredDeviceList = if (useLoudspeaker) {
+            listOf(
+                AudioDevice.Speakerphone::class.java,
+                AudioDevice.WiredHeadset::class.java,
+                AudioDevice.BluetoothHeadset::class.java,
+                AudioDevice.Earpiece::class.java
+            )
+        } else {
+            listOf(
+                AudioDevice.Earpiece::class.java,
+                AudioDevice.WiredHeadset::class.java,
+                AudioDevice.BluetoothHeadset::class.java,
+                AudioDevice.Speakerphone::class.java
+            )
+        }
+        applyCurrentAudioOutputRoute()
+    }
+
+    /**
+     * Mutes or unmutes incoming remote LiveKit audio tracks (used for Lock-Screen PTT Silent Mode
+     * so voice audio stays silent while system alerts and PTT beeps still come through).
+     */
+    fun setRemoteAudioMuted(muted: Boolean) {
+        remoteAudioMuted = muted
+        applyRemoteAudioMuteState()
+    }
+
+    private fun applyRemoteAudioMuteState() {
+        val muted = remoteAudioMuted
+        runCatching {
+            room.remoteParticipants.values.forEach { participant ->
+                participant.audioTrackPublications.forEach { (_, track) ->
+                    val remoteAudio = track as? RemoteAudioTrack
+                    remoteAudio?.let { audio ->
+                        runCatching { audio.rtcTrack.setEnabled(!muted) }
+                        runCatching { audio.rtcTrack.setVolume(if (muted) 0.0 else 1.0) }
+                    }
+                }
+            }
+        }.onFailure {
+            Log.w(TAG, "Failed to update remote audio mute state: ${it.message}")
+        }
+    }
+
+    private fun applyCurrentAudioOutputRoute() {
+        if (useLoudspeakerRoute) {
+            enforceLoudspeakerRoute()
+        } else {
+            enforceEarpieceRoute()
+        }
+    }
+
+    private fun enforceEarpieceRoute() {
+        runCatching {
+            val earpieceDevice = audioHandler.availableAudioDevices.firstOrNull {
+                it is AudioDevice.Earpiece
+            }
+            if (earpieceDevice != null) {
+                audioHandler.selectDevice(earpieceDevice)
+            }
+        }.onFailure {
+            Log.w(TAG, "AudioSwitchHandler earpiece selection failed: ${it.message}")
+        }
+
+        runCatching {
+            val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                ?: return@runCatching
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val builtinEarpiece = audioManager.availableCommunicationDevices.firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                }
+                if (builtinEarpiece != null) {
+                    audioManager.setCommunicationDevice(builtinEarpiece)
+                } else {
+                    audioManager.clearCommunicationDevice()
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.isSpeakerphoneOn = false
+            }
+        }.onFailure {
+            Log.w(TAG, "AudioManager earpiece route failed: ${it.message}")
         }
     }
 
@@ -172,7 +275,14 @@ class LiveKitRoomManager(
                     }
                     is RoomEvent.TrackSubscribed -> {
                         if (forceLoudspeaker) {
-                            enforceLoudspeakerRoute()
+                            applyCurrentAudioOutputRoute()
+                        }
+                        if (event.track is RemoteAudioTrack) {
+                            val remoteAudio = event.track as RemoteAudioTrack
+                            if (remoteAudioMuted) {
+                                runCatching { remoteAudio.rtcTrack.setEnabled(false) }
+                                runCatching { remoteAudio.rtcTrack.setVolume(0.0) }
+                            }
                         }
                         val videoTrack = event.track as? RemoteVideoTrack
                         val identity = event.participant.identity?.value
@@ -218,7 +328,7 @@ class LiveKitRoomManager(
         runCatching {
             room.localParticipant.setMicrophoneEnabled(enabled)
             if (forceLoudspeaker) {
-                enforceLoudspeakerRoute()
+                applyCurrentAudioOutputRoute()
             }
         }.onFailure {
             Log.w(TAG, "Failed to toggle mic: ${it.message}")

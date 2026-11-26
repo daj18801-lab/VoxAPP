@@ -18,13 +18,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.WorkspacePremium
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -34,8 +38,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -92,6 +100,7 @@ fun WhoViewedMyProfileCard(
     }
     val isProOrStaff = userProfile?.isProActive(staffTier, now) == true
     val isUnlocked = userProfile?.hasProfileViewersUnlocked(staffTier, now) == true
+    var showAllViewersDialog by remember { mutableStateOf(false) }
     val unlockLabel = when {
         userProfile?.proLifetime == true -> "LIFETIME PRO"
         staffTier != StaffTier.USER -> "STAFF PERK"
@@ -217,16 +226,33 @@ fun WhoViewedMyProfileCard(
                                 onClick = { onOpenUserProfile(record.viewerId) }
                             )
                         }
+                        if (profileViews.size > 8) {
+                            OutlinedButton(
+                                onClick = { showAllViewersDialog = true },
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, ProBlue.copy(alpha = 0.5f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .testTag("who_viewed_profile_view_all_button")
+                            ) {
+                                Text(
+                                    text = "View All ${profileViews.size} Profile Viewers",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = ProBlue
+                                )
+                            }
+                        }
                     }
                 }
             } else {
-                // Free-user blurred teaser preview
+                // Free-user blurred teaser preview (masked placeholders + blur for full Android compatibility)
                 Box(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .blur(10.dp)
+                            .blur(12.dp)
                     ) {
                         if (profileViews.isNotEmpty()) {
                             profileViews.take(3).forEach { record ->
@@ -365,6 +391,43 @@ fun WhoViewedMyProfileCard(
             }
         }
     }
+
+    if (showAllViewersDialog && isUnlocked) {
+        AlertDialog(
+            onDismissRequest = { showAllViewersDialog = false },
+            modifier = Modifier.testTag("who_viewed_profile_all_dialog"),
+            title = {
+                Text(
+                    text = "Profile Viewers (${profileViews.size})",
+                    fontWeight = FontWeight.ExtraBold
+                )
+            },
+            text = {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(320.dp)
+                ) {
+                    items(profileViews, key = { it.id.ifBlank { it.viewerId } }) { record ->
+                        ProfileViewerRow(
+                            record = record,
+                            blurred = false,
+                            onClick = {
+                                showAllViewersDialog = false
+                                onOpenUserProfile(record.viewerId)
+                            }
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAllViewersDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -405,10 +468,17 @@ private fun ProfileViewerRow(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(avatarColor),
+                    .background(if (blurred) avatarColor.copy(alpha = 0.65f) else avatarColor),
                 contentAlignment = Alignment.Center
             ) {
-                if (avatarBitmap != null) {
+                if (blurred) {
+                    Icon(
+                        imageVector = Icons.Rounded.Person,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(22.dp)
+                    )
+                } else if (avatarBitmap != null) {
                     Image(
                         bitmap = avatarBitmap,
                         contentDescription = record.viewerName,
@@ -426,9 +496,10 @@ private fun ProfileViewerRow(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = record.viewerName.ifBlank { "VOX Member" },
+                    text = if (blurred) "VOX Member" else record.viewerName.ifBlank { "VOX Member" },
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
                     color = when {
+                        blurred -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
                         record.viewerTierEnum() == StaffTier.ADMIN -> Color(0xFFEF4444)
                         record.viewerTierEnum() == StaffTier.SUPPORT -> SafetyEmerald
                         record.viewerProMember -> ProBlue
@@ -438,7 +509,7 @@ private fun ProfileViewerRow(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "@${record.viewerHandle} · $relativeTime",
+                    text = if (blurred) "@•••••••• · $relativeTime" else "@${record.viewerHandle} · $relativeTime",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

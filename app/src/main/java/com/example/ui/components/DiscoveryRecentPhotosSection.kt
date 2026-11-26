@@ -254,11 +254,7 @@ private fun DiscoveryPhotoTileCard(
                         bitmap = bitmap,
                         contentDescription = "Photo posted by ${post.authorName}",
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .then(
-                                if (post.locked && !isUnlocked) Modifier.blur(22.dp) else Modifier
-                            )
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 
@@ -274,39 +270,6 @@ private fun DiscoveryPhotoTileCard(
                             )
                         )
                 )
-
-                if (post.locked && !isUnlocked) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.35f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = Color.Black.copy(alpha = 0.72f),
-                            border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.7f))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Lock,
-                                    contentDescription = "Locked photo",
-                                    tint = ModAmber,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Text(
-                                    text = "${post.unlockPricePoints} pts",
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = Color.White
-                                )
-                            }
-                        }
-                    }
-                }
 
                 if (demographicBadge.isNotBlank()) {
                     Surface(
@@ -403,7 +366,6 @@ fun DiscoveryPhotoPostDialog(
     val scope = rememberCoroutineScope()
     var caption by remember { mutableStateOf("") }
     var imageBase64 by remember { mutableStateOf("") }
-    var locked by remember { mutableStateOf(false) }
     var isEncoding by remember { mutableStateOf(false) }
 
     val isPaid = myUserProfile?.isPaidMember(myStaffTier) ?: myStaffTier.isStaff()
@@ -525,34 +487,6 @@ fun DiscoveryPhotoPostDialog(
                         .fillMaxWidth()
                         .testTag("discover_photo_caption_input")
                 )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Lock Photo (2 pts · 18+)",
-                            style = MaterialTheme.typography.labelLarge
-                        )
-                        Text(
-                            text = "Blurred until viewers unlock for 2 points",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = locked,
-                        onCheckedChange = { wantLock ->
-                            if (wantLock && !viewerIsAdultVerified) {
-                                onRequestAgeVerification()
-                            } else {
-                                locked = wantLock
-                            }
-                        }
-                    )
-                }
             }
         },
         confirmButton = {
@@ -569,7 +503,7 @@ fun DiscoveryPhotoPostDialog(
             } else {
                 Button(
                     onClick = {
-                        onSubmitPhotoPost(caption, imageBase64, locked, onDismiss)
+                        onSubmitPhotoPost(caption, imageBase64, false, onDismiss)
                     },
                     enabled = imageBase64.isNotBlank() && !isEncoding && !isPublishingPost,
                     modifier = Modifier.testTag("discover_submit_photo_post_button")

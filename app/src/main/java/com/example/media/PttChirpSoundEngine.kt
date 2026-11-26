@@ -142,6 +142,19 @@ object PttChirpSoundEngine {
         playSegmentsAsync(segments)
     }
 
+    /**
+     * Crisp walkie-talkie "Beep" attention tone sent from the lock-screen Beep button to a PTT group or peer.
+     * Distinct from PTT key-down/up chirps so recipients immediately recognize an incoming beep ping.
+     */
+    fun playPttAttentionBeep() {
+        val segments = listOf(
+            ToneSegment(startFreqHz = 1568.0, endFreqHz = 1568.0, durationMs = 75, volume = 0.44),
+            ToneSegment(startFreqHz = 0.0, endFreqHz = 0.0, durationMs = 45, volume = 0.0),
+            ToneSegment(startFreqHz = 2093.0, endFreqHz = 2093.0, durationMs = 115, volume = 0.46)
+        )
+        playSegmentsAsync(segments)
+    }
+
     private fun playSegmentsAsync(segments: List<ToneSegment>) {
         scope.launch {
             runCatching {

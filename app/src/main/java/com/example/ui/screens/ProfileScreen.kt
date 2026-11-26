@@ -117,6 +117,8 @@ import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.data.UserSex
 import com.example.data.formatUsdCents
+import com.example.media.LivePttSessionManager
+import com.example.media.LockScreenPttActivity
 import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
@@ -186,7 +188,6 @@ fun ProfileScreen(
     onBuyPoints: (Long) -> Unit,
     onUpgradeToProPlay: () -> Unit = {},
     onUpgradeToVipProPlay: () -> Unit = {},
-    onUpgradeToEliteProPlay: () -> Unit = {},
     onActivateProWithPoints: () -> Unit = {},
     onBoostMyProfile: (onInsufficientPoints: () -> Unit) -> Unit = {},
     onSelectOrBuyPttTheme: (PttThemeStyle, onInsufficientPoints: () -> Unit) -> Unit = { _, _ -> },
@@ -259,6 +260,12 @@ fun ProfileScreen(
     var lockScreenPttEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isLockScreenPttEnabled(context))
     }
+    var lockScreenRecentDmEnabled by remember {
+        mutableStateOf(DirectMessageNotificationPrefs.isLockScreenRecentDmEnabled(context))
+    }
+    var pttBeepSilenced by remember {
+        mutableStateOf(DirectMessageNotificationPrefs.isPttBeepSilenced(context))
+    }
     var hasNotificationPermission by remember {
         mutableStateOf(DirectMessageNotificationHelper.hasNotificationPermission(context))
     }
@@ -277,7 +284,6 @@ fun ProfileScreen(
     // Post composer state
     var postText by remember { mutableStateOf("") }
     var draftPostPhotoBase64 by remember { mutableStateOf("") }
-    var lockPostPhoto by remember { mutableStateOf(false) }
     var boostPostOnCreate by remember { mutableStateOf(false) }
     var isEncodingPostPhoto by remember { mutableStateOf(false) }
 
@@ -956,7 +962,6 @@ fun ProfileScreen(
                                         IconButton(
                                             onClick = {
                                                 draftPostPhotoBase64 = ""
-                                                lockPostPhoto = false
                                             },
                                             modifier = Modifier.testTag("remove_draft_post_photo")
                                         ) {
@@ -967,72 +972,6 @@ fun ProfileScreen(
                                                 modifier = Modifier.size(18.dp)
                                             )
                                         }
-                                    }
-                                }
-
-                                // Lock Photo Toggle (18+ · 2 pts / $2 unlock · $1 to creator, $1 to app owner)
-                                val isAdultVerified = userProfile?.isAdult18Plus() == true
-                                Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = if (lockPostPhoto && isAdultVerified) {
-                                        ModAmber.copy(alpha = 0.14f)
-                                    } else {
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                                    },
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (lockPostPhoto && isAdultVerified) ModAmber.copy(alpha = 0.55f)
-                                        else MaterialTheme.colorScheme.outlineVariant
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            if (!lockPostPhoto && !isAdultVerified) {
-                                                onRequestAgeVerification()
-                                            } else {
-                                                lockPostPhoto = !lockPostPhoto
-                                            }
-                                        }
-                                        .testTag("lock_post_photo_toggle_row")
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Lock,
-                                            contentDescription = "Lock photo (18+)",
-                                            tint = if (lockPostPhoto && isAdultVerified) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "Lock Photo (18+ · 2 pts / \$2 to unlock)",
-                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                                color = if (lockPostPhoto && isAdultVerified) ModAmber else MaterialTheme.colorScheme.onSurface
-                                            )
-                                            Text(
-                                                text = if (isAdultVerified) {
-                                                    "You earn +1 usable in-app point per unlock (or +8 pts when viewers subscribe \$15/mo)"
-                                                } else {
-                                                    "18+ age verification required — tap to verify your age first"
-                                                },
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                        Switch(
-                                            checked = lockPostPhoto && isAdultVerified,
-                                            onCheckedChange = { wantLock ->
-                                                if (wantLock && !isAdultVerified) {
-                                                    onRequestAgeVerification()
-                                                } else {
-                                                    lockPostPhoto = wantLock
-                                                }
-                                            },
-                                            modifier = Modifier.testTag("lock_post_photo_switch")
-                                        )
                                     }
                                 }
                             }
@@ -1068,7 +1007,11 @@ fun ProfileScreen(
                                     )
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = "Boost to Top of Discovery (5 pts / \$5)",
+                                            text = if (staffCapabilities.isStaff) {
+                                                "Boost to Top of Discovery (FREE · Staff Perk)"
+                                            } else {
+                                                "Boost to Top of Discovery (5 pts / \$5)"
+                                            },
                                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                                             color = if (boostPostOnCreate) ModAmber else MaterialTheme.colorScheme.onSurface
                                         )
@@ -1115,13 +1058,12 @@ fun ProfileScreen(
                                         onCreatePost(
                                             postText,
                                             draftPostPhotoBase64,
-                                            lockPostPhoto && draftPostPhotoBase64.isNotBlank(),
+                                            false,
                                             boostPostOnCreate,
                                             { showNeedPointsForBoostDialog = true },
                                             {
                                                 postText = ""
                                                 draftPostPhotoBase64 = ""
-                                                lockPostPhoto = false
                                                 boostPostOnCreate = false
                                             }
                                         )
@@ -1149,7 +1091,13 @@ fun ProfileScreen(
                                         )
                                     }
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text(if (boostPostOnCreate) "Post & Boost (5 pts)" else "Post")
+                                    Text(
+                                        when {
+                                            boostPostOnCreate && staffCapabilities.isStaff -> "Post & Boost (FREE)"
+                                            boostPostOnCreate -> "Post & Boost (5 pts)"
+                                            else -> "Post"
+                                        }
+                                    )
                                 }
                             }
                         }
@@ -1229,11 +1177,8 @@ fun ProfileScreen(
                                         onBoostPost(post) { showNeedPointsForBoostDialog = true }
                                     },
                                     onOpenComments = { activeCommentsPost = post },
-                                    onSharePost = if (!post.locked) {
-                                        { activeSharePost = post }
-                                    } else {
-                                        null
-                                    },
+                                    onSharePost = { activeSharePost = post },
+                                    isStaffFreePerks = staffCapabilities.isStaff,
                                     onToggleLike = { onToggleLikePost(post) },
                                     onDelete = { onDeletePost(post) }
                                 )
@@ -1251,7 +1196,6 @@ fun ProfileScreen(
                         playBillingManager = playBillingManager,
                         onUpgradeToProPlay = onUpgradeToProPlay,
                         onUpgradeToVipProPlay = onUpgradeToVipProPlay,
-                        onUpgradeToEliteProPlay = onUpgradeToEliteProPlay,
                         onActivateProWithPoints = onActivateProWithPoints
                     )
                 }
@@ -1346,6 +1290,7 @@ fun ProfileScreen(
                         currentUserId = currentUserId,
                         userProfile = userProfile,
                         isAdmin = staffCapabilities.isAdmin,
+                        isStaffFreePerks = staffCapabilities.isStaff,
                         activeSubscriptions = mySubscriptions.filter { it.isCurrentlyActive() },
                         recentTransactions = myTransactions.take(6),
                         appOwnerRevenueCents = allTransactionsForAdmin.sumOf { it.platformShareCents },
@@ -1362,6 +1307,7 @@ fun ProfileScreen(
                     SpotlightFrameShopCard(
                         userProfile = userProfile,
                         isProcessingWallet = isProcessingWallet,
+                        isStaffFreePerks = staffCapabilities.isStaff,
                         onBuySpotlightFrame = { color ->
                             onBuySpotlightFrame(color) { showNeedPointsForBoostDialog = true }
                         }
@@ -1452,9 +1398,9 @@ fun ProfileScreen(
                                 )
                                 Text(
                                     text = if (isAdultVerified) {
-                                        "Born ${userProfile?.birthYear} · Eligible to lock & unlock 18+ photos"
+                                        "Born ${userProfile?.birthYear} · Age verified for 18+ account features"
                                     } else {
-                                        "Verify 18+ via your Google Account or Play Age Signals to lock or view locked photos"
+                                        "Verify 18+ via your Google Account or Play Age Signals for age-restricted features"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1807,6 +1753,49 @@ fun ProfileScreen(
                                 )
                             }
 
+                            Box(modifier = Modifier.testTag("toggle_lock_screen_recent_dm")) {
+                                ToggleSettingRow(
+                                    title = "Show Recent DM on Lock Screen",
+                                    subtitle = "Display your last incoming DM on the lock screen so you can tap it and hold PTT to send a voice-to-text reply without unlocking (turn off to hide messages)",
+                                    checked = lockScreenRecentDmEnabled,
+                                    onCheckedChange = { enable ->
+                                        lockScreenRecentDmEnabled = enable
+                                        DirectMessageNotificationPrefs.setLockScreenRecentDmEnabled(context, enable)
+                                    }
+                                )
+                            }
+
+                            Box(modifier = Modifier.testTag("toggle_silence_ptt_beep")) {
+                                ToggleSettingRow(
+                                    title = "Silence PTT Beep Noise",
+                                    subtitle = "Mute incoming Push-to-Talk beep pings (by default beeps still come through even in PTT Silent Mode)",
+                                    checked = pttBeepSilenced,
+                                    onCheckedChange = { silence ->
+                                        pttBeepSilenced = silence
+                                        LivePttSessionManager.setBeepSilenced(context, silence)
+                                    }
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    context.startActivity(LockScreenPttActivity.createPreviewIntent(context))
+                                },
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("profile_preview_lock_screen_ptt_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Lock,
+                                    contentDescription = "Open Lock-Screen PTT and Recent DM",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Open Lock-Screen PTT & Recent DM")
+                            }
+
                             OutlinedButton(
                                 onClick = {
                                     val msg = VoxPttWidgetHelper.requestPinPttWidget(context)
@@ -2088,7 +2077,6 @@ private fun ProMembershipCard(
     playBillingManager: com.example.billing.PlayBillingManager? = null,
     onUpgradeToProPlay: () -> Unit,
     onUpgradeToVipProPlay: () -> Unit = {},
-    onUpgradeToEliteProPlay: () -> Unit = {},
     onActivateProWithPoints: () -> Unit
 ) {
     val isProSubscriber = userProfile?.isProSubscriberOnly() == true
@@ -2099,11 +2087,9 @@ private fun ProMembershipCard(
     val isPlayInFlight = playBillingManager?.isPurchaseInFlight?.collectAsStateWithLifecycle()?.value ?: false
     val proPrice = playBillingManager?.formattedPriceForTier(ProTier.PRO) ?: ProTier.PRO.priceLabel
     val vipProPrice = playBillingManager?.formattedPriceForTier(ProTier.VIP_PRO) ?: ProTier.VIP_PRO.priceLabel
-    val eliteProPrice = playBillingManager?.formattedPriceForTier(ProTier.ELITE_PRO) ?: ProTier.ELITE_PRO.priceLabel
     val canClick = !isProcessingWallet && !isPlayInFlight
     val proBlue = usernameColor(StaffTier.USER, isPro = true)
     val vipAccent = MaterialTheme.colorScheme.secondary
-    val eliteAccent = MaterialTheme.colorScheme.tertiary
 
     Surface(
         shape = RoundedCornerShape(20.dp),
@@ -2189,12 +2175,30 @@ private fun ProMembershipCard(
                         color = MaterialTheme.colorScheme.surfaceVariant
                     ) {
                         Text(
-                            text = "FREE · Max 7 DM",
+                            text = "FREE · Max 5 DM",
                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                         )
                     }
+                }
+            }
+
+            if (staffCapabilities.isSupport && !staffCapabilities.isAdmin) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = SafetyEmerald.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, SafetyEmerald.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("support_staff_free_perks_banner")
+                ) {
+                    Text(
+                        text = "Support Staff Full Perks Active — Free of Charge. All VOX Pro/VIP features, boosts, Spotlight Frames, PTT Themes & Chirps are unlocked for you at 0 pts. All perk usage is logged for App Admins; abuse results in Support Staff removal.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(12.dp)
+                    )
                 }
             }
 
@@ -2226,7 +2230,7 @@ private fun ProMembershipCard(
                         )
                     }
                     Text(
-                        text = "• Group DMs up to 15 users (Free max 7)\n" +
+                        text = "• Group DMs up to 15 users (Free max 5)\n" +
                             "• Private Chat Rooms up to 50 users (Free max 25)\n" +
                             "• 1-minute Push-to-Talk clips (Free gets 5s), Reels, Who Viewed My Profile & Blue badge",
                         style = MaterialTheme.typography.bodySmall,
@@ -2304,8 +2308,8 @@ private fun ProMembershipCard(
                         )
                     }
                     Text(
-                        text = "• Group DMs up to 25 users (required above 15 users)\n" +
-                            "• Private Chat Rooms up to 75 users\n" +
+                        text = "• Company Code + Unique Employee PIN generator for your first 10 sub-accounts\n" +
+                            "• Group DMs up to 25 users (required above 15 users) & Private Rooms up to 75 users\n" +
                             "• Admin Push-to-Talk speaker selection & all VOX Pro perks",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2332,63 +2336,6 @@ private fun ProMembershipCard(
                     }
                 }
             }
-
-            // Tier 3: Elite Pro ($59.99/mo) — Group DMs up to 50 users (max)
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = eliteAccent.copy(alpha = 0.09f),
-                border = BorderStroke(1.dp, eliteAccent.copy(alpha = 0.45f)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "Elite Pro",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
-                            color = eliteAccent,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = eliteProPrice,
-                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                            color = eliteAccent
-                        )
-                    }
-                    Text(
-                        text = "• Group DMs up to 50 users (maximum capacity; required above 25)\n" +
-                            "• Private Chat Rooms up to 100 users\n" +
-                            "• Admin Push-to-Talk speaker selection, Group Support Staff & all VOX/VIP Pro perks",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Button(
-                        onClick = onUpgradeToEliteProPlay,
-                        enabled = canClick,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = eliteAccent,
-                            contentColor = Color.White
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("elite_pro_subscribe_play_button")
-                    ) {
-                        Text(
-                            text = if (activeTier == ProTier.ELITE_PRO) "Renew Elite Pro · $eliteProPrice" else "Upgrade to Elite Pro · $eliteProPrice",
-                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
         }
     }
 }
@@ -2398,6 +2345,7 @@ private fun PointsWalletSettingsCard(
     currentUserId: String,
     userProfile: UserProfile?,
     isAdmin: Boolean,
+    isStaffFreePerks: Boolean = false,
     activeSubscriptions: List<CreatorSubscription>,
     recentTransactions: List<PointTransaction>,
     appOwnerRevenueCents: Long,
@@ -2576,12 +2524,12 @@ private fun PointsWalletSettingsCard(
             }
 
             Text(
-                text = "Creators earn usable in-app points (added directly to your Points Balance, never cash): +1 pt per locked photo unlock, +1 pt per \$5 paid DM, and +8 pts per creator subscription. Spend points on Pro Membership (10 pts), promoting photos, videos, or your profile (5 pts), and Custom PTT Themes & Walkie Chirps!",
+                text = "Earn usable in-app points (added directly to your Points Balance, never cash) from paid DMs (+1 pt per \$5 paid DM) and login streaks. Spend points on Pro Membership (10 pts), promoting posts, videos, or your profile (5 pts), Spotlight Frames, and Custom PTT Themes & Walkie Chirps!",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            // Promote Profile to Top of Discovery (5 pts / 24h)
+            // Promote Profile to Top of Discovery (5 pts / 24h — FREE for Staff)
             val isProfileBoosted = userProfile?.isProfileBoosted() == true
             Surface(
                 shape = RoundedCornerShape(14.dp),
@@ -2618,7 +2566,11 @@ private fun PointsWalletSettingsCard(
                             color = if (isProfileBoosted) SafetyEmerald else MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Pin your profile at the top of Discover → People for 24 hours (5 pts)",
+                            text = if (isStaffFreePerks) {
+                                "Pin your profile at the top of Discover → People for 24 hours (FREE Staff Perk)"
+                            } else {
+                                "Pin your profile at the top of Discover → People for 24 hours (5 pts)"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -2628,7 +2580,7 @@ private fun PointsWalletSettingsCard(
                         enabled = !isProcessingWallet,
                         shape = RoundedCornerShape(999.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isProfileBoosted) SafetyEmerald else ModAmber,
+                            containerColor = if (isProfileBoosted || isStaffFreePerks) SafetyEmerald else ModAmber,
                             contentColor = Color.White
                         ),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
@@ -2637,7 +2589,12 @@ private fun PointsWalletSettingsCard(
                             .testTag("promote_profile_button")
                     ) {
                         Text(
-                            text = if (isProfileBoosted) "Extend · 5 pts" else "5 pts",
+                            text = when {
+                                isStaffFreePerks && isProfileBoosted -> "Extend · FREE"
+                                isStaffFreePerks -> "FREE (Staff)"
+                                isProfileBoosted -> "Extend · 5 pts"
+                                else -> "5 pts"
+                            },
                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                         )
                     }
@@ -2778,8 +2735,8 @@ private fun PointsWalletSettingsCard(
                             }
                         PointTransactionType.VIP_PRO_MEMBERSHIP ->
                             "Activated VIP Pro Membership (${formatUsdCents(tx.grossCents)}/mo · up to 25 Group DM)"
-                        PointTransactionType.ELITE_PRO_MEMBERSHIP ->
-                            "Activated Elite Pro Membership (${formatUsdCents(tx.grossCents)}/mo · up to 50 Group DM)"
+                        PointTransactionType.BUSINESS_MEMBERSHIP ->
+                            "Activated Business Account (${formatUsdCents(tx.grossCents)}/mo · up to 50 Sub-Accounts)"
                         PointTransactionType.UNLOCK_DM ->
                             if (isCreatorCredit) {
                                 "${tx.buyerName} unlocked Private Messages (+1 usable point earned)"

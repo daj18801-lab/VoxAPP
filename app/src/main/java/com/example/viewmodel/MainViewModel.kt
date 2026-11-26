@@ -11,7 +11,9 @@ import com.example.data.AppConfig
 import com.example.data.AppPerkType
 import com.example.data.BannedDevice
 import com.example.data.ChatRoom
+import com.example.data.CompanyCode
 import com.example.data.CompanySubAccount
+import com.example.data.CompanySubAccountFileNote
 import com.example.data.CreatorSubscription
 import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
@@ -36,6 +38,7 @@ import com.example.data.ReferralRecord
 import com.example.data.RefundReport
 import com.example.data.RefundType
 import com.example.data.ReportStatus
+import com.example.data.RestrictableFeature
 import com.example.data.RoomCategory
 import com.example.data.RoomCoverKey
 import com.example.data.RoomTransfer
@@ -212,12 +215,6 @@ class MainViewModel(
                         proMember = true,
                         proLifetime = false,
                         proTier = ProTier.VIP_PRO.name,
-                        proExpiresAtMillis = futureExpiry
-                    )
-                    AdminPreviewMode.ELITE_PRO -> base.copy(
-                        proMember = true,
-                        proLifetime = false,
-                        proTier = ProTier.ELITE_PRO.name,
                         proExpiresAtMillis = futureExpiry
                     )
                 }
@@ -483,6 +480,17 @@ class MainViewModel(
             initialValue = UiState.Loading
         )
 
+    val officialVoxChatRoomState: StateFlow<ChatRoom?> = repository.observeOfficialVoxChatRoom()
+        .catch { error ->
+            Log.w(TAG, "Error observing official VOX CHAT room", unwrapFirestoreError(error))
+            emit(null)
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = null
+        )
+
     val myRoomsState: StateFlow<UiState<List<ChatRoom>>> = repository.observeMyRooms(currentUserId)
         .map<List<ChatRoom>, UiState<List<ChatRoom>>> { UiState.Success(it) }
         .catch { error ->
@@ -497,8 +505,8 @@ class MainViewModel(
         )
 
     val safetyReportsState: StateFlow<UiState<List<SafetyReport>>> =
-        isAdminFlow.flatMapLatest { isAdminNow ->
-            repository.observeSafetyReports(currentUserId, isAdminNow)
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            repository.observeSafetyReports(currentUserId, isStaffNow)
                 .map<List<SafetyReport>, UiState<List<SafetyReport>>> { UiState.Success(it) }
                 .catch { error ->
                     val root = unwrapFirestoreError(error)
@@ -509,6 +517,16 @@ class MainViewModel(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
             initialValue = UiState.Loading
+        )
+
+    val businessHelpThreadsState: StateFlow<List<DirectThread>> =
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            if (!isStaffNow) flowOf(emptyList())
+            else repository.observeBusinessHelpThreads().catch { emit(emptyList()) }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
         )
 
     val supportTicketsState: StateFlow<List<SupportTicket>> =
@@ -752,6 +770,7 @@ class MainViewModel(
                 staffTier = staffCapabilities.value.tier
             ).onSuccess {
                 repository.updateOnlinePresence(true)
+                repository.ensureOfficialVoxChatRoomExists()
                 repository.ensureMyReferralCode()
                 repository.recordDailyLoginStreak(
                     buyerName = safeName,
@@ -914,7 +933,14 @@ class MainViewModel(
         onThreadReady: (String) -> Unit
     ) {
         val isAdmin = staffCapabilities.value.isAdmin
-        val myBlocked = (userProfileState.value as? UiState.Success)?.data?.blockedUserIds.orEmpty()
+        val myProfile = (userProfileState.value as? UiState.Success)?.data
+        if (!isAdmin && myProfile != null) {
+            myProfile.featureRestrictionNotice(RestrictableFeature.DM)?.let { notice ->
+                _snackbarEvents.tryEmit(notice)
+                return
+            }
+        }
+        val myBlocked = myProfile?.blockedUserIds.orEmpty()
         if (myBlocked.contains(otherUserId)) {
             _snackbarEvents.tryEmit("You have blocked $otherName. Unblock them in Safety Center to message again.")
             return
@@ -1081,9 +1107,20 @@ class MainViewModel(
                     _snackbarEvents.tryEmit("Entering rooms has been disabled on your account by an Administrator.")
                     return false
                 }
+                profile.isFeatureRestricted(RestrictableFeature.ENTER_ROOM) -> {
+                    _snackbarEvents.tryEmit(
+                        profile.featureRestrictionNotice(RestrictableFeature.ENTER_ROOM)
+                            ?: "Entering chat rooms is currently restricted on your account."
+                    )
+                    return false
+                }
             }
         }
         if (room != null) {
+            if (room.isOfficialVoxChatRoom() && room.statusEnum() != com.example.data.RoomStatus.LIVE) {
+                _snackbarEvents.tryEmit("VOX CHAT is currently disabled by an Administrator.")
+                return false
+            }
             if (room.bannedUserIds.contains(currentUserId)) {
                 _snackbarEvents.tryEmit("You are banned from this room.")
                 return false
@@ -1095,6 +1132,36 @@ class MainViewModel(
             }
         }
         return true
+    }
+
+    fun updateOfficialVoxChatControls(
+        enabled: Boolean,
+        hiddenFromLobby: Boolean,
+        pinLocked: Boolean,
+        roomPinCode: String,
+        onSaved: () -> Unit = {}
+    ) {
+        if (!realStaffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only an App Administrator can enable, disable, hide, or configure VOX CHAT.")
+            return
+        }
+        viewModelScope.launch {
+            repository.updateOfficialVoxChatControls(
+                enabled = enabled,
+                hiddenFromLobby = hiddenFromLobby,
+                pinLocked = pinLocked,
+                roomPinCode = roomPinCode,
+                actorName = currentActorName()
+            ).onSuccess {
+                val statusLabel = if (enabled) "Enabled" else "Disabled"
+                val visLabel = if (hiddenFromLobby) "Hidden" else "Visible"
+                val pinLabel = if (pinLocked) "PIN Locked ($roomPinCode)" else "No PIN"
+                _snackbarEvents.tryEmit("VOX CHAT updated: $statusLabel · $visLabel · $pinLabel")
+                onSaved()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update VOX CHAT settings")
+            }
+        }
     }
 
     fun createRoom(
@@ -1133,6 +1200,11 @@ class MainViewModel(
         }
 
         val hostName = currentProfile?.displayName ?: "Studio Host"
+        val privateCap = if (visibility == RoomVisibility.PRIVATE) {
+            (currentProfile?.maxPrivateRoomUsers(caps.tier) ?: ChatRoom.FREE_MAX_PRIVATE_USERS).toLong()
+        } else {
+            0L
+        }
 
         viewModelScope.launch {
             _isCreatingRoom.value = true
@@ -1151,7 +1223,8 @@ class MainViewModel(
                 slowModeSeconds = slowModeSeconds,
                 maxSpeakers = maxSpeakers,
                 pinLocked = pinLocked,
-                roomPinCode = roomPinCode
+                roomPinCode = roomPinCode,
+                maxPrivateUsers = privateCap
             ).onSuccess { roomId ->
                 _isCreatingRoom.value = false
                 if (pinLocked && roomPinCode.length == 4) {
@@ -1207,6 +1280,12 @@ class MainViewModel(
             false
         }
         val currentProfile = (userProfileState.value as? UiState.Success)?.data
+        if (!staffCapabilities.value.isAdmin && currentProfile != null) {
+            currentProfile.featureRestrictionNotice(RestrictableFeature.EDIT_PROFILE)?.let { notice ->
+                _snackbarEvents.tryEmit(notice)
+                return
+            }
+        }
         val currentPhoto = currentProfile?.photoBase64.orEmpty()
         val currentPolicy = currentProfile?.dmPolicyEnum() ?: DmPolicy.OPEN
         viewModelScope.launch {
@@ -1233,6 +1312,13 @@ class MainViewModel(
 
     fun updateProfilePhoto(photoBase64: String) {
         if (_isUpdatingPhoto.value) return
+        val currentProfile = (userProfileState.value as? UiState.Success)?.data
+        if (!staffCapabilities.value.isAdmin && currentProfile != null) {
+            currentProfile.featureRestrictionNotice(RestrictableFeature.EDIT_PROFILE)?.let { notice ->
+                _snackbarEvents.tryEmit(notice)
+                return
+            }
+        }
         viewModelScope.launch {
             _isUpdatingPhoto.value = true
             repository.updateUserProfilePhoto(
@@ -1271,12 +1357,12 @@ class MainViewModel(
                 _snackbarEvents.tryEmit("Suspended for ${currentProfile.remainingSuspensionLabel()}.")
                 return
             }
+            currentProfile.featureRestrictionNotice(RestrictableFeature.POSTING)?.let { notice ->
+                _snackbarEvents.tryEmit(notice)
+                return
+            }
         }
-        if (locked && imageBase64.isNotBlank() && !effectiveMyProfile().isAdult18Plus()) {
-            _snackbarEvents.tryEmit("You must verify that you are 18+ to lock photos.")
-            return
-        }
-        if (boostToTop) {
+        if (boostToTop && !caps.isStaff) {
             val currentPoints = currentProfile?.pointsBalance ?: 0L
             if (currentPoints < 5L) {
                 _snackbarEvents.tryEmit("Boosting to the top of Discovery costs 5 points (\$5). Buy points in Profile Settings.")
@@ -1291,14 +1377,14 @@ class MainViewModel(
                 myTier = caps.tier,
                 text = text,
                 imageBase64 = imageBase64,
-                locked = locked,
+                locked = false,
                 boostToTop = boostToTop
             ).onSuccess {
                 _isPublishingPost.value = false
                 _snackbarEvents.tryEmit(
                     when {
+                        boostToTop && caps.isStaff -> "Posted & boosted to the top of Discovery for 24h! (Free Staff Perk)"
                         boostToTop -> "Posted & boosted to the top of Discovery for 24h! (-5 pts / \$5)"
-                        locked && imageBase64.isNotBlank() -> "Locked photo posted (2 pts / \$2 to unlock)"
                         else -> "Post shared to your profile!"
                     }
                 )
@@ -1315,8 +1401,9 @@ class MainViewModel(
         onInsufficientPoints: () -> Unit = {}
     ) {
         if (_isProcessingWallet.value) return
+        val caps = staffCapabilities.value
         val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
-        if (currentPoints < 5L) {
+        if (!caps.isStaff && currentPoints < 5L) {
             _snackbarEvents.tryEmit("You need 5 points (\$5) to boost your post to the top of Discovery.")
             onInsufficientPoints()
             return
@@ -1325,10 +1412,14 @@ class MainViewModel(
             _isProcessingWallet.value = true
             repository.boostProfilePost(
                 post = post,
-                buyerName = effectiveMyProfile().displayName
+                buyerName = effectiveMyProfile().displayName,
+                staffTier = caps.tier
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit("Boosted to the top of Discovery for 24h! (-5 pts / \$5)")
+                _snackbarEvents.tryEmit(
+                    if (caps.isStaff) "Boosted to the top of Discovery for 24h! (Free Staff Perk)"
+                    else "Boosted to the top of Discovery for 24h! (-5 pts / \$5)"
+                )
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not boost post")
@@ -1659,13 +1750,55 @@ class MainViewModel(
         }
     }
 
+    suspend fun fetchUserProfileOnce(targetUserId: String): UserProfile? =
+        repository.fetchUserProfileOnce(targetUserId).getOrNull()
+
+    fun updateUserFeatureRestrictions(
+        targetUserId: String,
+        targetName: String,
+        disabledFeatures: List<String>?,
+        featureSuspensions: Map<String, Long>,
+        reason: String,
+        onSaved: () -> Unit = {}
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("Only Support Staff or App Admins can manage feature restrictions.")
+            return
+        }
+        viewModelScope.launch {
+            repository.updateUserFeatureRestrictions(
+                targetUserId = targetUserId,
+                actorTier = caps.tier,
+                disabledFeatures = if (caps.isAdmin) disabledFeatures else null,
+                featureSuspensions = featureSuspensions,
+                reason = reason
+            ).onSuccess {
+                val summary = if (caps.isAdmin) {
+                    "Updated feature restrictions for $targetName"
+                } else {
+                    "Updated timed feature suspensions for $targetName"
+                }
+                _snackbarEvents.tryEmit(summary)
+                onSaved()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update feature restrictions")
+            }
+        }
+    }
+
     fun setUserMessagingDisabled(targetUserId: String, targetName: String, disabled: Boolean) {
-        if (!staffCapabilities.value.isStaff) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
             _snackbarEvents.tryEmit("Only Support Staff or App Admins can disable or enable messaging.")
             return
         }
         viewModelScope.launch {
-            repository.setUserMessagingDisabled(targetUserId = targetUserId, disabled = disabled)
+            repository.setUserMessagingDisabled(
+                targetUserId = targetUserId,
+                disabled = disabled,
+                actorTier = caps.tier
+            )
                 .onSuccess {
                     _snackbarEvents.tryEmit(
                         if (disabled) "Messaging disabled for $targetName"
@@ -2021,6 +2154,13 @@ class MainViewModel(
     }
 
     fun updateBio(newBio: String, onSaved: () -> Unit = {}) {
+        val currentProfile = (userProfileState.value as? UiState.Success)?.data
+        if (!staffCapabilities.value.isAdmin && currentProfile != null) {
+            currentProfile.featureRestrictionNotice(RestrictableFeature.EDIT_PROFILE)?.let { notice ->
+                _snackbarEvents.tryEmit(notice)
+                return
+            }
+        }
         viewModelScope.launch {
             val profile = effectiveMyProfile()
             repository.updateUserBio(
@@ -2112,6 +2252,30 @@ class MainViewModel(
         }
     }
 
+    fun sendMassVoxPrivateMessage(
+        title: String,
+        message: String,
+        isUrgentAlert: Boolean,
+        onSent: () -> Unit = {}
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only Administrators can send mass VOX private messages.")
+            return
+        }
+        viewModelScope.launch {
+            repository.sendMassVoxPrivateMessageToAllUsers(
+                title = title,
+                message = message,
+                isUrgentAlert = isUrgentAlert
+            ).onSuccess { count ->
+                _snackbarEvents.tryEmit("VOX private message delivered to $count users (read-only)!")
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send mass VOX private message")
+            }
+        }
+    }
+
     fun deleteAppBroadcast(broadcastId: String) {
         if (!staffCapabilities.value.isAdmin) {
             _snackbarEvents.tryEmit("Only Administrators can delete app-wide messages.")
@@ -2150,10 +2314,10 @@ class MainViewModel(
             ).onSuccess {
                 _isProcessingWallet.value = false
                 val msg = when (resolvedTier) {
-                    ProTier.ELITE_PRO ->
-                        "Welcome to Elite Pro! Group DMs up to 50 users + Admin PTT speaker control + all VOX Pro perks unlocked for 30 days."
+                    ProTier.BUSINESS ->
+                        "Welcome to Business Account! You can now manage up to 50 employee sub-accounts, monitor sub-account DMs, and unlock all VOX Pro perks for 30 days."
                     ProTier.VIP_PRO ->
-                        "Welcome to VIP Pro! Group DMs up to 25 users + Admin PTT speaker control + all VOX Pro perks unlocked for 30 days."
+                        "Welcome to VIP Pro! Company Code + Employee PIN generator for 10 sub-accounts, Group DMs up to 25 users, and all VOX Pro perks unlocked for 30 days."
                     else ->
                         "Welcome to VOX Pro! Group DMs up to 15 users, 1-minute PTT, 30s Reels uploads, Who Viewed My Profile, and Blue username unlocked for 30 days."
                 }
@@ -2176,6 +2340,12 @@ class MainViewModel(
         if (_isUploadingReel.value) return
         val profile = effectiveMyProfile()
         val tier = staffCapabilities.value.tier
+        if (tier != StaffTier.ADMIN) {
+            profile.featureRestrictionNotice(RestrictableFeature.POSTING)?.let { notice ->
+                _snackbarEvents.tryEmit(notice)
+                return
+            }
+        }
         if (!profile.isProActive(tier)) {
             _snackbarEvents.tryEmit("Pro Membership (\$9.99/mo) is required to upload Reels.")
             return
@@ -2196,7 +2366,11 @@ class MainViewModel(
             ).onSuccess {
                 _isUploadingReel.value = false
                 _snackbarEvents.tryEmit(
-                    if (boostToTop) "Reel uploaded & boosted to top for \$5!" else "Reel uploaded!"
+                    when {
+                        boostToTop && tier.isStaff() -> "Reel uploaded & boosted to top! (Free Staff Perk)"
+                        boostToTop -> "Reel uploaded & boosted to top for \$5!"
+                        else -> "Reel uploaded!"
+                    }
                 )
                 onUploaded()
             }.onFailure { err ->
@@ -2211,8 +2385,9 @@ class MainViewModel(
 
     fun boostReelToTop(reel: Reel, onInsufficientPoints: () -> Unit = {}) {
         if (_isProcessingWallet.value) return
+        val caps = staffCapabilities.value
         val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
-        if (currentPoints < Reel.BOOST_PRICE_POINTS) {
+        if (!caps.isStaff && currentPoints < Reel.BOOST_PRICE_POINTS) {
             _snackbarEvents.tryEmit("You need 5 points (\$5) to push this Reel to the top.")
             onInsufficientPoints()
             return
@@ -2221,10 +2396,14 @@ class MainViewModel(
             _isProcessingWallet.value = true
             repository.boostReelToTop(
                 reel = reel,
-                buyerName = effectiveMyProfile().displayName
+                buyerName = effectiveMyProfile().displayName,
+                staffTier = caps.tier
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit("Reel boosted to the top of Reels for 24h! (-5 pts)")
+                _snackbarEvents.tryEmit(
+                    if (caps.isStaff) "Reel boosted to the top of Reels for 24h! (Free Staff Perk)"
+                    else "Reel boosted to the top of Reels for 24h! (-5 pts)"
+                )
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not boost Reel")
@@ -2292,8 +2471,9 @@ class MainViewModel(
 
     fun boostMyProfile(onInsufficientPoints: () -> Unit = {}) {
         if (_isProcessingWallet.value) return
+        val caps = staffCapabilities.value
         val currentPoints = (userProfileState.value as? UiState.Success)?.data?.pointsBalance ?: 0L
-        if (currentPoints < 5L) {
+        if (!caps.isStaff && currentPoints < 5L) {
             _snackbarEvents.tryEmit("You need 5 points to promote your profile to the top of Discovery.")
             onInsufficientPoints()
             return
@@ -2302,10 +2482,13 @@ class MainViewModel(
             _isProcessingWallet.value = true
             repository.boostMyProfileToTop(
                 buyerName = effectiveMyProfile().displayName,
-                staffTier = staffCapabilities.value.tier
+                staffTier = caps.tier
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit("Profile promoted to the top of Discovery for 24h! (-5 pts)")
+                _snackbarEvents.tryEmit(
+                    if (caps.isStaff) "Profile promoted to the top of Discovery for 24h! (Free Staff Perk)"
+                    else "Profile promoted to the top of Discovery for 24h! (-5 pts)"
+                )
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not promote profile")
@@ -2315,13 +2498,20 @@ class MainViewModel(
 
     fun purchaseOrSelectPttTheme(theme: PttThemeStyle, onInsufficientPoints: () -> Unit = {}) {
         if (_isProcessingWallet.value) return
+        val caps = staffCapabilities.value
         val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
-        if (profile.ownsPttTheme(theme)) {
+        if (profile.ownsPttTheme(theme, caps.tier)) {
             if (profile.selectedPttThemeEnum() == theme) return
             viewModelScope.launch {
-                repository.selectPttTheme(theme)
+                repository.selectPttTheme(theme, staffName = profile.displayName, staffTier = caps.tier)
                     .onSuccess {
-                        _snackbarEvents.tryEmit("Equipped ${theme.label} PTT button!")
+                        _snackbarEvents.tryEmit(
+                            if (caps.isStaff && theme.pricePoints > 0L) {
+                                "Equipped ${theme.label} PTT button! (Free Staff Perk)"
+                            } else {
+                                "Equipped ${theme.label} PTT button!"
+                            }
+                        )
                     }
                     .onFailure { err ->
                         _snackbarEvents.tryEmit(err.message ?: "Could not switch PTT theme")
@@ -2336,7 +2526,7 @@ class MainViewModel(
         }
         viewModelScope.launch {
             _isProcessingWallet.value = true
-            repository.purchasePttTheme(theme, profile.displayName)
+            repository.purchasePttTheme(theme, profile.displayName, staffTier = caps.tier)
                 .onSuccess {
                     _isProcessingWallet.value = false
                     _snackbarEvents.tryEmit("Unlocked & equipped ${theme.label}! (-${theme.pricePoints} pts)")
@@ -2350,13 +2540,20 @@ class MainViewModel(
 
     fun purchaseOrSelectPttChirp(chirp: PttChirpStyle, onInsufficientPoints: () -> Unit = {}) {
         if (_isProcessingWallet.value) return
+        val caps = staffCapabilities.value
         val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
-        if (profile.ownsPttChirp(chirp)) {
+        if (profile.ownsPttChirp(chirp, caps.tier)) {
             if (profile.selectedPttChirpEnum() == chirp) return
             viewModelScope.launch {
-                repository.selectPttChirp(chirp)
+                repository.selectPttChirp(chirp, staffName = profile.displayName, staffTier = caps.tier)
                     .onSuccess {
-                        _snackbarEvents.tryEmit("Equipped ${chirp.label} walkie chirp!")
+                        _snackbarEvents.tryEmit(
+                            if (caps.isStaff && chirp.pricePoints > 0L) {
+                                "Equipped ${chirp.label} walkie chirp! (Free Staff Perk)"
+                            } else {
+                                "Equipped ${chirp.label} walkie chirp!"
+                            }
+                        )
                     }
                     .onFailure { err ->
                         _snackbarEvents.tryEmit(err.message ?: "Could not switch walkie chirp")
@@ -2371,7 +2568,7 @@ class MainViewModel(
         }
         viewModelScope.launch {
             _isProcessingWallet.value = true
-            repository.purchasePttChirp(chirp, profile.displayName)
+            repository.purchasePttChirp(chirp, profile.displayName, staffTier = caps.tier)
                 .onSuccess {
                     _isProcessingWallet.value = false
                     _snackbarEvents.tryEmit("Unlocked & equipped ${chirp.label}! (-${chirp.pricePoints} pts)")
@@ -2385,8 +2582,9 @@ class MainViewModel(
 
     fun buySpotlightFrame(color: SpotlightFrameColor, onInsufficientPoints: () -> Unit = {}) {
         if (_isProcessingWallet.value) return
+        val caps = staffCapabilities.value
         val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
-        if (profile.pointsBalance < SpotlightFrameColor.PRICE_POINTS) {
+        if (!caps.isStaff && profile.pointsBalance < SpotlightFrameColor.PRICE_POINTS) {
             _snackbarEvents.tryEmit("You need 5 points to activate a 24-Hour Glowing Neon Spotlight Frame.")
             onInsufficientPoints()
             return
@@ -2396,10 +2594,13 @@ class MainViewModel(
             repository.purchaseSpotlightFrame(
                 color = color,
                 buyerName = profile.displayName,
-                staffTier = staffCapabilities.value.tier
+                staffTier = caps.tier
             ).onSuccess {
                 _isProcessingWallet.value = false
-                _snackbarEvents.tryEmit("${color.label} Spotlight Frame active for 24 hours across Discover & Chats! (-5 pts)")
+                _snackbarEvents.tryEmit(
+                    if (caps.isStaff) "${color.label} Spotlight Frame active for 24 hours! (Free Staff Perk)"
+                    else "${color.label} Spotlight Frame active for 24 hours across Discover & Chats! (-5 pts)"
+                )
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not activate Spotlight Frame")
@@ -2428,18 +2629,22 @@ class MainViewModel(
 
     fun unlockProfileViewers(onInsufficientPoints: () -> Unit = {}) {
         if (_isProcessingWallet.value) return
+        val caps = staffCapabilities.value
         val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
-        if (profile.pointsBalance < 2L) {
+        if (!caps.isStaff && profile.pointsBalance < 2L) {
             _snackbarEvents.tryEmit("You need 2 points to unlock Who Viewed Your Profile.")
             onInsufficientPoints()
             return
         }
         viewModelScope.launch {
             _isProcessingWallet.value = true
-            repository.unlockProfileViewers(profile.displayName)
+            repository.unlockProfileViewers(profile.displayName, staffTier = caps.tier)
                 .onSuccess {
                     _isProcessingWallet.value = false
-                    _snackbarEvents.tryEmit("Unlocked Who Viewed Your Profile for 24 hours! (-2 pts)")
+                    _snackbarEvents.tryEmit(
+                        if (caps.isStaff) "Unlocked Who Viewed Your Profile for 24 hours! (Free Staff Perk)"
+                        else "Unlocked Who Viewed Your Profile for 24 hours! (-2 pts)"
+                    )
                 }
                 .onFailure { err ->
                     _isProcessingWallet.value = false
@@ -2525,11 +2730,13 @@ class MainViewModel(
         targetName: String,
         reason: String,
         roomId: String = "",
+        requestType: String = "SUSPENSION",
+        isBusinessAccount: Boolean = false,
         onSubmitted: () -> Unit = {}
     ) {
         val caps = staffCapabilities.value
         if (!caps.isStaff) {
-            _snackbarEvents.tryEmit("Only Support Staff or Admins can request a suspension.")
+            _snackbarEvents.tryEmit("Only Support Staff or Admins can submit a moderation review request.")
             return
         }
         viewModelScope.launch {
@@ -2539,12 +2746,42 @@ class MainViewModel(
                 requestedByName = effectiveMyProfile().displayName,
                 requesterTier = caps.tier,
                 reason = reason,
-                roomId = roomId
+                roomId = roomId,
+                requestType = requestType,
+                isBusinessAccount = isBusinessAccount
             ).onSuccess {
-                _snackbarEvents.tryEmit("$targetName suspended immediately pending Admin review.")
+                val msg = if (isBusinessAccount || requestType.startsWith("BUSINESS_")) {
+                    "Business Account approval request sent to App Admins for $targetName (no changes applied yet)."
+                } else {
+                    "$targetName suspended immediately pending Admin review."
+                }
+                _snackbarEvents.tryEmit(msg)
                 onSubmitted()
             }.onFailure { err ->
-                _snackbarEvents.tryEmit(err.message ?: "Could not submit suspension request")
+                _snackbarEvents.tryEmit(err.message ?: "Could not submit review request")
+            }
+        }
+    }
+
+    fun adminRevokeBusinessAccount(
+        targetUserId: String,
+        targetName: String,
+        reason: String
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only App Administrators can remove or revoke a Business Account.")
+            return
+        }
+        viewModelScope.launch {
+            repository.adminRevokeBusinessAccount(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                adminName = effectiveMyProfile().displayName,
+                reason = reason
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Business Account removed for $targetName and company codes deactivated.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not remove Business Account")
             }
         }
     }
@@ -2558,7 +2795,7 @@ class MainViewModel(
     ) {
         val caps = staffCapabilities.value
         if (!caps.isAdmin) {
-            _snackbarEvents.tryEmit("Only App Administrators can review suspension requests.")
+            _snackbarEvents.tryEmit("Only App Administrators can review moderation approval requests.")
             return
         }
         viewModelScope.launch {
@@ -2668,12 +2905,18 @@ class MainViewModel(
                 reason = reason,
                 granterName = effectiveMyProfile().displayName,
                 granterTier = caps.tier
-            ).onSuccess { support5dCount ->
-                val alertNote = if (caps.tier == StaffTier.SUPPORT && support5dCount >= PerkGrant.SUPPORT_ALERT_THRESHOLD) {
-                    " (Support 5-day total: $support5dCount — App Admins notified)"
-                } else if (caps.tier == StaffTier.SUPPORT) {
-                    " (Support 5-day total: $support5dCount / ${PerkGrant.SUPPORT_ALERT_THRESHOLD})"
-                } else ""
+            ).onSuccess { outcome ->
+                val alertNote = when {
+                    caps.tier == StaffTier.SUPPORT && outcome.proAlertTriggered ->
+                        " (5-day Pro packages: ${outcome.staffProPackages5d} — App Admin notified)"
+                    caps.tier == StaffTier.SUPPORT && outcome.pointsAlertTriggered ->
+                        " (5-day Points given: ${outcome.staffPoints5d} pts — App Admin notified)"
+                    caps.tier == StaffTier.SUPPORT && perkType.isProPackage() ->
+                        " (Your 5d Pro packages: ${outcome.staffProPackages5d} / ${PerkGrant.SUPPORT_PRO_PACKAGE_THRESHOLD})"
+                    caps.tier == StaffTier.SUPPORT && perkType == AppPerkType.BONUS_POINTS ->
+                        " (Your 5d Points given: ${outcome.staffPoints5d} / ${PerkGrant.SUPPORT_POINTS_THRESHOLD} pts)"
+                    else -> ""
+                }
                 _snackbarEvents.tryEmit("Granted ${perkType.label} to $targetName!$alertNote")
                 onGranted()
             }.onFailure { err ->
@@ -2683,6 +2926,76 @@ class MainViewModel(
     }
 
     // --- VIP PRO COMPANY SUB-ACCOUNTS, SUPERVISORS, WORK ORDERS, REQUESTS & DND ---
+
+    val myCompanySubAccountState: StateFlow<CompanySubAccount?> =
+        realUserProfileState
+            .map { state ->
+                val prof = (state as? UiState.Success)?.data
+                if (prof?.companySubAccount == true && prof.subAccountId.isNotBlank()) prof.subAccountId else ""
+            }
+            .distinctUntilChanged()
+            .flatMapLatest { subId ->
+                if (subId.isBlank()) {
+                    flowOf(null)
+                } else {
+                    repository.observeMyCompanySubAccount(subId)
+                        .catch { err ->
+                            Log.w(TAG, "Error observing my company sub-account $subId", unwrapFirestoreError(err))
+                            emit(null)
+                        }
+                }
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = null
+            )
+
+    val companySubAccountDmsState: StateFlow<List<DirectThread>> =
+        combine(realUserProfileState, realStaffCapabilities) { profState, caps ->
+            val prof = (profState as? UiState.Success)?.data
+            prof != null && prof.canManageCompanySubAccounts(caps.tier)
+        }
+            .distinctUntilChanged()
+            .flatMapLatest { canManage ->
+                if (!canManage) {
+                    flowOf(emptyList())
+                } else {
+                    repository.observeCompanySubAccountDms(currentUserId)
+                        .catch { err ->
+                            Log.w(TAG, "Error observing company sub-account DMs", unwrapFirestoreError(err))
+                            emit(emptyList())
+                        }
+                }
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val myCompanyCodesState: StateFlow<List<CompanyCode>> =
+        combine(realUserProfileState, realStaffCapabilities) { profState, caps ->
+            val prof = (profState as? UiState.Success)?.data
+            prof != null && prof.canManageCompanySubAccounts(caps.tier)
+        }
+            .distinctUntilChanged()
+            .flatMapLatest { canManage ->
+                if (!canManage) {
+                    flowOf(emptyList())
+                } else {
+                    repository.observeMyCompanyCodes(currentUserId)
+                        .catch { err ->
+                            Log.w(TAG, "Error observing company codes", unwrapFirestoreError(err))
+                            emit(emptyList())
+                        }
+                }
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
 
     val companySubAccountsState: StateFlow<List<CompanySubAccount>> =
         combine(
@@ -2757,7 +3070,7 @@ class MainViewModel(
         val me = effectiveMyProfile()
         val caps = staffCapabilities.value
         if (!me.canManageCompanySubAccounts(caps.tier)) {
-            _snackbarEvents.tryEmit("VIP Pro or Elite Pro membership is required to create a Company Workspace.")
+            _snackbarEvents.tryEmit("VIP Pro or Business Account membership is required to create a Company Workspace.")
             return
         }
         viewModelScope.launch {
@@ -2777,12 +3090,13 @@ class MainViewModel(
         companyName: String,
         subName: String,
         roleTitle: String,
-        onCreated: (CompanySubAccount) -> Unit = {}
+        onCreated: (CompanySubAccount) -> Unit = {},
+        onBusinessUpgradeRequired: () -> Unit = {}
     ) {
         val me = effectiveMyProfile()
         val caps = staffCapabilities.value
         if (!me.canManageCompanySubAccounts(caps.tier)) {
-            _snackbarEvents.tryEmit("VIP Pro or Elite Pro membership is required to create sub-names.")
+            _snackbarEvents.tryEmit("VIP Pro or Business Account membership is required to create sub-names.")
             return
         }
         viewModelScope.launch {
@@ -2793,11 +3107,260 @@ class MainViewModel(
                 subName = subName,
                 roleTitle = roleTitle
             ).onSuccess { created ->
-                _snackbarEvents.tryEmit("Created sub-name \"${created.subName}\" · Access Code: ${created.accessCode}")
+                _snackbarEvents.tryEmit(
+                    "Created \"${created.subName}\" · Code: ${created.companyCode} · Unique PIN: ${created.joinPin}"
+                )
                 onCreated(created)
             }.onFailure { err ->
-                _snackbarEvents.tryEmit(err.message ?: "Could not create sub-name")
+                val msg = err.message ?: "Could not create sub-name"
+                if (msg.startsWith("BUSINESS_UPGRADE_REQUIRED")) {
+                    onBusinessUpgradeRequired()
+                } else {
+                    _snackbarEvents.tryEmit(msg)
+                }
             }
+        }
+    }
+
+    fun updateCompanySubAccountCapabilities(
+        subAccount: CompanySubAccount,
+        pttEnabled: Boolean,
+        messagingEnabled: Boolean,
+        micEnabled: Boolean,
+        videoEnabled: Boolean
+    ) {
+        viewModelScope.launch {
+            repository.updateCompanySubAccountCapabilities(
+                subAccount = subAccount,
+                pttEnabled = pttEnabled,
+                messagingEnabled = messagingEnabled,
+                micEnabled = micEnabled,
+                videoEnabled = videoEnabled
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Updated permissions for \"${subAccount.subName}\".")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update sub-account permissions")
+            }
+        }
+    }
+
+    fun joinBusinessStaffHelp(
+        thread: DirectThread,
+        invisible: Boolean = false,
+        onEntered: (String) -> Unit
+    ) {
+        if (!staffCapabilities.value.isStaff) {
+            _snackbarEvents.tryEmit("Only VOX Support Staff and App Admins can enter Group DM Help & Report sessions.")
+            return
+        }
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.joinBusinessStaffHelp(thread, me.effectiveDisplayName(), invisible = invisible)
+                .onSuccess {
+                    val label = thread.groupName.ifBlank { "Group DM" }
+                    _snackbarEvents.tryEmit(
+                        if (invisible) "Entered $label in Invisible Staff Mode."
+                        else "Entered $label visibly to assist."
+                    )
+                    onEntered(thread.id)
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not enter Group DM")
+                }
+        }
+    }
+
+    fun endBusinessStaffHelp(threadId: String) {
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.endBusinessStaffHelp(threadId, me.effectiveDisplayName())
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Closed VOX Staff help session.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not close staff help session")
+                }
+        }
+    }
+
+    fun staffRemoveUserFromBusinessAccount(
+        businessOwnerId: String,
+        targetUserId: String,
+        targetName: String,
+        reason: String,
+        reportId: String = ""
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("Only VOX Support Staff and App Admins can perform this action.")
+            return
+        }
+        viewModelScope.launch {
+            repository.staffRemoveUserFromBusinessAccount(
+                businessOwnerId = businessOwnerId,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                reason = reason,
+                actorTier = caps.tier
+            ).onSuccess {
+                if (reportId.isNotBlank()) {
+                    repository.resolveSafetyReport(
+                        reportId = reportId,
+                        newStatus = ReportStatus.RESOLVED,
+                        resolutionNote = "Removed $targetName from the Business Account and permanently revoked their unique PIN."
+                    )
+                }
+                _snackbarEvents.tryEmit("Removed $targetName from the Business Account and disabled their unique PIN.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not remove user from Business Account")
+            }
+        }
+    }
+
+    fun adminBanReportedUserDevice(
+        targetUserId: String,
+        targetName: String,
+        reason: String,
+        reportId: String = ""
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only App Admins can ban a user's device.")
+            return
+        }
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.adminBanReportedUserDevice(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                reason = reason,
+                adminName = me.effectiveDisplayName()
+            ).onSuccess {
+                if (reportId.isNotBlank()) {
+                    repository.resolveSafetyReport(
+                        reportId = reportId,
+                        newStatus = ReportStatus.RESOLVED,
+                        resolutionNote = "Device banned by App Admin (${me.effectiveDisplayName()}): $reason"
+                    )
+                }
+                _snackbarEvents.tryEmit("Device banned for $targetName — they cannot sign in again on any email.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not ban user's device")
+            }
+        }
+    }
+
+    fun startCompanySubOneOnOneDm(
+        otherUserId: String,
+        otherName: String,
+        otherColorHex: String = "#0088FF",
+        otherTier: StaffTier = StaffTier.USER,
+        onThreadReady: (String) -> Unit
+    ) {
+        val me = effectiveMyProfile()
+        if (!me.companySubAccount || me.parentCompanyOwnerId.isBlank() || me.companyThreadId.isBlank()) {
+            _snackbarEvents.tryEmit("Only active company sub-accounts can start company 1-on-1 DMs.")
+            return
+        }
+        viewModelScope.launch {
+            repository.startOrGetCompanySubOneOnOneDm(
+                myProfile = me,
+                myTier = staffCapabilities.value.tier,
+                companyOwnerId = me.parentCompanyOwnerId,
+                otherUserId = otherUserId,
+                otherName = otherName,
+                otherColorHex = otherColorHex,
+                otherTier = otherTier
+            ).onSuccess { threadId ->
+                onThreadReady(threadId)
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not open 1-on-1 company DM")
+            }
+        }
+    }
+
+    fun banCompanySubAccount(subAccount: CompanySubAccount, reason: String) {
+        viewModelScope.launch {
+            repository.banCompanySubAccount(subAccount, reason)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Banned \"${subAccount.subName}\" from your Company Workspace.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not ban sub-account")
+                }
+        }
+    }
+
+    fun suspendCompanySubAccount(
+        subAccount: CompanySubAccount,
+        durationMillis: Long,
+        reason: String
+    ) {
+        viewModelScope.launch {
+            repository.suspendCompanySubAccount(subAccount, durationMillis, reason)
+                .onSuccess {
+                    val label = if (durationMillis == 0L) "Lifted suspension for \"${subAccount.subName}\"."
+                    else "Suspended \"${subAccount.subName}\"."
+                    _snackbarEvents.tryEmit(label)
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update sub-account suspension")
+                }
+        }
+    }
+
+    fun buzzCompanySubAccountPhone(subAccount: CompanySubAccount, message: String) {
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.buzzCompanySubAccountPhone(
+                subAccount = subAccount,
+                ownerName = me.effectiveDisplayName(),
+                message = message
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Buzzed ${subAccount.subName}'s phone!")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not buzz employee phone")
+            }
+        }
+    }
+
+    fun observeSubAccountFileNotes(subAccountId: String): Flow<List<CompanySubAccountFileNote>> =
+        repository.observeSubAccountFileNotes(subAccountId)
+            .catch { err ->
+                Log.w(TAG, "Error observing sub-account file notes $subAccountId", unwrapFirestoreError(err))
+                emit(emptyList())
+            }
+
+    fun addSubAccountFileNote(
+        subAccount: CompanySubAccount,
+        category: String,
+        note: String,
+        onAdded: () -> Unit = {}
+    ) {
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.addSubAccountFileNote(
+                subAccount = subAccount,
+                authorName = me.effectiveDisplayName(),
+                category = category,
+                note = note
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Saved private file note for ${subAccount.subName}.")
+                onAdded()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not save file note")
+            }
+        }
+    }
+
+    fun deleteSubAccountFileNote(subAccountId: String, noteId: String) {
+        viewModelScope.launch {
+            repository.deleteSubAccountFileNote(subAccountId, noteId)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("File note removed.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not delete file note")
+                }
         }
     }
 
@@ -2818,6 +3381,59 @@ class MainViewModel(
                 onSuccess(claimed)
             }.onFailure { err ->
                 val msg = err.message ?: "Could not link company sub-account"
+                _snackbarEvents.tryEmit(msg)
+                onError(msg)
+            }
+        }
+    }
+
+    fun saveCompanyCodeAndPin(
+        companyName: String,
+        companyCodeInput: String,
+        pinInput: String,
+        ownerEmail: String = initialEmail,
+        onSaved: (CompanyCode) -> Unit = {}
+    ) {
+        val me = effectiveMyProfile()
+        val caps = staffCapabilities.value
+        viewModelScope.launch {
+            repository.saveCompanyCodeAndPin(
+                ownerProfile = me,
+                ownerTier = caps.tier,
+                ownerEmail = ownerEmail.ifBlank { initialEmail },
+                companyName = companyName,
+                companyCodeInput = companyCodeInput,
+                pinInput = pinInput
+            ).onSuccess { saved ->
+                _snackbarEvents.tryEmit("Company Code ${saved.companyCode} & PIN saved!")
+                onSaved(saved)
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not save Company Code & PIN")
+            }
+        }
+    }
+
+    fun joinCompanyWithCodeAndPin(
+        companyCodeInput: String,
+        pinInput: String,
+        firstName: String,
+        lastName: String,
+        myEmail: String = initialEmail,
+        onSuccess: (CompanySubAccount) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            repository.joinCompanyWithCodeAndPin(
+                companyCodeInput = companyCodeInput,
+                pinInput = pinInput,
+                firstNameInput = firstName,
+                lastNameInput = lastName,
+                myEmail = myEmail
+            ).onSuccess { joined ->
+                _snackbarEvents.tryEmit("Joined ${joined.companyName} as ${joined.subName}!")
+                onSuccess(joined)
+            }.onFailure { err ->
+                val msg = err.message ?: "Could not join company with Code & PIN"
                 _snackbarEvents.tryEmit(msg)
                 onError(msg)
             }

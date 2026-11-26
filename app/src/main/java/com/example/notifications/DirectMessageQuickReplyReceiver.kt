@@ -54,7 +54,7 @@ class DirectMessageQuickReplyReceiver : BroadcastReceiver() {
                 val threadRef = db.collection("directThreads").document(threadId)
                 val threadSnap = threadRef.get().await()
                 val thread = threadSnap.toObject(DirectThread::class.java)
-                if (thread == null || !thread.participantIds.contains(uid) || thread.isUserKicked(uid) || thread.hasAnyBlock()) {
+                if (thread == null || thread.voxOfficial || !thread.participantIds.contains(uid) || thread.isUserKicked(uid) || thread.hasAnyBlock()) {
                     DirectMessageNotificationHelper.cancelThreadNotification(appContext, threadId)
                     pendingResult.finish()
                     return@launch

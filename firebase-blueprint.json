@@ -351,14 +351,18 @@
       "description": "Private 1-on-1 or multi-user group message thread supporting live calls, camera snaps, and paid-DM kick enforcement.",
       "type": "object",
       "properties": {
-        "participantIds": { "type": "array", "description": "2 to 50 participant UIDs (Free max 7, Pro max 15, VIP Pro max 25, Elite Pro max 50)." },
+        "participantIds": { "type": "array", "description": "2 to 50 participant UIDs (Free max 5, Pro max 15, VIP Pro max 25, Elite Pro/Business max 50)." },
         "isGroup": { "type": "boolean", "description": "True when 3+ users or created as a group chat." },
         "groupName": { "type": "string", "description": "Optional display name for a group private chat." },
         "groupAdminId": { "type": "string", "description": "UID of the Group DM creator/administrator who can mute, bounce, ban, appoint Group Support Staff, assign PTT speakers (>15 users), and talk over anyone." },
         "groupAdminTalking": { "type": "boolean", "description": "True while the Group DM Administrator holds priority talk-over mic access." },
         "groupSupportIds": { "type": "array", "description": "UIDs appointed by the Group DM Administrator as Group DM Support Staff (can mute and 24h bounce regular members)." },
-        "companyOwnerId": { "type": "string", "description": "UID of the VIP Pro company owner when this Group DM is a Company Workspace thread." },
+        "companyOwnerId": { "type": "string", "description": "UID of the VIP Pro / Business company owner when this Group DM is a Company Workspace thread." },
         "groupSupervisorIds": { "type": "array", "description": "UIDs appointed by the Company Owner as Group DM Supervisors (admins who can moderate and send work orders/notes)." },
+        "staffHelpRequested": { "type": "boolean", "description": "True while the Business Account owner has explicitly requested VOX Support Staff or App Admin to enter this Group DM to help." },
+        "staffHelpRequestedAtMillis": { "type": "integer", "description": "Epoch ms when Business Staff Help was requested." },
+        "staffHelpReason": { "type": "string", "description": "Optional note from the Business Owner describing what help is needed." },
+        "staffHelpJoinedIds": { "type": "array", "description": "UIDs of VOX Support Staff or Admins currently assisting in this Business Group DM." },
         "pttAllowedUserIds": { "type": "array", "description": "UIDs authorized by the Group DM Administrator to use Push-to-Talk when the group has more than 15 members." },
         "participantNamesById": { "type": "object", "description": "Map of UID to display name for group chat participants." },
         "kickedUserIds": { "type": "array", "description": "UIDs kicked from sending messages in this thread." },
@@ -939,6 +943,18 @@
         "supervisorUids": { "type": "array" },
         "doNotDisturb": { "type": "boolean" },
         "active": { "type": "boolean" },
+        "banned": { "type": "boolean" },
+        "suspendedUntilMillis": { "type": "integer" },
+        "moderationReason": { "type": "string" },
+        "lastBuzzAtMillis": { "type": "integer" },
+        "lastBuzzMessage": { "type": "string" },
+        "lastBuzzByName": { "type": "string" },
+        "companyCode": { "type": "string" },
+        "joinPin": { "type": "string", "description": "Unique per-sub-account PIN required with Company Code to sign in." },
+        "pttEnabled": { "type": "boolean", "description": "Whether the company owner allows this sub-account to use Push-to-Talk." },
+        "messagingEnabled": { "type": "boolean", "description": "Whether the company owner allows this sub-account to send messages." },
+        "micEnabled": { "type": "boolean", "description": "Whether the company owner allows this sub-account to use microphone." },
+        "videoEnabled": { "type": "boolean", "description": "Whether the company owner allows this sub-account to use video/camera." },
         "claimedAtMillis": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -948,6 +964,43 @@
         "roleTitle", "accessCode", "claimedUserId", "claimedEmail", "supervisor",
         "supervisorUids", "doNotDisturb", "active", "claimedAtMillis", "createdAt", "updatedAt"
       ]
+    },
+    "CompanyCode": {
+      "title": "CompanyCode",
+      "description": "Business / VIP Pro company code and PIN allowing employees to sign in as sub-accounts with their first and last name.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string" },
+        "ownerName": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "companyName": { "type": "string" },
+        "companyThreadId": { "type": "string" },
+        "companyCode": { "type": "string" },
+        "pin": { "type": "string" },
+        "maxSubAccounts": { "type": "integer" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerId", "ownerName", "ownerEmail", "companyName", "companyThreadId",
+        "companyCode", "pin", "maxSubAccounts", "active", "createdAt", "updatedAt"
+      ]
+    },
+    "CompanySubAccountFileNote": {
+      "title": "CompanySubAccountFileNote",
+      "description": "Private file note recorded by the Company Owner on an employee sub-account record.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string" },
+        "subAccountId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "category": { "type": "string" },
+        "note": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "subAccountId", "authorId", "authorName", "category", "note", "createdAt"]
     },
     "WorkOrder": {
       "title": "WorkOrder",
@@ -1169,7 +1222,15 @@
     },
     "/companySubAccounts/{subId}": {
       "schema": { "$ref": "#/entities/CompanySubAccount" },
-      "description": "Company employee sub-name slots created by VIP Pro/Elite Pro owners and claimed by employees."
+      "description": "Company employee sub-name slots created by VIP Pro/Elite Pro/Business owners and claimed by employees."
+    },
+    "/companySubAccounts/{subId}/fileNotes/{noteId}": {
+      "schema": { "$ref": "#/entities/CompanySubAccountFileNote" },
+      "description": "Private owner-only file notes on an employee sub-account."
+    },
+    "/companyCodes/{codeId}": {
+      "schema": { "$ref": "#/entities/CompanyCode" },
+      "description": "Business / VIP Pro company code and PIN credentials for employee sub-account login."
     },
     "/workOrders/{orderId}": {
       "schema": { "$ref": "#/entities/WorkOrder" },

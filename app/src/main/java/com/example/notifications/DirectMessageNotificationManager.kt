@@ -29,8 +29,28 @@ import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+import com.example.media.LivePttSessionManager
+import com.example.media.PttChirpSoundEngine
+
+/**
+ * Snapshot of the most recent incoming Private Message shown on the lock screen when enabled.
+ */
+data class LockScreenRecentDm(
+    val threadId: String,
+    val senderId: String,
+    val senderName: String,
+    val threadTitle: String,
+    val messageText: String,
+    val timestampMillis: Long,
+    val isGroup: Boolean = false,
+    val voxOfficial: Boolean = false
+)
 
 /**
  * Tracks whether the app UI is currently visible and which private chat thread (if any)
@@ -56,9 +76,27 @@ object DirectMessageNotificationPrefs {
     private const val KEY_READ_RECEIPTS_ENABLED = "dm_read_receipts_enabled"
     private const val KEY_VOLUME_DOWN_PTT_ENABLED = "ptt_volume_down_enabled"
     private const val KEY_LOCK_SCREEN_PTT_ENABLED = "ptt_lock_screen_enabled"
+    private const val KEY_LOCK_SCREEN_RECENT_DM_ENABLED = "ptt_lock_screen_recent_dm_enabled"
+    private const val KEY_RECENT_DM_THREAD_ID = "lock_recent_dm_thread_id"
+    private const val KEY_RECENT_DM_SENDER_ID = "lock_recent_dm_sender_id"
+    private const val KEY_RECENT_DM_SENDER_NAME = "lock_recent_dm_sender_name"
+    private const val KEY_RECENT_DM_THREAD_TITLE = "lock_recent_dm_thread_title"
+    private const val KEY_RECENT_DM_TEXT = "lock_recent_dm_text"
+    private const val KEY_RECENT_DM_TIME = "lock_recent_dm_time"
+    private const val KEY_RECENT_DM_IS_GROUP = "lock_recent_dm_is_group"
+    private const val KEY_RECENT_DM_VOX_OFFICIAL = "lock_recent_dm_vox_official"
+    private const val KEY_PTT_LOUDSPEAKER_ENABLED = "ptt_loudspeaker_enabled"
+    private const val KEY_PTT_SILENT_MODE_ENABLED = "ptt_silent_mode_enabled"
+    private const val KEY_PTT_BEEP_SILENCED = "ptt_beep_silenced"
+    private const val KEY_FLOATING_PTT_ENABLED = "ptt_floating_overlay_enabled"
+    private const val KEY_PTT_VOICE_TO_TEXT_ENABLED = "ptt_voice_to_text_enabled"
+    private const val KEY_LOCK_SCREEN_DND_ENABLED = "ptt_lock_screen_dnd_enabled"
     private const val KEY_SEEDED_PREFIX = "dm_seeded_"
     private const val KEY_LAST_NOTIFIED_PREFIX = "dm_last_"
     private const val KEY_LAST_FRIEND_ALERT_PREFIX = "dm_last_alert_"
+    private const val KEY_LAST_GROUP_ALERT_PREFIX = "dm_last_group_alert_"
+    private const val KEY_LAST_PRIORITY_CHIRP_PREFIX = "dm_last_priority_chirp_"
+    private const val KEY_LAST_PTT_BEEP_PREFIX = "dm_last_ptt_beep_"
     private const val KEY_LAST_SENT_ALERT_PREFIX = "dm_last_sent_alert_"
     private const val KEY_DISMISSED_BROADCASTS_PREFIX = "dismissed_app_broadcasts_"
     private const val KEY_DISMISSED_NON_URGENT_ALERTS_PREFIX = "dismissed_non_urgent_alerts_"
@@ -110,11 +148,124 @@ object DirectMessageNotificationPrefs {
         prefs(context).edit().putBoolean(KEY_LOCK_SCREEN_PTT_ENABLED, enabled).apply()
     }
 
+    fun isLockScreenRecentDmEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_LOCK_SCREEN_RECENT_DM_ENABLED, true)
+
+    fun setLockScreenRecentDmEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_LOCK_SCREEN_RECENT_DM_ENABLED, enabled).apply()
+    }
+
+    fun isPttLoudspeakerEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PTT_LOUDSPEAKER_ENABLED, true)
+
+    fun setPttLoudspeakerEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PTT_LOUDSPEAKER_ENABLED, enabled).apply()
+    }
+
+    fun isPttSilentModeEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PTT_SILENT_MODE_ENABLED, false)
+
+    fun setPttSilentModeEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PTT_SILENT_MODE_ENABLED, enabled).apply()
+    }
+
+    fun isPttBeepSilenced(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PTT_BEEP_SILENCED, false)
+
+    fun setPttBeepSilenced(context: Context, silenced: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PTT_BEEP_SILENCED, silenced).apply()
+    }
+
+    fun isFloatingPttEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_FLOATING_PTT_ENABLED, true)
+
+    fun setFloatingPttEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_FLOATING_PTT_ENABLED, enabled).apply()
+    }
+
+    fun isPttVoiceToTextEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PTT_VOICE_TO_TEXT_ENABLED, false)
+
+    fun setPttVoiceToTextEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PTT_VOICE_TO_TEXT_ENABLED, enabled).apply()
+    }
+
+    fun isLockScreenDndEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_LOCK_SCREEN_DND_ENABLED, false)
+
+    fun setLockScreenDndEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_LOCK_SCREEN_DND_ENABLED, enabled).apply()
+    }
+
+    fun saveLastRecentDm(context: Context, dm: LockScreenRecentDm) {
+        prefs(context).edit()
+            .putString(KEY_RECENT_DM_THREAD_ID, dm.threadId)
+            .putString(KEY_RECENT_DM_SENDER_ID, dm.senderId)
+            .putString(KEY_RECENT_DM_SENDER_NAME, dm.senderName)
+            .putString(KEY_RECENT_DM_THREAD_TITLE, dm.threadTitle)
+            .putString(KEY_RECENT_DM_TEXT, dm.messageText)
+            .putLong(KEY_RECENT_DM_TIME, dm.timestampMillis)
+            .putBoolean(KEY_RECENT_DM_IS_GROUP, dm.isGroup)
+            .putBoolean(KEY_RECENT_DM_VOX_OFFICIAL, dm.voxOfficial)
+            .apply()
+    }
+
+    fun loadLastRecentDm(context: Context): LockScreenRecentDm? {
+        val p = prefs(context)
+        val threadId = p.getString(KEY_RECENT_DM_THREAD_ID, "").orEmpty()
+        val messageText = p.getString(KEY_RECENT_DM_TEXT, "").orEmpty()
+        if (threadId.isBlank() || messageText.isBlank()) return null
+        return LockScreenRecentDm(
+            threadId = threadId,
+            senderId = p.getString(KEY_RECENT_DM_SENDER_ID, "").orEmpty(),
+            senderName = p.getString(KEY_RECENT_DM_SENDER_NAME, "Private Message").orEmpty(),
+            threadTitle = p.getString(KEY_RECENT_DM_THREAD_TITLE, "").orEmpty(),
+            messageText = messageText,
+            timestampMillis = p.getLong(KEY_RECENT_DM_TIME, 0L),
+            isGroup = p.getBoolean(KEY_RECENT_DM_IS_GROUP, false),
+            voxOfficial = p.getBoolean(KEY_RECENT_DM_VOX_OFFICIAL, false)
+        )
+    }
+
+    fun clearLastRecentDm(context: Context) {
+        prefs(context).edit()
+            .remove(KEY_RECENT_DM_THREAD_ID)
+            .remove(KEY_RECENT_DM_SENDER_ID)
+            .remove(KEY_RECENT_DM_SENDER_NAME)
+            .remove(KEY_RECENT_DM_THREAD_TITLE)
+            .remove(KEY_RECENT_DM_TEXT)
+            .remove(KEY_RECENT_DM_TIME)
+            .remove(KEY_RECENT_DM_IS_GROUP)
+            .remove(KEY_RECENT_DM_VOX_OFFICIAL)
+            .apply()
+    }
+
     fun getLastFriendAlertMillis(context: Context, uid: String, threadId: String): Long =
         prefs(context).getLong("${KEY_LAST_FRIEND_ALERT_PREFIX}${uid}_$threadId", 0L)
 
     fun setLastFriendAlertMillis(context: Context, uid: String, threadId: String, alertMillis: Long) {
         prefs(context).edit().putLong("${KEY_LAST_FRIEND_ALERT_PREFIX}${uid}_$threadId", alertMillis).apply()
+    }
+
+    fun getLastGroupAlertMillis(context: Context, uid: String, threadId: String): Long =
+        prefs(context).getLong("${KEY_LAST_GROUP_ALERT_PREFIX}${uid}_$threadId", 0L)
+
+    fun setLastGroupAlertMillis(context: Context, uid: String, threadId: String, alertMillis: Long) {
+        prefs(context).edit().putLong("${KEY_LAST_GROUP_ALERT_PREFIX}${uid}_$threadId", alertMillis).apply()
+    }
+
+    fun getLastPriorityChirpMillis(context: Context, uid: String, threadId: String): Long =
+        prefs(context).getLong("${KEY_LAST_PRIORITY_CHIRP_PREFIX}${uid}_$threadId", 0L)
+
+    fun setLastPriorityChirpMillis(context: Context, uid: String, threadId: String, chirpMillis: Long) {
+        prefs(context).edit().putLong("${KEY_LAST_PRIORITY_CHIRP_PREFIX}${uid}_$threadId", chirpMillis).apply()
+    }
+
+    fun getLastPttBeepMillis(context: Context, uid: String, threadId: String): Long =
+        prefs(context).getLong("${KEY_LAST_PTT_BEEP_PREFIX}${uid}_$threadId", 0L)
+
+    fun setLastPttBeepMillis(context: Context, uid: String, threadId: String, beepMillis: Long) {
+        prefs(context).edit().putLong("${KEY_LAST_PTT_BEEP_PREFIX}${uid}_$threadId", beepMillis).apply()
     }
 
     fun getLastAlertSentAtMillis(context: Context, uid: String): Long =
@@ -190,6 +341,7 @@ object DirectMessageNotificationHelper {
     const val CHANNEL_ID = "voxstage_private_messages"
     const val CHANNEL_ID_STANDARD = "voxstage_private_messages_standard"
     const val CHANNEL_ID_FRIEND_ALERT = "voxstage_friend_attention_alerts"
+    const val CHANNEL_ID_GROUP_URGENT_ALERT = "voxstage_group_urgent_alerts"
     const val EXTRA_DM_THREAD_ID = "extra_dm_thread_id"
     const val EXTRA_QUICK_REPLY_THREAD_ID = "extra_quick_reply_thread_id"
     const val EXTRA_QUICK_REPLY_SENDER_NAME = "extra_quick_reply_sender_name"
@@ -197,8 +349,10 @@ object DirectMessageNotificationHelper {
     private const val GROUP_KEY_DM = "com.aistudio.voxstage.PRIVATE_MESSAGES"
     private const val NOTIFICATION_ID_BASE = 41_000
     private const val FRIEND_ALERT_NOTIFICATION_ID_BASE = 46_000
+    private const val GROUP_ALERT_NOTIFICATION_ID_BASE = 48_000
     private const val QUICK_REPLY_REQ_BASE = 51_000
     private const val ALERT_FRESHNESS_WINDOW_MS = 3 * 60 * 1000L
+    private const val GROUP_ALERT_FRESHNESS_WINDOW_MS = 20 * 60 * 1000L
 
     private val ALERT_VIBRATION_PATTERN = longArrayOf(0L, 420L, 180L, 420L, 180L, 620L)
 
@@ -207,6 +361,60 @@ object DirectMessageNotificationHelper {
 
     private val _friendAlertEvents = MutableSharedFlow<DirectThread>(extraBufferCapacity = 8)
     val friendAlertEvents: SharedFlow<DirectThread> = _friendAlertEvents.asSharedFlow()
+
+    private val _groupUrgentAlertEvents = MutableSharedFlow<DirectThread>(extraBufferCapacity = 8)
+    val groupUrgentAlertEvents: SharedFlow<DirectThread> = _groupUrgentAlertEvents.asSharedFlow()
+
+    private val _recentDmForLockScreen = MutableStateFlow<LockScreenRecentDm?>(null)
+    val recentDmForLockScreen: StateFlow<LockScreenRecentDm?> = _recentDmForLockScreen.asStateFlow()
+
+    fun ensureRecentDmLoaded(context: Context) {
+        if (_recentDmForLockScreen.value == null) {
+            _recentDmForLockScreen.value = DirectMessageNotificationPrefs.loadLastRecentDm(context)
+        }
+    }
+
+    fun updateRecentDmFromThread(
+        context: Context,
+        thread: DirectThread,
+        currentUserId: String
+    ) {
+        if (thread.id.isBlank()) return
+        if (thread.lastMessageSenderId.isBlank() || thread.lastMessageSenderId == currentUserId) return
+        if (thread.hasAnyBlock() || thread.isUserKicked(currentUserId)) return
+        val messageText = thread.lastMessageText.trim()
+        if (messageText.isBlank()) return
+
+        val ts = thread.updatedAt?.toDate()?.time ?: System.currentTimeMillis()
+        val current = _recentDmForLockScreen.value ?: DirectMessageNotificationPrefs.loadLastRecentDm(context)
+        if (current != null && ts < current.timestampMillis && current.threadId != thread.id) {
+            return
+        }
+
+        val senderName = when {
+            thread.voxOfficial -> "VOX"
+            thread.isGroup -> thread.participantNamesById[thread.lastMessageSenderId].orEmpty()
+                .ifBlank { thread.displayTitle(currentUserId) }
+            else -> thread.otherName(currentUserId).ifBlank { "Private Message" }
+        }
+        val dm = LockScreenRecentDm(
+            threadId = thread.id,
+            senderId = thread.lastMessageSenderId,
+            senderName = senderName,
+            threadTitle = if (thread.voxOfficial) "VOX" else if (thread.isGroup) thread.displayTitle(currentUserId) else senderName,
+            messageText = messageText.take(300),
+            timestampMillis = ts,
+            isGroup = thread.isGroup,
+            voxOfficial = thread.voxOfficial
+        )
+        _recentDmForLockScreen.value = dm
+        DirectMessageNotificationPrefs.saveLastRecentDm(context, dm)
+    }
+
+    fun clearRecentDm(context: Context) {
+        _recentDmForLockScreen.value = null
+        DirectMessageNotificationPrefs.clearLastRecentDm(context)
+    }
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -255,6 +463,27 @@ object DirectMessageNotificationHelper {
                 }
                 manager.createNotificationChannel(alertChannel)
             }
+            if (manager.getNotificationChannel(CHANNEL_ID_GROUP_URGENT_ALERT) == null) {
+                val urgentUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                val urgentAttrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+                val groupAlertChannel = NotificationChannel(
+                    CHANNEL_ID_GROUP_URGENT_ALERT,
+                    context.getString(R.string.notif_channel_group_urgent_alert_name),
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = context.getString(R.string.notif_channel_group_urgent_alert_desc)
+                    enableVibration(true)
+                    vibrationPattern = ALERT_VIBRATION_PATTERN
+                    setSound(urgentUri, urgentAttrs)
+                    setShowBadge(true)
+                }
+                manager.createNotificationChannel(groupAlertChannel)
+            }
         }
     }
 
@@ -275,11 +504,15 @@ object DirectMessageNotificationHelper {
     fun alertNotificationIdForThread(threadId: String): Int =
         FRIEND_ALERT_NOTIFICATION_ID_BASE + (threadId.hashCode() and 0x0FFF)
 
+    fun groupAlertNotificationIdForThread(threadId: String): Int =
+        GROUP_ALERT_NOTIFICATION_ID_BASE + (threadId.hashCode() and 0x0FFF)
+
     fun cancelThreadNotification(context: Context, threadId: String) {
         if (threadId.isBlank()) return
         try {
             NotificationManagerCompat.from(context).cancel(notificationIdForThread(threadId))
             NotificationManagerCompat.from(context).cancel(alertNotificationIdForThread(threadId))
+            NotificationManagerCompat.from(context).cancel(groupAlertNotificationIdForThread(threadId))
         } catch (_: SecurityException) {
             // Ignored if permission was revoked
         }
@@ -380,6 +613,260 @@ object DirectMessageNotificationHelper {
         }
     }
 
+    /**
+     * Triggers an urgent high-priority phone notification (with sound + vibration + heads-up card)
+     * and foreground Urgent Alert dialog whenever a Group DM Admin sends an Urgent Group Alert.
+     */
+    fun notifyGroupUrgentAlertIfNew(
+        context: Context,
+        thread: DirectThread,
+        currentUserId: String
+    ) {
+        if (thread.id.isBlank() || !thread.isGroup) return
+        if (thread.lastGroupAlertAtMillis <= 0L) return
+        if (thread.lastGroupAlertSenderId.isBlank() || thread.lastGroupAlertSenderId == currentUserId) return
+        if (thread.isBannedInGroup(currentUserId) || thread.isBouncedInGroup(currentUserId) || thread.isUserKicked(currentUserId)) return
+
+        val lastSeenAlert = DirectMessageNotificationPrefs.getLastGroupAlertMillis(
+            context = context,
+            uid = currentUserId,
+            threadId = thread.id
+        )
+        if (thread.lastGroupAlertAtMillis <= lastSeenAlert) return
+
+        // Record immediately so we never fire twice for the same urgent group alert
+        DirectMessageNotificationPrefs.setLastGroupAlertMillis(
+            context = context,
+            uid = currentUserId,
+            threadId = thread.id,
+            alertMillis = thread.lastGroupAlertAtMillis
+        )
+        // Also mark the matching lastMessageText key so standard DM popup doesn't double-notify
+        if (thread.lastMessageSenderId == thread.lastGroupAlertSenderId) {
+            DirectMessageNotificationPrefs.setLastNotifiedKey(
+                context = context,
+                uid = currentUserId,
+                threadId = thread.id,
+                key = DirectMessageNotificationPrefs.buildMessageKey(thread)
+            )
+        }
+
+        val ageMs = System.currentTimeMillis() - thread.lastGroupAlertAtMillis
+        if (ageMs > GROUP_ALERT_FRESHNESS_WINDOW_MS) return
+
+        // Always vibrate the phone with the urgent waveform
+        vibrateAttentionPattern(context)
+
+        // Emit in-app urgent alert dialog & play alert chime when app is open
+        if (VoxStageNotificationState.isAppInForeground) {
+            playShortRingSound(context)
+            _groupUrgentAlertEvents.tryEmit(thread)
+        }
+
+        if (!hasNotificationPermission(context)) return
+        ensureChannel(context)
+
+        val groupTitle = thread.displayTitle(currentUserId).ifBlank { "Group DM" }
+        val senderName = thread.lastGroupAlertSenderName.ifBlank { "Group Admin" }
+        val alertTitle = thread.lastGroupAlertTitle.ifBlank { "Urgent Group Alert" }
+        val alertBody = thread.lastGroupAlertMessage.ifBlank { "Tap to open $groupTitle immediately." }
+
+        val tapIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_DM_THREAD_ID, thread.id)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            groupAlertNotificationIdForThread(thread.id),
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val urgentSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+
+        val contentTitle = "🚨 $alertTitle · $groupTitle"
+        val fullMessage = "$senderName: $alertBody"
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_GROUP_URGENT_ALERT)
+            .setSmallIcon(R.drawable.ic_stat_message)
+            .setColor(0xFFFF3B5C.toInt())
+            .setContentTitle(contentTitle)
+            .setContentText(fullMessage)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .setBigContentTitle(contentTitle)
+                    .bigText(fullMessage)
+            )
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setSound(urgentSoundUri)
+            .setVibrate(ALERT_VIBRATION_PATTERN)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .addAction(0, context.getString(R.string.action_open_chat), pendingIntent)
+            .build()
+
+        try {
+            NotificationManagerCompat.from(context).notify(
+                groupAlertNotificationIdForThread(thread.id),
+                notification
+            )
+        } catch (sec: SecurityException) {
+            Log.w(TAG, "Missing POST_NOTIFICATIONS permission for urgent group alert", sec)
+        }
+    }
+
+    /**
+     * Plays the distinct two-tone Priority Break-In Chirp radio alert and posts a high-priority
+     * heads-up notification whenever an opted-in close friend sends a 1-2 point Priority Chirp.
+     */
+    fun notifyPriorityBreakInChirpIfNew(
+        context: Context,
+        thread: DirectThread,
+        currentUserId: String
+    ) {
+        if (thread.id.isBlank() || thread.isGroup) return
+        if (!thread.hasActivePriorityChirpFor(currentUserId)) return
+        if (thread.hasAnyBlock() || thread.isUserKicked(currentUserId)) return
+
+        val lastSeenChirp = DirectMessageNotificationPrefs.getLastPriorityChirpMillis(
+            context = context,
+            uid = currentUserId,
+            threadId = thread.id
+        )
+        if (thread.lastPriorityChirpAtMillis <= lastSeenChirp) return
+
+        DirectMessageNotificationPrefs.setLastPriorityChirpMillis(
+            context = context,
+            uid = currentUserId,
+            threadId = thread.id,
+            chirpMillis = thread.lastPriorityChirpAtMillis
+        )
+        if (thread.lastMessageSenderId == thread.lastPriorityChirpSenderId) {
+            DirectMessageNotificationPrefs.setLastNotifiedKey(
+                context = context,
+                uid = currentUserId,
+                threadId = thread.id,
+                key = DirectMessageNotificationPrefs.buildMessageKey(thread)
+            )
+        }
+
+        val ageMs = System.currentTimeMillis() - thread.lastPriorityChirpAtMillis
+        if (ageMs > ALERT_FRESHNESS_WINDOW_MS) return
+
+        val isUrgent = thread.lastPriorityChirpPoints >= 2
+        vibrateAttentionPattern(context)
+        // MainActivity handles foreground audio playback; play here when app is backgrounded/locked
+        if (!VoxStageNotificationState.isAppInForeground) {
+            com.example.media.PttChirpSoundEngine.playPriorityBreakInChirp(urgent = isUrgent)
+        }
+
+        if (!hasNotificationPermission(context)) return
+        ensureChannel(context)
+
+        val senderName = thread.lastPriorityChirpSenderName.ifBlank {
+            thread.otherName(currentUserId).ifBlank { "Close Friend" }
+        }
+        val body = thread.lastPriorityChirpMessage.ifBlank { "Tap to jump in!" }
+        val title = if (isUrgent) {
+            "🚨 Urgent Break-In Chirp · $senderName"
+        } else {
+            "📡 Priority Chirp · $senderName"
+        }
+
+        val tapIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_DM_THREAD_ID, thread.id)
+        }
+        val notifId = 8400 + (thread.id.hashCode() and 0x0FFF)
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            notifId,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_FRIEND_ALERT)
+            .setSmallIcon(R.drawable.ic_stat_message)
+            .setColor(if (isUrgent) 0xFFFF3B5C.toInt() else 0xFFFF9800.toInt())
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .setBigContentTitle(title)
+                    .bigText(body)
+            )
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVibrate(ALERT_VIBRATION_PATTERN)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .addAction(0, context.getString(R.string.action_open_chat), pendingIntent)
+            .build()
+
+        try {
+            NotificationManagerCompat.from(context).notify(notifId, notification)
+        } catch (sec: SecurityException) {
+            Log.w(TAG, "Missing POST_NOTIFICATIONS permission for priority chirp", sec)
+        }
+    }
+
+    /**
+     * Plays an incoming PTT Beep tone sent by another participant via the lock-screen Beep button.
+     * Beeps ALWAYS come through even when PTT Silent Mode is enabled, unless the user explicitly
+     * turned on the "Silence Beep" option.
+     */
+    fun notifyPttBeepIfNew(
+        context: Context,
+        thread: DirectThread,
+        currentUserId: String
+    ) {
+        if (thread.id.isBlank() || thread.voxOfficial) return
+        if (thread.lastBeepAtMillis <= 0L) return
+        if (thread.lastBeepSenderId.isBlank() || thread.lastBeepSenderId == currentUserId) return
+        if (thread.hasAnyBlock() || thread.isUserKicked(currentUserId)) return
+
+        val lastSeenBeep = DirectMessageNotificationPrefs.getLastPttBeepMillis(
+            context = context,
+            uid = currentUserId,
+            threadId = thread.id
+        )
+        if (thread.lastBeepAtMillis <= lastSeenBeep) return
+
+        DirectMessageNotificationPrefs.setLastPttBeepMillis(
+            context = context,
+            uid = currentUserId,
+            threadId = thread.id,
+            beepMillis = thread.lastBeepAtMillis
+        )
+
+        val ageMs = System.currentTimeMillis() - thread.lastBeepAtMillis
+        if (ageMs > BEEP_FRESHNESS_WINDOW_MS) return
+
+        val senderName = thread.lastBeepSenderName.ifBlank {
+            if (thread.isGroup) {
+                thread.participantNamesById[thread.lastBeepSenderId].orEmpty().ifBlank { "Member" }
+            } else {
+                thread.otherName(currentUserId).ifBlank { "Friend" }
+            }
+        }
+        val channelName = thread.displayTitle(currentUserId).ifBlank { senderName }
+        LivePttSessionManager.recordIncomingBeep(
+            threadId = thread.id,
+            senderName = senderName,
+            channelName = channelName,
+            timestampMillis = thread.lastBeepAtMillis
+        )
+
+        // Beep tone breaks through PTT Silent Mode, unless the user explicitly enabled Silence Beep
+        if (!DirectMessageNotificationPrefs.isPttBeepSilenced(context)) {
+            PttChirpSoundEngine.playPttAttentionBeep()
+            LivePttSessionManager.triggerPttHaptic(context)
+        }
+    }
+
     private fun vibrateAttentionPattern(context: Context) {
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -456,12 +943,14 @@ object DirectMessageNotificationHelper {
 
         ensureChannel(context)
 
-        val senderName = if (thread.isGroup) {
-            val who = thread.participantNamesById[thread.lastMessageSenderId].orEmpty()
-            val groupTitle = thread.displayTitle(currentUserId)
-            if (who.isNotBlank()) "$who · $groupTitle" else groupTitle
-        } else {
-            thread.otherName(currentUserId).ifBlank { "New Private Message" }
+        val senderName = when {
+            thread.voxOfficial -> "VOX • Official Update"
+            thread.isGroup -> {
+                val who = thread.participantNamesById[thread.lastMessageSenderId].orEmpty()
+                val groupTitle = thread.displayTitle(currentUserId)
+                if (who.isNotBlank()) "$who · $groupTitle" else groupTitle
+            }
+            else -> thread.otherName(currentUserId).ifBlank { "New Private Message" }
         }
         val messagePreview = thread.lastMessageText.ifBlank { "Sent you a private message" }
         val messageTimestamp = thread.updatedAt?.toDate()?.time ?: System.currentTimeMillis()
@@ -490,7 +979,7 @@ object DirectMessageNotificationHelper {
             .setContentIntent(pendingIntent)
 
         if (popupEnabled) {
-            // High-priority heads-up popup with full message details + inline Quick Reply
+            // High-priority heads-up popup with full message details (+ inline Quick Reply except for read-only VOX official DMs)
             val senderPerson = Person.Builder()
                 .setName(senderName)
                 .setKey(thread.lastMessageSenderId)
@@ -501,39 +990,41 @@ object DirectMessageNotificationHelper {
                 .setConversationTitle(if (thread.isGroup) thread.displayTitle(currentUserId) else null)
                 .addMessage(messagePreview, messageTimestamp, senderPerson)
 
-            val remoteInput = RemoteInput.Builder(KEY_QUICK_REPLY_TEXT)
-                .setLabel(context.getString(R.string.hint_quick_reply))
-                .build()
-            val replyIntent = Intent(context, DirectMessageQuickReplyReceiver::class.java).apply {
-                putExtra(EXTRA_QUICK_REPLY_THREAD_ID, thread.id)
-                putExtra(EXTRA_QUICK_REPLY_SENDER_NAME, senderName)
-            }
-            val replyFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
-            }
-            val replyPendingIntent = PendingIntent.getBroadcast(
-                context,
-                QUICK_REPLY_REQ_BASE + (thread.id.hashCode() and 0x0FFF),
-                replyIntent,
-                replyFlags
-            )
-            val quickReplyAction = NotificationCompat.Action.Builder(
-                R.drawable.ic_stat_message,
-                context.getString(R.string.action_quick_reply),
-                replyPendingIntent
-            )
-                .addRemoteInput(remoteInput)
-                .setAllowGeneratedReplies(true)
-                .build()
-
             builder
                 .setStyle(messagingStyle)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
-                .addAction(quickReplyAction)
-                .addAction(0, context.getString(R.string.action_open_chat), pendingIntent)
+
+            if (!thread.voxOfficial) {
+                val remoteInput = RemoteInput.Builder(KEY_QUICK_REPLY_TEXT)
+                    .setLabel(context.getString(R.string.hint_quick_reply))
+                    .build()
+                val replyIntent = Intent(context, DirectMessageQuickReplyReceiver::class.java).apply {
+                    putExtra(EXTRA_QUICK_REPLY_THREAD_ID, thread.id)
+                    putExtra(EXTRA_QUICK_REPLY_SENDER_NAME, senderName)
+                }
+                val replyFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                } else {
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                }
+                val replyPendingIntent = PendingIntent.getBroadcast(
+                    context,
+                    QUICK_REPLY_REQ_BASE + (thread.id.hashCode() and 0x0FFF),
+                    replyIntent,
+                    replyFlags
+                )
+                val quickReplyAction = NotificationCompat.Action.Builder(
+                    R.drawable.ic_stat_message,
+                    context.getString(R.string.action_quick_reply),
+                    replyPendingIntent
+                )
+                    .addRemoteInput(remoteInput)
+                    .setAllowGeneratedReplies(true)
+                    .build()
+                builder.addAction(quickReplyAction)
+            }
+            builder.addAction(0, context.getString(R.string.action_open_chat), pendingIntent)
         } else {
             builder
                 .setStyle(
@@ -556,6 +1047,7 @@ object DirectMessageNotificationHelper {
     }
 
     private const val TAG = "DMNotificationHelper"
+    private const val BEEP_FRESHNESS_WINDOW_MS = 45_000L
 }
 
 /**
@@ -596,6 +1088,7 @@ class DirectMessageNotificationMonitor(
 
         if (uid.isNullOrBlank()) {
             DirectMessageNotificationHelper.cancelAllNotifications(appContext)
+            DirectMessageNotificationHelper.clearRecentDm(appContext)
             DirectMessageSyncWorker.cancel(appContext)
             return
         }
@@ -621,8 +1114,22 @@ class DirectMessageNotificationMonitor(
                     if (!initialSnapshotProcessed) {
                         initialSnapshotProcessed = true
                         val nowMs = System.currentTimeMillis()
+                        var newestIncomingThread: DirectThread? = null
+                        var newestIncomingMs = 0L
                         snapshot.documents.forEach { doc ->
                             val thread = doc.toObject(DirectThread::class.java) ?: return@forEach
+                            if (thread.lastMessageSenderId.isNotBlank() &&
+                                thread.lastMessageSenderId != uid &&
+                                thread.lastMessageText.isNotBlank() &&
+                                !thread.hasAnyBlock() &&
+                                !thread.isUserKicked(uid)
+                            ) {
+                                val updatedMs = thread.updatedAt?.toDate()?.time ?: 0L
+                                if (newestIncomingThread == null || updatedMs >= newestIncomingMs) {
+                                    newestIncomingThread = thread
+                                    newestIncomingMs = updatedMs
+                                }
+                            }
                             // Seed historical friend alert timestamps unless brand new (< 45s old)
                             if (thread.lastAlertAtMillis > 0L && thread.lastAlertSenderId != uid) {
                                 val isFreshAlert = (nowMs - thread.lastAlertAtMillis) <= RECENT_ARRIVAL_WINDOW_MS
@@ -640,6 +1147,75 @@ class DirectMessageNotificationMonitor(
                                         alertMillis = thread.lastAlertAtMillis
                                     )
                                 }
+                            }
+                            // Seed historical Group DM urgent alert timestamps unless brand new (< 45s old)
+                            if (thread.isGroup && thread.lastGroupAlertAtMillis > 0L && thread.lastGroupAlertSenderId != uid) {
+                                val isFreshGroupAlert = (nowMs - thread.lastGroupAlertAtMillis) <= RECENT_ARRIVAL_WINDOW_MS
+                                if (wasBaselineSeeded && isFreshGroupAlert) {
+                                    DirectMessageNotificationHelper.notifyGroupUrgentAlertIfNew(
+                                        context = appContext,
+                                        thread = thread,
+                                        currentUserId = uid
+                                    )
+                                } else {
+                                    DirectMessageNotificationPrefs.setLastGroupAlertMillis(
+                                        context = appContext,
+                                        uid = uid,
+                                        threadId = thread.id,
+                                        alertMillis = thread.lastGroupAlertAtMillis
+                                    )
+                                }
+                            }
+                            // Seed historical Priority Break-In Chirp timestamps unless brand new (< 45s old)
+                            if (!thread.isGroup && thread.hasActivePriorityChirpFor(uid)) {
+                                val isFreshChirp = (nowMs - thread.lastPriorityChirpAtMillis) <= RECENT_ARRIVAL_WINDOW_MS
+                                if (wasBaselineSeeded && isFreshChirp) {
+                                    DirectMessageNotificationHelper.notifyPriorityBreakInChirpIfNew(
+                                        context = appContext,
+                                        thread = thread,
+                                        currentUserId = uid
+                                    )
+                                } else {
+                                    DirectMessageNotificationPrefs.setLastPriorityChirpMillis(
+                                        context = appContext,
+                                        uid = uid,
+                                        threadId = thread.id,
+                                        chirpMillis = thread.lastPriorityChirpAtMillis
+                                    )
+                                }
+                            }
+                            // Seed historical PTT beep timestamps unless brand new (< 45s old)
+                            if (thread.lastBeepAtMillis > 0L && thread.lastBeepSenderId != uid) {
+                                val isFreshBeep = (nowMs - thread.lastBeepAtMillis) <= RECENT_ARRIVAL_WINDOW_MS
+                                if (wasBaselineSeeded && isFreshBeep) {
+                                    DirectMessageNotificationHelper.notifyPttBeepIfNew(
+                                        context = appContext,
+                                        thread = thread,
+                                        currentUserId = uid
+                                    )
+                                } else {
+                                    DirectMessageNotificationPrefs.setLastPttBeepMillis(
+                                        context = appContext,
+                                        uid = uid,
+                                        threadId = thread.id,
+                                        beepMillis = thread.lastBeepAtMillis
+                                    )
+                                }
+                            }
+                            // Keep LivePttSessionManager synced with Group DM Admin priority talk-over state
+                            // so Floating PTT / Lock-Screen PTT / Hardware PTT also yield immediately.
+                            if (thread.id == LivePttSessionManager.activeThreadId.value) {
+                                LivePttSessionManager.setThreadGroupAdminState(
+                                    threadId = thread.id,
+                                    isGroupAdmin = thread.isGroupAdmin(uid),
+                                    blockedByAdmin = thread.isBlockedByGroupAdminTalking(uid),
+                                    context = appContext
+                                )
+                                LivePttSessionManager.syncActiveThreadPttFlags(
+                                    context = appContext,
+                                    thread = thread,
+                                    currentUserId = uid
+                                )
                             }
                             if (thread.lastMessageSenderId.isBlank() ||
                                 thread.lastMessageSenderId == uid ||
@@ -666,6 +1242,13 @@ class DirectMessageNotificationMonitor(
                                 )
                             }
                         }
+                        newestIncomingThread?.let { latest ->
+                            DirectMessageNotificationHelper.updateRecentDmFromThread(
+                                context = appContext,
+                                thread = latest,
+                                currentUserId = uid
+                            )
+                        }
                         if (!wasBaselineSeeded) {
                             DirectMessageNotificationPrefs.markBaselineSeeded(appContext, uid)
                         }
@@ -677,7 +1260,40 @@ class DirectMessageNotificationMonitor(
                             change.type == DocumentChange.Type.MODIFIED
                         ) {
                             val thread = change.document.toObject(DirectThread::class.java)
+                            if (thread.id == LivePttSessionManager.activeThreadId.value) {
+                                LivePttSessionManager.setThreadGroupAdminState(
+                                    threadId = thread.id,
+                                    isGroupAdmin = thread.isGroupAdmin(uid),
+                                    blockedByAdmin = thread.isBlockedByGroupAdminTalking(uid),
+                                    context = appContext
+                                )
+                                LivePttSessionManager.syncActiveThreadPttFlags(
+                                    context = appContext,
+                                    thread = thread,
+                                    currentUserId = uid
+                                )
+                            }
+                            DirectMessageNotificationHelper.updateRecentDmFromThread(
+                                context = appContext,
+                                thread = thread,
+                                currentUserId = uid
+                            )
                             DirectMessageNotificationHelper.notifyFriendAttentionAlertIfNew(
+                                context = appContext,
+                                thread = thread,
+                                currentUserId = uid
+                            )
+                            DirectMessageNotificationHelper.notifyGroupUrgentAlertIfNew(
+                                context = appContext,
+                                thread = thread,
+                                currentUserId = uid
+                            )
+                            DirectMessageNotificationHelper.notifyPriorityBreakInChirpIfNew(
+                                context = appContext,
+                                thread = thread,
+                                currentUserId = uid
+                            )
+                            DirectMessageNotificationHelper.notifyPttBeepIfNew(
                                 context = appContext,
                                 thread = thread,
                                 currentUserId = uid

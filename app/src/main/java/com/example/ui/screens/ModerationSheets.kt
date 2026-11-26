@@ -1,9 +1,11 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -31,6 +34,7 @@ import androidx.compose.material.icons.rounded.Gavel
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.ManageAccounts
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PersonRemove
@@ -67,10 +71,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.ChatMessage
 import com.example.data.ChatRoom
@@ -747,7 +755,8 @@ fun ParticipantsSheetContent(
     currentUserId: String,
     staffCapabilities: StaffCapabilities,
     onSelectParticipant: (RoomParticipant) -> Unit,
-    onApproveSpeaker: (RoomParticipant) -> Unit
+    onApproveSpeaker: (RoomParticipant) -> Unit,
+    onClose: (() -> Unit)? = null
 ) {
     val isMod = room.hasModPrivileges(currentUserId, staffCapabilities.tier)
     val visibleParticipants = participants.filter { !it.invisible }
@@ -769,14 +778,90 @@ fun ParticipantsSheetContent(
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp)
-            .padding(bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 16.dp)
+            .padding(top = 14.dp, bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text(
-            text = "Room Roster (${visibleParticipants.size})",
-            style = MaterialTheme.typography.headlineSmall
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Room Users (${visibleParticipants.size})",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = null,
+                            tint = VoiceCyan,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = "On Mic",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.WavingHand,
+                            contentDescription = null,
+                            tint = ModAmber,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = "Hand",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(LiveCoral)
+                        )
+                        Text(
+                            text = "Muted",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+            if (onClose != null) {
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.testTag("room_user_list_close_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Close user list"
+                    )
+                }
+            }
+        }
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
         if (invisibleVisibleToViewer.isNotEmpty()) {
             val invisibleHeader = if (staffCapabilities.isAdmin) {
@@ -793,6 +878,7 @@ fun ParticipantsSheetContent(
                 ParticipantRosterRow(
                     participant = p,
                     isSelf = p.userId == currentUserId,
+                    isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                     showApprove = false,
                     onApprove = {},
                     onClick = { onSelectParticipant(p) }
@@ -810,6 +896,7 @@ fun ParticipantsSheetContent(
                 ParticipantRosterRow(
                     participant = p,
                     isSelf = p.userId == currentUserId,
+                    isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                     showApprove = isMod,
                     onApprove = { onApproveSpeaker(p) },
                     onClick = { onSelectParticipant(p) }
@@ -826,6 +913,7 @@ fun ParticipantsSheetContent(
             ParticipantRosterRow(
                 participant = p,
                 isSelf = p.userId == currentUserId,
+                isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                 showApprove = false,
                 onApprove = {},
                 onClick = { onSelectParticipant(p) }
@@ -842,6 +930,7 @@ fun ParticipantsSheetContent(
                 ParticipantRosterRow(
                     participant = p,
                     isSelf = p.userId == currentUserId,
+                    isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                     showApprove = false,
                     onApprove = {},
                     onClick = { onSelectParticipant(p) }
@@ -855,6 +944,7 @@ fun ParticipantsSheetContent(
 private fun ParticipantRosterRow(
     participant: RoomParticipant,
     isSelf: Boolean,
+    isMuted: Boolean,
     showApprove: Boolean,
     onApprove: () -> Unit,
     onClick: () -> Unit
@@ -876,21 +966,58 @@ private fun ParticipantRosterRow(
                 colorHex = participant.avatarColorHex,
                 speakingLevel = participant.speakingLevel.toFloat(),
                 micActive = participant.micActive,
-                size = 42.dp
+                size = 40.dp
             )
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     val isLeader = participant.roleEnum() == ParticipantRole.HOST ||
                         participant.roleEnum() == ParticipantRole.MODERATOR
                     Text(
                         text = if (isSelf) "${participant.displayName} (You)" else participant.displayName,
                         style = MaterialTheme.typography.titleSmall,
-                        color = usernameColor(tier, isRoomLeader = isLeader, userId = participant.userId)
+                        fontWeight = FontWeight.SemiBold,
+                        color = usernameColor(tier, isRoomLeader = isLeader, userId = participant.userId),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
+                    // Little mic icon directly next to name when user is on the microphone
+                    if (participant.micActive) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = "On microphone",
+                            tint = VoiceCyan,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .testTag("roster_mic_icon_${participant.userId}")
+                        )
+                    }
+                    // Little raised hand icon directly next to name when user raises their hand
+                    if (participant.handRaised) {
+                        Icon(
+                            imageVector = Icons.Rounded.WavingHand,
+                            contentDescription = "Hand raised",
+                            tint = ModAmber,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .testTag("roster_hand_icon_${participant.userId}")
+                        )
+                    }
+                    // Red dot directly next to name when user is muted
+                    if (isMuted) {
+                        Box(
+                            modifier = Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(LiveCoral)
+                                .semantics { contentDescription = "Muted" }
+                                .testTag("roster_muted_dot_${participant.userId}")
+                        )
+                    }
                     StaffTierBadge(tier = tier)
                     if (!participant.invisible) {
                         RolePillBadge(role = participant.roleEnum())
@@ -906,27 +1033,31 @@ private fun ParticipantRosterRow(
                 val statusLabel = when {
                     participant.invisible && participant.micActive -> "Invisible · Speaking Live (Admin Priority)"
                     participant.invisible -> "Invisible in Room"
-                    participant.mutedByMod -> "Muted by moderator"
+                    isMuted -> "Muted"
                     participant.camActive && participant.micActive -> "Live Video & Voice"
                     participant.camActive -> "Live Video"
-                    participant.micActive -> "Speaking live"
-                    participant.handRaised -> "Raised hand to speak"
+                    participant.micActive -> "On microphone"
+                    participant.handRaised -> "Hand raised"
                     else -> "Listening"
                 }
                 Text(
                     text = statusLabel,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (participant.mutedByMod) LiveCoral else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isMuted) LiveCoral else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             if (showApprove) {
+                Spacer(modifier = Modifier.width(6.dp))
                 Button(
                     onClick = onApprove,
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    Icon(Icons.Rounded.WavingHand, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Rounded.WavingHand, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Invite")
+                    Text("Invite", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }

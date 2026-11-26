@@ -69,6 +69,7 @@ fun SpotlightFrameShopCard(
     userProfile: UserProfile?,
     isProcessingWallet: Boolean,
     onBuySpotlightFrame: (SpotlightFrameColor) -> Unit,
+    isStaffFreePerks: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val activeHex = userProfile?.activeSpotlightColorHex()
@@ -119,11 +120,13 @@ fun SpotlightFrameShopCard(
                     Text(
                         text = if (isActive) {
                             "ACTIVE · ${userProfile?.spotlightFrameRemainingLabel().orEmpty()}"
+                        } else if (isStaffFreePerks) {
+                            "FREE · STAFF PERK"
                         } else {
                             "${SpotlightFrameColor.PRICE_POINTS} pts"
                         },
                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                        color = if (isActive) SafetyEmerald else selectedAccent,
+                        color = if (isActive || isStaffFreePerks) SafetyEmerald else selectedAccent,
                         modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                     )
                 }
@@ -248,7 +251,9 @@ fun SpotlightFrameShopCard(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isActive) {
+                    text = if (isStaffFreePerks) {
+                        "Activate ${selectedColor.label} (24h · FREE Staff Perk)"
+                    } else if (isActive) {
                         "Activate ${selectedColor.label} (24h · 5 pts)"
                     } else {
                         "Buy 24h Spotlight Frame · 5 pts"

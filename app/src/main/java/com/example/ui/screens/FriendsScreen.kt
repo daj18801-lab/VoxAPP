@@ -83,7 +83,8 @@ fun FriendsScreen(
     onOpenUserProfile: (String) -> Unit = {},
     userProfile: UserProfile? = null,
     companyThread: DirectThread? = null,
-    onOpenCompanyDm: () -> Unit = {}
+    onOpenCompanyDm: () -> Unit = {},
+    onStartTeamOneOnOneDm: (userId: String, name: String, colorHex: String, tier: StaffTier) -> Unit = { _, _, _, _ -> }
 ) {
     val nowMillis = rememberPresenceClockMillis()
     val directoryByUid = remember(directoryEntries) {
@@ -267,6 +268,28 @@ fun FriendsScreen(
                                                 )
                                             }
                                         }
+                                    }
+                                }
+                                if (memberUid != currentUserId) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            onStartTeamOneOnOneDm(
+                                                memberUid,
+                                                displayName,
+                                                entry?.avatarColorHex ?: "#0088FF",
+                                                entry?.tierEnum() ?: StaffTier.USER
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                        modifier = Modifier
+                                            .height(48.dp)
+                                            .testTag("team_member_dm_button_$memberUid")
+                                    ) {
+                                        Text(
+                                            text = "DM",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                        )
                                     }
                                 }
                             }

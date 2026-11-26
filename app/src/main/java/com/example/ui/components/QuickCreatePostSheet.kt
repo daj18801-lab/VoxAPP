@@ -85,7 +85,6 @@ fun QuickCreatePostSheet(
 
     var postText by remember { mutableStateOf("") }
     var draftPhotoBase64 by remember { mutableStateOf("") }
-    var lockPhoto by remember { mutableStateOf(false) }
     var boostToTop by remember { mutableStateOf(false) }
     var isEncodingPhoto by remember { mutableStateOf(false) }
     var statusNotice by remember { mutableStateOf<String?>(null) }
@@ -303,7 +302,6 @@ fun QuickCreatePostSheet(
                     IconButton(
                         onClick = {
                             draftPhotoBase64 = ""
-                            lockPhoto = false
                         },
                         modifier = Modifier.testTag("quick_create_remove_photo")
                     ) {
@@ -314,71 +312,6 @@ fun QuickCreatePostSheet(
                             modifier = Modifier.size(18.dp)
                         )
                     }
-                }
-            }
-
-            // Lock Photo (18+ · 2 pts / $2)
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = if (lockPhoto) {
-                    ModAmber.copy(alpha = 0.14f)
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                },
-                border = BorderStroke(
-                    1.dp,
-                    if (lockPhoto) ModAmber.copy(alpha = 0.55f)
-                    else MaterialTheme.colorScheme.outlineVariant
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        if (!lockPhoto && !viewerIsAdultVerified) {
-                            onRequestAgeVerification()
-                        } else {
-                            lockPhoto = !lockPhoto
-                        }
-                    }
-                    .testTag("quick_create_lock_row")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Lock,
-                        contentDescription = "Lock photo (18+)",
-                        tint = if (lockPhoto) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Lock Photo (18+ · 2 pts / \$2)",
-                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                            color = if (lockPhoto) ModAmber else MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = if (viewerIsAdultVerified) {
-                                "Earn \$1 per unlock · \$15/mo subscribers unlock all"
-                            } else {
-                                "Tap to verify 18+ age requirement before locking photos"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = lockPhoto && viewerIsAdultVerified,
-                        onCheckedChange = { wantLock ->
-                            if (wantLock && !viewerIsAdultVerified) {
-                                onRequestAgeVerification()
-                            } else {
-                                lockPhoto = wantLock
-                            }
-                        },
-                        modifier = Modifier.testTag("quick_create_lock_switch")
-                    )
                 }
             }
         }
@@ -436,15 +369,10 @@ fun QuickCreatePostSheet(
 
         Button(
             onClick = {
-                val wantLock = lockPhoto && draftPhotoBase64.isNotBlank()
-                if (wantLock && !viewerIsAdultVerified) {
-                    onRequestAgeVerification()
-                    return@Button
-                }
                 onCreatePost(
                     postText,
                     draftPhotoBase64,
-                    wantLock,
+                    false,
                     boostToTop,
                     {
                         onDismiss()

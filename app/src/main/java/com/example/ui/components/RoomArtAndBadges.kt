@@ -64,6 +64,8 @@ import com.example.data.RoomCoverKey
 import com.example.data.StaffTier
 import com.example.ui.theme.AdminNameRedDark
 import com.example.ui.theme.AdminNameRedLight
+import com.example.ui.theme.BusinessNameGoldDark
+import com.example.ui.theme.BusinessNameGoldLight
 import com.example.ui.theme.ElectricIndigoBright
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
@@ -109,10 +111,37 @@ val LocalSpotlightFrameByUserId = compositionLocalOf<Map<String, String>> { empt
 val LocalCustomNameColors = compositionLocalOf<Map<String, String>> { emptyMap() }
 
 /**
+ * App-wide CompositionLocal providing the set of user IDs who hold a Business Account
+ * so App Admins and Support Staff see them in a bold gold color everywhere.
+ */
+val LocalBusinessUserIds = compositionLocalOf<Set<String>> { emptySet() }
+
+/**
+ * App-wide CompositionLocal indicating whether the currently signed-in viewer is
+ * an App Admin or Support Staff member.
+ */
+val LocalViewerIsStaff = compositionLocalOf<Boolean> { false }
+
+@Composable
+fun isBusinessGoldForStaff(
+    userId: String? = null,
+    isBusiness: Boolean = false
+): Boolean = LocalViewerIsStaff.current &&
+    (isBusiness || (userId != null && userId in LocalBusinessUserIds.current))
+
+@Composable
+fun usernameFontWeight(
+    userId: String? = null,
+    isBusiness: Boolean = false,
+    defaultWeight: FontWeight = FontWeight.SemiBold
+): FontWeight = if (isBusinessGoldForStaff(userId, isBusiness)) FontWeight.ExtraBold else defaultWeight
+
+/**
  * Role & Membership-coded username colors across the entire app:
  * - Admin Custom Identity Color (if set for this userId)
  * - Administrators: Red
  * - Support Staff: Green
+ * - Business Accounts (seen by App Admins & Support Staff): Bold Gold
  * - Room Creators / Room Admins / Room Co-Admins: Purple
  * - Pro Members ($9.99/mo): Blue
  * - Free Members: White in Dark Theme, Black in Light Theme
@@ -122,7 +151,8 @@ fun usernameColor(
     tier: StaffTier,
     isPro: Boolean = false,
     isRoomLeader: Boolean = false,
-    userId: String? = null
+    userId: String? = null,
+    isBusiness: Boolean = false
 ): Color {
     val customHex = userId?.let { LocalCustomNameColors.current[it] }
     if (!customHex.isNullOrBlank()) {
@@ -131,12 +161,36 @@ fun usernameColor(
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val proIds = LocalProUserIds.current
     val resolvedPro = isPro || (userId != null && userId in proIds)
+    val resolvedBusinessGold = isBusinessGoldForStaff(userId, isBusiness)
     return when {
         tier == StaffTier.ADMIN -> if (isDark) AdminNameRedDark else AdminNameRedLight
         tier == StaffTier.SUPPORT -> if (isDark) SupportNameGreenDark else SupportNameGreenLight
+        resolvedBusinessGold -> if (isDark) BusinessNameGoldDark else BusinessNameGoldLight
         isRoomLeader -> if (isDark) RoomLeaderPurpleDark else RoomLeaderPurpleLight
         resolvedPro -> if (isDark) UserNameBlueDark else UserNameBlueLight
         else -> if (isDark) Color.White else Color.Black
+    }
+}
+
+@Composable
+fun BusinessAccountBadge(
+    modifier: Modifier = Modifier
+) {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val gold = if (isDark) BusinessNameGoldDark else BusinessNameGoldLight
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = gold.copy(alpha = 0.18f),
+        border = BorderStroke(1.dp, gold.copy(alpha = 0.65f))
+    ) {
+        Text(
+            text = "BUSINESS",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.ExtraBold,
+            color = gold,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
     }
 }
 

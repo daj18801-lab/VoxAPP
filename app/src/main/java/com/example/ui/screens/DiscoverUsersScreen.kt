@@ -1067,11 +1067,8 @@ fun DiscoverUsersScreen(
                                             null
                                         },
                                         onOpenComments = { activeCommentsPost = post },
-                                        onSharePost = if (!post.locked) {
-                                            { activeSharePost = post }
-                                        } else {
-                                            null
-                                        },
+                                        onSharePost = { activeSharePost = post },
+                                        isStaffFreePerks = staffCapabilities.isStaff,
                                         onToggleLike = { onToggleLikePost(post) },
                                         onDelete = { onDeletePost(post) }
                                     )
@@ -1813,11 +1810,7 @@ fun DiscoverUsersScreen(
             title = { Text("Need More Points") },
             text = {
                 Text(
-                    if (buyPointsNeededCount >= 5) {
-                        "You currently have $myPointsBalance pts. Boosting a post to the top of Discovery costs 5 points (\$5) for 24 hours. Buy points in Profile Settings."
-                    } else {
-                        "You currently have $myPointsBalance pts. Unlocking a locked photo costs 2 points (\$2 — \$1 to the photo owner, \$1 to the app owner). Buy points in Profile Settings or subscribe for \$15/month."
-                    }
+                    "You currently have $myPointsBalance pts. Boosting a post to the top of Discovery costs 5 points (\$5) for 24 hours. Buy points in Profile Settings."
                 )
             },
             confirmButton = {
@@ -1915,11 +1908,11 @@ fun DiscoverUsersScreen(
             isPublishingPost = isPublishingPost,
             onRequestAgeVerification = onRequestAgeVerification,
             onOpenBuyPoints = onOpenBuyPoints,
-            onSubmitPhotoPost = { caption, imageBase64, locked, onDone ->
+            onSubmitPhotoPost = { caption, imageBase64, _, onDone ->
                 onCreateDiscoveryPhotoPost(
                     caption,
                     imageBase64,
-                    locked,
+                    false,
                     false,
                     {
                         buyPointsNeededCount = 5
@@ -1978,9 +1971,7 @@ fun DiscoverUsersScreen(
                 }
             } else null,
             onOpenComments = { activeCommentsPost = previewPost },
-            onSharePost = if (!previewPost.locked) {
-                { activeSharePost = previewPost }
-            } else null,
+            onSharePost = { activeSharePost = previewPost },
             onToggleLike = { onToggleLikePost(previewPost) },
             onDelete = { onDeletePost(previewPost) },
             onDismiss = { previewPhotoPostId = null }

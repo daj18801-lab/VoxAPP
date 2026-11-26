@@ -79,21 +79,38 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.PauseCircle
+import androidx.compose.material.icons.rounded.PhonelinkRing
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.auth.SubAccountLoginPrefs
+import com.example.data.CompanyCode
 import com.example.data.CompanySubAccount
+import com.example.data.CompanySubAccountFileNote
 import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
 import com.example.data.EmployeeRequest
 import com.example.data.EmployeeRequestCategory
 import com.example.data.EmployeeRequestStatus
+import com.example.data.ProTier
+import com.example.data.StaffTier
 import com.example.data.UserProfile
 import com.example.data.WorkOrder
 import com.example.data.WorkOrderPriority
 import com.example.data.WorkOrderStatus
+import com.example.ui.theme.SafetyEmerald
 import com.example.data.WorkOrderType
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.PresenceOnlineGreen
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -107,16 +124,35 @@ private fun formatShortDateTime(millis: Long): String {
 fun CompanyTeamConsoleScreen(
     currentUserId: String,
     userProfile: UserProfile?,
+    staffTier: StaffTier = StaffTier.USER,
     canCreateSubAccounts: Boolean,
     companyThread: DirectThread?,
+    companyCode: CompanyCode? = null,
     subAccounts: List<CompanySubAccount>,
+    companySubAccountDms: List<DirectThread> = emptyList(),
     teamWorkOrders: List<WorkOrder>,
     teamEmployeeRequests: List<EmployeeRequest>,
     directoryEntries: List<DirectoryEntry>,
     onBack: () -> Unit,
     onOpenCompanyDm: (String) -> Unit,
-    onCreateSubAccount: (companyName: String, subName: String, roleTitle: String, onCreated: (CompanySubAccount) -> Unit) -> Unit,
+    onOpenSubAccountDm: (threadId: String, invisible: Boolean) -> Unit = { _, _ -> },
+    onSaveCompanyCodeAndPin: (companyName: String, code: String, pin: String) -> Unit = { _, _, _ -> },
+    onUpgradeToBusinessPlay: () -> Unit = {},
+    onCreateSubAccount: (
+        companyName: String,
+        subName: String,
+        roleTitle: String,
+        onCreated: (CompanySubAccount) -> Unit,
+        onBusinessUpgradeRequired: () -> Unit
+    ) -> Unit,
     onRevokeSubAccount: (CompanySubAccount) -> Unit,
+    onBanSubAccount: (CompanySubAccount, reason: String) -> Unit = { _, _ -> },
+    onSuspendSubAccount: (CompanySubAccount, durationMillis: Long, reason: String) -> Unit = { _, _, _ -> },
+    onUpdateSubAccountCapabilities: (CompanySubAccount, pttEnabled: Boolean, messagingEnabled: Boolean, micEnabled: Boolean, videoEnabled: Boolean) -> Unit = { _, _, _, _, _ -> },
+    onBuzzSubAccountPhone: (CompanySubAccount, message: String) -> Unit = { _, _ -> },
+    observeSubAccountFileNotes: (subAccountId: String) -> Flow<List<CompanySubAccountFileNote>> = { flowOf(emptyList()) },
+    onAddSubAccountFileNote: (CompanySubAccount, category: String, note: String) -> Unit = { _, _, _ -> },
+    onDeleteSubAccountFileNote: (subAccountId: String, noteId: String) -> Unit = { _, _ -> },
     onSetSupervisor: (thread: DirectThread, targetUserId: String, targetName: String, makeSupervisor: Boolean) -> Unit,
     onSendWorkOrder: (
         companyOwnerId: String,
@@ -137,18 +173,34 @@ fun CompanyTeamConsoleScreen(
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var showCreateDialog by remember { mutableStateOf(false) }
+    var showBusinessUpgradeDialog by remember { mutableStateOf(false) }
+    var showCodePinDialog by remember { mutableStateOf(false) }
+    var showPinPlaintext by remember { mutableStateOf(false) }
     var newlyCreatedSub by remember { mutableStateOf<CompanySubAccount?>(null) }
-    var workOrderTarget by remember { mutableStateOf<CompanySubAccount?>(null) }
+    var workOrderTarget by remember { mutableStateOf<Pair<CompanySubAccount, WorkOrderPriority>?>(null) }
+    var controlsTarget by remember { mutableStateOf<CompanySubAccount?>(null) }
+    var fileNotesTarget by remember { mutableStateOf<CompanySubAccount?>(null) }
     var revokeTarget by remember { mutableStateOf<CompanySubAccount?>(null) }
     var reviewTarget by remember { mutableStateOf<Pair<EmployeeRequest, EmployeeRequestStatus>?>(null) }
 
-    val defaultCompanyName = remember(companyThread, subAccounts, userProfile) {
-        companyThread?.groupName?.takeIf { it.isNotBlank() }
+    val defaultCompanyName = remember(companyCode, companyThread, subAccounts, userProfile) {
+        companyCode?.companyName?.takeIf { it.isNotBlank() }
+            ?: companyThread?.groupName?.takeIf { it.isNotBlank() }
             ?: subAccounts.firstOrNull()?.companyName?.takeIf { it.isNotBlank() }
             ?: "${userProfile?.effectiveDisplayName()?.ifBlank { "My" } ?: "My"} Company"
     }
 
-    val activeSubs = remember(subAccounts) { subAccounts.filter { it.active } }
+    val activeSubs = remember(subAccounts) { subAccounts.filter { it.active && !it.banned } }
+    val allManagedSubs = remember(subAccounts) {
+        subAccounts.sortedWith(compareByDescending<CompanySubAccount> { it.active && !it.banned }.thenByDescending { it.createdAt?.toDate()?.time ?: 0L })
+    }
+    val maxSubAccounts = remember(userProfile, staffTier) {
+        userProfile?.maxCompanySubAccounts(staffTier) ?: 10
+    }
+    val effectiveTierLabel = remember(userProfile, staffTier) {
+        val t = userProfile?.effectiveProTier(staffTier) ?: ProTier.VIP_PRO
+        if (t == ProTier.BUSINESS) "Business Account" else t.label
+    }
     val pendingReqCount = remember(teamEmployeeRequests) {
         teamEmployeeRequests.count { it.statusEnum() == EmployeeRequestStatus.PENDING }
     }
@@ -196,7 +248,7 @@ fun CompanyTeamConsoleScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "${activeSubs.size} sub-accounts · VIP Pro Company Console",
+                                text = "${activeSubs.size}/$maxSubAccounts active sub-accounts · $effectiveTierLabel",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -228,7 +280,7 @@ fun CompanyTeamConsoleScreen(
                             selected = selectedTab == 1,
                             onClick = { selectedTab = 1 },
                             modifier = Modifier.testTag("company_tab_orders"),
-                            text = { Text("Work Orders ($openOrderCount)", maxLines = 1) }
+                            text = { Text("Orders ($openOrderCount)", maxLines = 1) }
                         )
                         Tab(
                             selected = selectedTab == 2,
@@ -236,6 +288,14 @@ fun CompanyTeamConsoleScreen(
                             modifier = Modifier.testTag("company_tab_requests"),
                             text = { Text("Requests ($pendingReqCount)", maxLines = 1) }
                         )
+                        if (canCreateSubAccounts) {
+                            Tab(
+                                selected = selectedTab == 3,
+                                onClick = { selectedTab = 3 },
+                                modifier = Modifier.testTag("company_tab_sub_dms"),
+                                text = { Text("Sub DMs (${companySubAccountDms.size})", maxLines = 1) }
+                            )
+                        }
                     }
                 }
             }
@@ -248,6 +308,177 @@ fun CompanyTeamConsoleScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         if (canCreateSubAccounts) {
+                            item(key = "company_code_pin_card") {
+                                Surface(
+                                    shape = RoundedCornerShape(18.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.2.dp, ModAmber.copy(alpha = 0.55f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Key,
+                                                contentDescription = "Company Code and PIN",
+                                                tint = ModAmber
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "Company Code + Employee PIN Generator",
+                                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold)
+                                                    )
+                                                }
+                                                Surface(
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    color = ModAmber.copy(alpha = 0.16f),
+                                                    modifier = Modifier.padding(top = 3.dp, bottom = 2.dp)
+                                                ) {
+                                                    Text(
+                                                        text = if (maxSubAccounts >= 50) {
+                                                            "Business Account · Up to 50 sub-accounts"
+                                                        } else {
+                                                            "VIP Pro · First $maxSubAccounts sub-accounts included"
+                                                        },
+                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                        color = ModAmber,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                                Text(
+                                                    text = "Generate your Company Code & Master PIN, then every sub-account you create receives its own unique 6-digit Employee PIN. Removing an employee permanently revokes their PIN.",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+
+                                        if (companyCode != null) {
+                                            Surface(
+                                                shape = RoundedCornerShape(12.dp),
+                                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.SpaceBetween
+                                                ) {
+                                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                        Text(
+                                                            text = "Code: ${companyCode.companyCode}",
+                                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                                fontWeight = FontWeight.ExtraBold,
+                                                                fontFamily = FontFamily.Monospace
+                                                            ),
+                                                            color = MaterialTheme.colorScheme.primary
+                                                        )
+                                                        Text(
+                                                            text = "PIN: ${if (showPinPlaintext) companyCode.pin else "••••"}",
+                                                            style = MaterialTheme.typography.labelLarge.copy(
+                                                                fontWeight = FontWeight.Bold,
+                                                                fontFamily = FontFamily.Monospace
+                                                            )
+                                                        )
+                                                        if (companyCode.ownerEmail.isNotBlank()) {
+                                                            Text(
+                                                                text = "Account Email: ${companyCode.ownerEmail}",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                            )
+                                                        }
+                                                    }
+                                                    Row {
+                                                        IconButton(
+                                                            onClick = { showPinPlaintext = !showPinPlaintext },
+                                                            modifier = Modifier.testTag("toggle_company_pin_visibility")
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = if (showPinPlaintext) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                                                contentDescription = if (showPinPlaintext) "Hide PIN" else "Show PIN"
+                                                            )
+                                                        }
+                                                        IconButton(
+                                                            onClick = {
+                                                                clipboard.setText(
+                                                                    AnnotatedString(
+                                                                        "VOX Business Employee Login\nCompany: ${companyCode.companyName}\nCompany Code: ${companyCode.companyCode}\nPIN: ${companyCode.pin}"
+                                                                    )
+                                                                )
+                                                                Toast.makeText(context, "Copied Company Code & PIN", Toast.LENGTH_SHORT).show()
+                                                            },
+                                                            modifier = Modifier.testTag("copy_company_code_pin_button")
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Rounded.ContentCopy,
+                                                                contentDescription = "Copy Company Code and PIN",
+                                                                tint = MaterialTheme.colorScheme.primary
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            if (companyCode == null) {
+                                                Button(
+                                                    onClick = {
+                                                        val prefix = defaultCompanyName.uppercase()
+                                                            .filter { it in 'A'..'Z' || it in '0'..'9' }
+                                                            .take(6)
+                                                            .ifBlank { "TEAM" }
+                                                        val generatedCode = "${prefix}${(100..999).random()}"
+                                                        val generatedPin = (100000..999999).random().toString()
+                                                        onSaveCompanyCodeAndPin(defaultCompanyName, generatedCode, generatedPin)
+                                                    },
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = ModAmber,
+                                                        contentColor = Color.Black
+                                                    ),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(48.dp)
+                                                        .testTag("auto_generate_company_code_button")
+                                                ) {
+                                                    Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text("Generate Code & PIN", fontWeight = FontWeight.Bold, maxLines = 1)
+                                                }
+                                            }
+                                            OutlinedButton(
+                                                onClick = { showCodePinDialog = true },
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(48.dp)
+                                                    .testTag("edit_company_code_pin_button")
+                                            ) {
+                                                Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = if (companyCode == null) "Custom Code" else "Update Code & PIN",
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             item(key = "create_sub_cta") {
                                 Surface(
                                     shape = RoundedCornerShape(18.dp),
@@ -269,17 +500,24 @@ fun CompanyTeamConsoleScreen(
                                                 tint = MaterialTheme.colorScheme.primary
                                             )
                                             Text(
-                                                text = "Employee Sub-Accounts",
+                                                text = "Employee Sub-Accounts (${activeSubs.size}/$maxSubAccounts)",
                                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                                             )
                                         }
                                         Text(
-                                            text = "Create sub-names for employees. Sub-accounts get 60s Push-to-Talk and access ONLY to your private Company Group DM, Work Orders, Requests, and DND — no Discovery, no Chat Rooms, no extra perks.",
+                                            text = "Create sub-names for employees or let them join with your Company Code + PIN. Full owner controls include Remove, Ban, Suspend, Urgent Alerts, Private File Notes, Buzz Phone, and Invisible/Visible DM monitoring.",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                         Button(
-                                            onClick = { showCreateDialog = true },
+                                            onClick = {
+                                                // ONLY show Business Account ($99.99/mo) upgrade modal when trying to add a 10th sub-account!
+                                                if (activeSubs.size >= maxSubAccounts && maxSubAccounts < 50) {
+                                                    showBusinessUpgradeDialog = true
+                                                } else {
+                                                    showCreateDialog = true
+                                                }
+                                            },
                                             shape = RoundedCornerShape(14.dp),
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -288,14 +526,14 @@ fun CompanyTeamConsoleScreen(
                                         ) {
                                             Icon(Icons.Rounded.Add, contentDescription = null)
                                             Spacer(modifier = Modifier.width(8.dp))
-                                            Text("Create Employee Sub-Name")
+                                            Text("Add Employee Sub-Account")
                                         }
                                     }
                                 }
                             }
                         }
 
-                        if (activeSubs.isEmpty()) {
+                        if (allManagedSubs.isEmpty()) {
                             item(key = "empty_roster") {
                                 Surface(
                                     shape = RoundedCornerShape(18.dp),
@@ -315,11 +553,11 @@ fun CompanyTeamConsoleScreen(
                                             modifier = Modifier.size(36.dp)
                                         )
                                         Text(
-                                            text = "No Employee Sub-Names Yet",
+                                            text = "No Employee Sub-Accounts Yet",
                                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                                         )
                                         Text(
-                                            text = "Create your first sub-name above and share its Access Code with your employee to sign in.",
+                                            text = "Share your Company Code + PIN above or create an employee sub-name to get started.",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -327,20 +565,25 @@ fun CompanyTeamConsoleScreen(
                                 }
                             }
                         } else {
-                            items(activeSubs, key = { it.id }) { sub ->
+                            items(allManagedSubs, key = { it.id }) { sub ->
                                 val isOwner = sub.ownerId == currentUserId
                                 val dirEntry = if (sub.claimedUserId.isNotBlank()) directoryByUid[sub.claimedUserId] else null
                                 val isDnd = sub.doNotDisturb || (dirEntry?.doNotDisturb == true)
                                 val isSupervisor = sub.supervisor ||
                                     (sub.claimedUserId.isNotBlank() && companyThread?.isGroupSupervisor(sub.claimedUserId) == true)
+                                val isSuspended = sub.isCurrentlySuspended()
 
                                 Surface(
                                     shape = RoundedCornerShape(18.dp),
                                     color = MaterialTheme.colorScheme.surface,
                                     border = BorderStroke(
                                         1.dp,
-                                        if (isSupervisor) ModAmber.copy(alpha = 0.6f)
-                                        else MaterialTheme.colorScheme.outlineVariant
+                                        when {
+                                            sub.banned -> LiveCoral.copy(alpha = 0.7f)
+                                            isSuspended -> ModAmber.copy(alpha = 0.7f)
+                                            isSupervisor -> ModAmber.copy(alpha = 0.55f)
+                                            else -> MaterialTheme.colorScheme.outlineVariant
+                                        }
                                     ),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
@@ -371,7 +614,44 @@ fun CompanyTeamConsoleScreen(
                                                         maxLines = 1,
                                                         overflow = TextOverflow.Ellipsis
                                                     )
-                                                    if (isSupervisor) {
+                                                    if (sub.banned) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(6.dp),
+                                                            color = LiveCoral.copy(alpha = 0.2f)
+                                                        ) {
+                                                            Text(
+                                                                text = "BANNED",
+                                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                                color = LiveCoral,
+                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                            )
+                                                        }
+                                                    } else if (isSuspended) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(6.dp),
+                                                            color = ModAmber.copy(alpha = 0.22f)
+                                                        ) {
+                                                            Text(
+                                                                text = "SUSPENDED",
+                                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                                color = ModAmber,
+                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                            )
+                                                        }
+                                                    } else if (!sub.active) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(6.dp),
+                                                            color = MaterialTheme.colorScheme.surfaceVariant
+                                                        ) {
+                                                            Text(
+                                                                text = "REMOVED",
+                                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                    if (isSupervisor && sub.active && !sub.banned) {
                                                         Surface(
                                                             shape = RoundedCornerShape(6.dp),
                                                             color = ModAmber.copy(alpha = 0.2f)
@@ -384,7 +664,7 @@ fun CompanyTeamConsoleScreen(
                                                             )
                                                         }
                                                     }
-                                                    if (isDnd) {
+                                                    if (isDnd && sub.active && !sub.banned) {
                                                         Surface(
                                                             shape = RoundedCornerShape(6.dp),
                                                             color = LiveCoral.copy(alpha = 0.16f)
@@ -401,7 +681,7 @@ fun CompanyTeamConsoleScreen(
                                                 Text(
                                                     text = buildString {
                                                         if (sub.roleTitle.isNotBlank()) append("${sub.roleTitle} · ")
-                                                        if (sub.isClaimed()) append("Active (${sub.claimedEmail.ifBlank { "Claimed" }})")
+                                                        if (sub.isClaimed()) append(sub.claimedEmail.ifBlank { "Active Employee" })
                                                         else append("Waiting for employee login")
                                                     },
                                                     style = MaterialTheme.typography.bodySmall,
@@ -409,47 +689,79 @@ fun CompanyTeamConsoleScreen(
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
+                                                if (sub.hasAnyCapabilityRestriction() && sub.active && !sub.banned) {
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Row(
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        val restrictedLabels = buildList {
+                                                            if (!sub.pttEnabled) add("No PTT")
+                                                            if (!sub.messagingEnabled) add("No Msg")
+                                                            if (!sub.micEnabled) add("Mic Off")
+                                                            if (!sub.videoEnabled) add("Video Off")
+                                                        }
+                                                        restrictedLabels.forEach { badge ->
+                                                            Surface(
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                color = LiveCoral.copy(alpha = 0.14f)
+                                                            ) {
+                                                                Text(
+                                                                    text = badge,
+                                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                                    color = LiveCoral,
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
 
-                                        // Access code copy row
-                                        Surface(
-                                            shape = RoundedCornerShape(10.dp),
-                                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.SpaceBetween
+                                        if (isOwner && sub.joinPin.isNotBlank() && sub.active && !sub.banned) {
+                                            Surface(
+                                                shape = RoundedCornerShape(10.dp),
+                                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                                                modifier = Modifier.fillMaxWidth()
                                             ) {
-                                                Column {
-                                                    Text(
-                                                        text = "Employee Access Code",
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
-                                                    Text(
-                                                        text = sub.accessCode,
-                                                        style = MaterialTheme.typography.titleSmall.copy(
-                                                            fontWeight = FontWeight.ExtraBold,
-                                                            fontFamily = FontFamily.Monospace
-                                                        ),
-                                                        color = MaterialTheme.colorScheme.primary
-                                                    )
-                                                }
-                                                IconButton(
-                                                    onClick = {
-                                                        clipboard.setText(AnnotatedString("${sub.subName} / ${sub.accessCode}"))
-                                                        Toast.makeText(context, "Copied sub-name & access code", Toast.LENGTH_SHORT).show()
-                                                    },
-                                                    modifier = Modifier.testTag("copy_sub_code_${sub.id}")
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.SpaceBetween
                                                 ) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.ContentCopy,
-                                                        contentDescription = "Copy Access Code",
-                                                        tint = MaterialTheme.colorScheme.primary
+                                                    Text(
+                                                        text = "Code: ${sub.companyCode.ifBlank { companyCode?.companyCode.orEmpty() }}  ·  Unique PIN: ${sub.joinPin}",
+                                                        style = MaterialTheme.typography.labelMedium.copy(
+                                                            fontFamily = FontFamily.Monospace,
+                                                            fontWeight = FontWeight.Bold
+                                                        ),
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f)
                                                     )
+                                                    IconButton(
+                                                        onClick = {
+                                                            val codeText = sub.companyCode.ifBlank { companyCode?.companyCode.orEmpty() }
+                                                            clipboard.setText(
+                                                                AnnotatedString(
+                                                                    "VOX Employee Login\nCompany: ${sub.companyName}\nCompany Code: $codeText\nUnique Employee PIN: ${sub.joinPin}"
+                                                                )
+                                                            )
+                                                            Toast.makeText(context, "Copied unique login PIN for ${sub.subName}", Toast.LENGTH_SHORT).show()
+                                                        },
+                                                        modifier = Modifier
+                                                            .size(36.dp)
+                                                            .testTag("copy_sub_unique_pin_${sub.id}")
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.ContentCopy,
+                                                            contentDescription = "Copy unique employee PIN",
+                                                            tint = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
@@ -460,11 +772,11 @@ fun CompanyTeamConsoleScreen(
                                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            if (sub.isClaimed()) {
+                                            if (sub.isClaimed() && sub.active && !sub.banned) {
                                                 Button(
-                                                    onClick = { workOrderTarget = sub },
+                                                    onClick = { workOrderTarget = sub to WorkOrderPriority.NORMAL },
                                                     shape = RoundedCornerShape(12.dp),
-                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                                                     modifier = Modifier
                                                         .weight(1f)
                                                         .testTag("send_work_order_btn_${sub.id}")
@@ -474,11 +786,29 @@ fun CompanyTeamConsoleScreen(
                                                         contentDescription = null,
                                                         modifier = Modifier.size(16.dp)
                                                     )
-                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                    Text("Work Order", maxLines = 1)
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("Order", maxLines = 1)
                                                 }
-                                                if (isOwner && companyThread != null) {
-                                                    OutlinedButton(
+                                            }
+                                            if (isOwner) {
+                                                OutlinedButton(
+                                                    onClick = { controlsTarget = sub },
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .testTag("owner_sub_controls_btn_${sub.id}")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Tune,
+                                                        contentDescription = "Owner Sub-Account Controls",
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("Controls", maxLines = 1)
+                                                }
+                                                if (sub.isClaimed() && companyThread != null && sub.active && !sub.banned) {
+                                                    IconButton(
                                                         onClick = {
                                                             onSetSupervisor(
                                                                 companyThread,
@@ -487,33 +817,14 @@ fun CompanyTeamConsoleScreen(
                                                                 !isSupervisor
                                                             )
                                                         },
-                                                        shape = RoundedCornerShape(12.dp),
-                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                                                         modifier = Modifier.testTag("toggle_supervisor_btn_${sub.id}")
                                                     ) {
                                                         Icon(
                                                             imageVector = Icons.Rounded.AdminPanelSettings,
-                                                            contentDescription = null,
-                                                            modifier = Modifier.size(16.dp)
-                                                        )
-                                                        Spacer(modifier = Modifier.width(4.dp))
-                                                        Text(
-                                                            if (isSupervisor) "Un-Supervise" else "Supervisor",
-                                                            maxLines = 1
+                                                            contentDescription = if (isSupervisor) "Remove Supervisor" else "Make Supervisor",
+                                                            tint = if (isSupervisor) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant
                                                         )
                                                     }
-                                                }
-                                            }
-                                            if (isOwner) {
-                                                IconButton(
-                                                    onClick = { revokeTarget = sub },
-                                                    modifier = Modifier.testTag("revoke_sub_btn_${sub.id}")
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.DeleteOutline,
-                                                        contentDescription = "Revoke Sub-Account",
-                                                        tint = LiveCoral
-                                                    )
                                                 }
                                             }
                                         }
@@ -550,7 +861,7 @@ fun CompanyTeamConsoleScreen(
                     }
                 }
 
-                else -> {
+                2 -> {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(16.dp),
@@ -574,6 +885,93 @@ fun CompanyTeamConsoleScreen(
                         }
                     }
                 }
+
+                else -> {
+                    // Tab 3: Sub-Account 1-on-1 DMs (Owner Invisible / Visible Access)
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        if (companySubAccountDms.isEmpty()) {
+                            item(key = "empty_sub_dms") {
+                                EmptyWorkspaceCard(
+                                    title = "No Sub-Account 1-on-1 DMs Yet",
+                                    subtitle = "When your employees start private 1-on-1 messages with each other, you can open and monitor them here in Invisible or Visible mode."
+                                )
+                            }
+                        } else {
+                            items(companySubAccountDms, key = { it.id }) { dm ->
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                text = "${dm.userAName.ifBlank { "Employee" }} ↔ ${dm.userBName.ifBlank { "Employee" }}",
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                text = formatShortDateTime(dm.updatedAt?.toDate()?.time ?: 0L),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Text(
+                                            text = dm.lastMessageText.ifBlank { "Private 1-on-1 conversation started" },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = { onOpenSubAccountDm(dm.id, true) },
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(48.dp)
+                                                    .testTag("open_sub_dm_invisible_${dm.id}")
+                                            ) {
+                                                Icon(Icons.Rounded.VisibilityOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("Invisible", maxLines = 1)
+                                            }
+                                            Button(
+                                                onClick = { onOpenSubAccountDm(dm.id, false) },
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(48.dp)
+                                                    .testTag("open_sub_dm_visible_${dm.id}")
+                                            ) {
+                                                Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("Visible", maxLines = 1)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -584,14 +982,88 @@ fun CompanyTeamConsoleScreen(
             onDismiss = { showCreateDialog = false },
             onCreate = { coName, subName, role ->
                 showCreateDialog = false
-                onCreateSubAccount(coName, subName, role) { created ->
-                    newlyCreatedSub = created
-                }
+                onCreateSubAccount(
+                    coName,
+                    subName,
+                    role,
+                    { created -> newlyCreatedSub = created },
+                    { showBusinessUpgradeDialog = true }
+                )
             }
         )
     }
 
+    if (showBusinessUpgradeDialog) {
+        BusinessAccountUpgradeDialog(
+            onDismiss = { showBusinessUpgradeDialog = false },
+            onUpgrade = {
+                showBusinessUpgradeDialog = false
+                onUpgradeToBusinessPlay()
+            }
+        )
+    }
+
+    if (showCodePinDialog) {
+        CompanyCodePinDialog(
+            initialCompanyName = companyCode?.companyName?.ifBlank { defaultCompanyName } ?: defaultCompanyName,
+            initialCode = companyCode?.companyCode.orEmpty(),
+            initialPin = companyCode?.pin.orEmpty(),
+            onDismiss = { showCodePinDialog = false },
+            onSave = { coName, code, pin ->
+                showCodePinDialog = false
+                onSaveCompanyCodeAndPin(coName, code, pin)
+            }
+        )
+    }
+
+    controlsTarget?.let { target ->
+        val liveTarget = subAccounts.firstOrNull { it.id == target.id } ?: target
+        OwnerSubAccountControlsDialog(
+            subAccount = liveTarget,
+            onDismiss = { controlsTarget = null },
+            onUpdateCapabilities = { ptt, msg, mic, video ->
+                onUpdateSubAccountCapabilities(liveTarget, ptt, msg, mic, video)
+            },
+            onBuzzPhone = { msg ->
+                controlsTarget = null
+                onBuzzSubAccountPhone(liveTarget, msg)
+            },
+            onSendUrgentAlert = {
+                controlsTarget = null
+                workOrderTarget = liveTarget to WorkOrderPriority.URGENT
+            },
+            onOpenFileNotes = {
+                controlsTarget = null
+                fileNotesTarget = liveTarget
+            },
+            onSuspend = { durationMillis, reason ->
+                controlsTarget = null
+                onSuspendSubAccount(liveTarget, durationMillis, reason)
+            },
+            onBan = { reason ->
+                controlsTarget = null
+                onBanSubAccount(liveTarget, reason)
+            },
+            onRemove = {
+                controlsTarget = null
+                revokeTarget = liveTarget
+            }
+        )
+    }
+
+    fileNotesTarget?.let { target ->
+        SubAccountFileNotesDialog(
+            subAccount = target,
+            notesFlow = remember(target.id) { observeSubAccountFileNotes(target.id) },
+            onAddNote = { category, note -> onAddSubAccountFileNote(target, category, note) },
+            onDeleteNote = { noteId -> onDeleteSubAccountFileNote(target.id, noteId) },
+            onDismiss = { fileNotesTarget = null }
+        )
+    }
+
     newlyCreatedSub?.let { created ->
+        val displayCode = created.companyCode.ifBlank { companyCode?.companyCode.orEmpty() }
+        val displayPin = created.joinPin.ifBlank { created.accessCode }
         AlertDialog(
             onDismissRequest = { newlyCreatedSub = null },
             icon = {
@@ -601,11 +1073,11 @@ fun CompanyTeamConsoleScreen(
                     tint = PresenceOnlineGreen
                 )
             },
-            title = { Text("Sub-Name Created!") },
+            title = { Text("Sub-Account Created!") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Share these credentials with your employee. They sign in via \"Company Employee Login\" on the VOX sign-in screen (or Profile -> Join Company).",
+                        text = "Give this unique PIN to your employee. They select Business on the VOX login screen and enter the Company Code, their Unique Employee PIN, and their First & Last Name. If you remove them later, this PIN is permanently revoked so they cannot log back in under another name.",
                         style = MaterialTheme.typography.bodySmall
                     )
                     Surface(
@@ -615,14 +1087,22 @@ fun CompanyTeamConsoleScreen(
                     ) {
                         Column(
                             modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text("Sub-Name: ${created.subName}", fontWeight = FontWeight.Bold)
+                            Text("Sub-Account: ${created.subName}", fontWeight = FontWeight.Bold)
+                            if (displayCode.isNotBlank()) {
+                                Text(
+                                    text = "Company Code: $displayCode",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                             Text(
-                                text = "Access Code: ${created.accessCode}",
+                                text = "Unique Employee PIN: $displayPin",
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = MaterialTheme.colorScheme.primary
+                                color = ModAmber
                             )
                         }
                     }
@@ -631,8 +1111,12 @@ fun CompanyTeamConsoleScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        clipboard.setText(AnnotatedString("VOX Company Login\nSub-Name: ${created.subName}\nAccess Code: ${created.accessCode}"))
-                        Toast.makeText(context, "Login credentials copied!", Toast.LENGTH_SHORT).show()
+                        clipboard.setText(
+                            AnnotatedString(
+                                "VOX Employee Login\nCompany: ${created.companyName}\nCompany Code: $displayCode\nUnique Employee PIN: $displayPin"
+                            )
+                        )
+                        Toast.makeText(context, "Unique employee credentials copied!", Toast.LENGTH_SHORT).show()
                         newlyCreatedSub = null
                     },
                     modifier = Modifier.testTag("copy_created_sub_button")
@@ -648,9 +1132,10 @@ fun CompanyTeamConsoleScreen(
         )
     }
 
-    workOrderTarget?.let { target ->
+    workOrderTarget?.let { (target, initPriority) ->
         SendWorkOrderDialog(
             targetName = target.subName,
+            initialPriority = initPriority,
             onDismiss = { workOrderTarget = null },
             onSend = { orderType, priority, title, body ->
                 workOrderTarget = null
@@ -1055,9 +1540,22 @@ fun SubAccountBasicProfileScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = "Company Sub-Account · Push-to-Talk & 60s Voice Clips Enabled · No Extra Perks",
+                            text = "Company Sub-Account · 18+ Verified Under Parent · Push-to-Talk & 60s Clips Enabled",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = SafetyEmerald.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, SafetyEmerald.copy(alpha = 0.45f)),
+                        modifier = Modifier.testTag("sub_account_18_plus_verified_badge")
+                    ) {
+                        Text(
+                            text = "18+ VERIFIED (PARENT B2B ACCOUNT)",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = SafetyEmerald,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
                 }
@@ -1536,11 +2034,12 @@ private fun CreateSubAccountDialog(
 @Composable
 fun SendWorkOrderDialog(
     targetName: String,
+    initialPriority: WorkOrderPriority = WorkOrderPriority.NORMAL,
     onDismiss: () -> Unit,
     onSend: (orderType: WorkOrderType, priority: WorkOrderPriority, title: String, body: String) -> Unit
 ) {
     var orderType by remember { mutableStateOf(WorkOrderType.WORK_ORDER) }
-    var priority by remember { mutableStateOf(WorkOrderPriority.NORMAL) }
+    var priority by remember(initialPriority) { mutableStateOf(initialPriority) }
     var title by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
 
@@ -1868,6 +2367,591 @@ fun JoinCompanySubAccountDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun BusinessAccountUpgradeDialog(
+    onDismiss: () -> Unit,
+    onUpgrade: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.Business,
+                contentDescription = "Business Account Upgrade",
+                tint = ModAmber,
+                modifier = Modifier.size(32.dp)
+            )
+        },
+        title = { Text("Upgrade to Business Account") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "You've reached the 10 sub-account limit on VIP Pro. To add 11–50 employee sub-accounts, upgrade to a Business Account.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = ModAmber.copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.6f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Business Account · $99.99 / month",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = ModAmber
+                        )
+                        Text(
+                            text = "• Up to 50 active employee sub-accounts\n" +
+                                "• Company Code + PIN employee logins\n" +
+                                "• Invisible & Visible access to sub-account 1-on-1 DMs\n" +
+                                "• Full owner controls: Remove, Ban, Suspend, Urgent Alerts, File Notes & Buzz Phone",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onUpgrade,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ModAmber,
+                    contentColor = Color.Black
+                ),
+                modifier = Modifier.testTag("business_upgrade_subscribe_button")
+            ) {
+                Text("Upgrade · $99.99/mo", fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Not Now")
+            }
+        }
+    )
+}
+
+@Composable
+private fun CompanyCodePinDialog(
+    initialCompanyName: String,
+    initialCode: String,
+    initialPin: String,
+    onDismiss: () -> Unit,
+    onSave: (companyName: String, code: String, pin: String) -> Unit
+) {
+    var coName by remember { mutableStateOf(initialCompanyName) }
+    var code by remember { mutableStateOf(initialCode) }
+    var pin by remember { mutableStateOf(initialPin) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.Key, contentDescription = null, tint = ModAmber) },
+        title = { Text("Company Code & PIN") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Employees select Business on the VOX login screen and sign in using this Company Code, PIN, and their First & Last Name.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = coName,
+                    onValueChange = { coName = it.take(60) },
+                    label = { Text("Company Name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("company_code_dialog_name_input")
+                )
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { code = SubAccountLoginPrefs.normalizeCompanyCode(it) },
+                    label = { Text("Company Code (4-24 chars)") },
+                    placeholder = { Text("e.g., ACME2026") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("company_code_dialog_code_input")
+                )
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = { pin = SubAccountLoginPrefs.normalizePin(it) },
+                    label = { Text("Company PIN (4-12 chars)") },
+                    placeholder = { Text("e.g., 4829") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("company_code_dialog_pin_input")
+                )
+                OutlinedButton(
+                    onClick = {
+                        val prefix = coName.uppercase()
+                            .filter { it in 'A'..'Z' || it in '0'..'9' }
+                            .take(6)
+                            .ifBlank { "TEAM" }
+                        code = "${prefix}${(100..999).random()}"
+                        pin = (100000..999999).random().toString()
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("dialog_generate_code_pin_button")
+                ) {
+                    Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Auto-Generate Code & 6-Digit PIN")
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(coName, code, pin) },
+                enabled = coName.trim().length >= 2 && code.length >= 4 && pin.length >= 4,
+                modifier = Modifier.testTag("confirm_save_company_code_pin_button")
+            ) {
+                Text("Save Code & PIN")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun OwnerSubAccountControlsDialog(
+    subAccount: CompanySubAccount,
+    onDismiss: () -> Unit,
+    onUpdateCapabilities: (pttEnabled: Boolean, messagingEnabled: Boolean, micEnabled: Boolean, videoEnabled: Boolean) -> Unit,
+    onBuzzPhone: (message: String) -> Unit,
+    onSendUrgentAlert: () -> Unit,
+    onOpenFileNotes: () -> Unit,
+    onSuspend: (durationMillis: Long, reason: String) -> Unit,
+    onBan: (reason: String) -> Unit,
+    onRemove: () -> Unit
+) {
+    var buzzMessage by remember { mutableStateOf("Management needs your immediate attention.") }
+    var moderationReason by remember { mutableStateOf("") }
+    var selectedSuspendHours by remember { mutableIntStateOf(4) } // 1, 4, 24, 168, -1 = Until Lifted
+    val isCurrentlySuspended = subAccount.isCurrentlySuspended()
+
+    var pttEnabled by remember(subAccount.id, subAccount.pttEnabled) { mutableStateOf(subAccount.pttEnabled) }
+    var messagingEnabled by remember(subAccount.id, subAccount.messagingEnabled) { mutableStateOf(subAccount.messagingEnabled) }
+    var micEnabled by remember(subAccount.id, subAccount.micEnabled) { mutableStateOf(subAccount.micEnabled) }
+    var videoEnabled by remember(subAccount.id, subAccount.videoEnabled) { mutableStateOf(subAccount.videoEnabled) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text(
+                    text = "Owner Controls · ${subAccount.subName}",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold)
+                )
+                Text(
+                    text = "Full company owner controls for this sub-account",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // 0. Capabilities & Hardware Controls (PTT, Messaging, Microphone, Video)
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Permissions & Hardware",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.ExtraBold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        SubCapabilityToggleRow(
+                            title = "Push-to-Talk (PTT)",
+                            subtitle = "Allow walkie-talkie PTT & 60s clips",
+                            checked = pttEnabled,
+                            enabled = subAccount.active && !subAccount.banned,
+                            testTag = "sub_control_toggle_ptt",
+                            onCheckedChange = { next ->
+                                pttEnabled = next
+                                onUpdateCapabilities(next, messagingEnabled, micEnabled, videoEnabled)
+                            }
+                        )
+                        SubCapabilityToggleRow(
+                            title = "Messaging",
+                            subtitle = "Allow sending text & photo messages",
+                            checked = messagingEnabled,
+                            enabled = subAccount.active && !subAccount.banned,
+                            testTag = "sub_control_toggle_messaging",
+                            onCheckedChange = { next ->
+                                messagingEnabled = next
+                                onUpdateCapabilities(pttEnabled, next, micEnabled, videoEnabled)
+                            }
+                        )
+                        SubCapabilityToggleRow(
+                            title = "Microphone",
+                            subtitle = "Allow live mic audio in calls & PTT",
+                            checked = micEnabled,
+                            enabled = subAccount.active && !subAccount.banned,
+                            testTag = "sub_control_toggle_mic",
+                            onCheckedChange = { next ->
+                                micEnabled = next
+                                onUpdateCapabilities(pttEnabled, messagingEnabled, next, videoEnabled)
+                            }
+                        )
+                        SubCapabilityToggleRow(
+                            title = "Video / Camera",
+                            subtitle = "Allow turning on camera in video calls",
+                            checked = videoEnabled,
+                            enabled = subAccount.active && !subAccount.banned,
+                            testTag = "sub_control_toggle_video",
+                            onCheckedChange = { next ->
+                                videoEnabled = next
+                                onUpdateCapabilities(pttEnabled, messagingEnabled, micEnabled, next)
+                            }
+                        )
+                    }
+                }
+
+                // 1. Buzz Phone
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Buzz Employee's Phone (Breaks DND)",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                        )
+                        OutlinedTextField(
+                            value = buzzMessage,
+                            onValueChange = { buzzMessage = it.take(180) },
+                            label = { Text("Buzz Message") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("owner_buzz_message_input")
+                        )
+                        Button(
+                            onClick = { onBuzzPhone(buzzMessage) },
+                            enabled = subAccount.active && !subAccount.banned,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("owner_buzz_phone_button")
+                        ) {
+                            Icon(Icons.Rounded.PhonelinkRing, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Buzz Phone Now")
+                        }
+                    }
+                }
+
+                // 2. Urgent Alert + 3. Private File Notes
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onSendUrgentAlert,
+                        enabled = subAccount.isClaimed() && subAccount.active && !subAccount.banned,
+                        colors = ButtonDefaults.buttonColors(containerColor = LiveCoral),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("owner_urgent_alert_button")
+                    ) {
+                        Icon(Icons.Rounded.PriorityHigh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Urgent Alert", maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = onOpenFileNotes,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("owner_file_notes_button")
+                    ) {
+                        Icon(Icons.Rounded.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("File Notes", maxLines = 1)
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                // 4. Suspend / Unsuspend
+                OutlinedTextField(
+                    value = moderationReason,
+                    onValueChange = { moderationReason = it.take(200) },
+                    label = { Text("Reason (for Suspend / Ban)") },
+                    placeholder = { Text("Optional note for your records...") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("owner_mod_reason_input")
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf(1 to "1h", 4 to "4h", 24 to "24h", 168 to "7d").forEach { (hrs, lbl) ->
+                        FilterChip(
+                            selected = selectedSuspendHours == hrs,
+                            onClick = { selectedSuspendHours = hrs },
+                            label = { Text(lbl) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val durMs = selectedSuspendHours.toLong() * 60L * 60L * 1000L
+                            onSuspend(durMs, moderationReason)
+                        },
+                        enabled = !subAccount.banned,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("owner_suspend_sub_button")
+                    ) {
+                        Icon(Icons.Rounded.PauseCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Suspend", maxLines = 1)
+                    }
+                    if (isCurrentlySuspended) {
+                        Button(
+                            onClick = { onSuspend(0L, "") },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("owner_unsuspend_sub_button")
+                        ) {
+                            Text("Unsuspend", maxLines = 1)
+                        }
+                    }
+                }
+
+                // 5. Ban + 6. Remove
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { onBan(moderationReason) },
+                        enabled = !subAccount.banned,
+                        colors = ButtonDefaults.buttonColors(containerColor = LiveCoral),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("owner_ban_sub_button")
+                    ) {
+                        Icon(Icons.Rounded.Block, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (subAccount.banned) "Banned" else "Ban", maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = onRemove,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = LiveCoral),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("owner_remove_sub_button")
+                    ) {
+                        Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Remove", maxLines = 1)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
+private fun SubCapabilityToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean,
+    testTag: String,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = if (checked) MaterialTheme.colorScheme.onSurface else LiveCoral
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(testTag)
+        )
+    }
+}
+
+@Composable
+private fun SubAccountFileNotesDialog(
+    subAccount: CompanySubAccount,
+    notesFlow: Flow<List<CompanySubAccountFileNote>>,
+    onAddNote: (category: String, note: String) -> Unit,
+    onDeleteNote: (noteId: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val notes by notesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    var category by remember { mutableStateOf("NOTE") }
+    var draftNote by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Private File Notes · ${subAccount.subName}") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Only you (Company Owner) can see these file notes. Sub-accounts cannot read them.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf("NOTE", "WARNING", "INCIDENT", "PERF").forEach { cat ->
+                        FilterChip(
+                            selected = category == cat,
+                            onClick = { category = cat },
+                            label = { Text(cat, maxLines = 1) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = draftNote,
+                    onValueChange = { draftNote = it.take(450) },
+                    label = { Text("Add Private Note") },
+                    placeholder = { Text("Enter record-keeping note...") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("sub_file_note_input")
+                )
+                Button(
+                    onClick = {
+                        if (draftNote.trim().isNotEmpty()) {
+                            onAddNote(category, draftNote)
+                            draftNote = ""
+                        }
+                    },
+                    enabled = draftNote.trim().isNotEmpty(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("save_sub_file_note_button")
+                ) {
+                    Text("Save File Note")
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                if (notes.isEmpty()) {
+                    Text(
+                        text = "No file notes recorded yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    notes.forEach { n ->
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.Top,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${n.category} · ${formatShortDateTime(n.createdAt?.toDate()?.time ?: 0L)}",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = n.note,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onDeleteNote(n.id) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DeleteOutline,
+                                        contentDescription = "Delete File Note",
+                                        tint = LiveCoral,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done")
             }
         }
     )

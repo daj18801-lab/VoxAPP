@@ -49,6 +49,8 @@ val AdminNameRedDark = Color(0xFFFF5263)
 val AdminNameRedLight = Color(0xFFD31B2E)
 val RoomLeaderPurpleDark = Color(0xFFC084FC)
 val RoomLeaderPurpleLight = Color(0xFF7C3AED)
+val BusinessNameGoldDark = Color(0xFFFFD54F)
+val BusinessNameGoldLight = Color(0xFFB8860B)
 
 // Text Colors (Dark)
 val TextPrimaryDark = Color(0xFFF2F7FF)

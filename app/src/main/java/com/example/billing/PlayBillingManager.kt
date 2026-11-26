@@ -80,13 +80,13 @@ class PlayBillingManager(
         const val PRO_FALLBACK_PRICE_LABEL = "$9.99/mo"
         const val VIP_PRO_SUBSCRIPTION_PRODUCT_ID = "voxstage_vip_pro_monthly"
         const val VIP_PRO_FALLBACK_PRICE_LABEL = "$29.99/mo"
-        const val ELITE_PRO_SUBSCRIPTION_PRODUCT_ID = "voxstage_elite_pro_monthly"
-        const val ELITE_PRO_FALLBACK_PRICE_LABEL = "$59.99/mo"
+        const val BUSINESS_SUBSCRIPTION_PRODUCT_ID = "voxstage_business_monthly"
+        const val BUSINESS_FALLBACK_PRICE_LABEL = "$99.99/mo"
 
         val ALL_SUBSCRIPTION_PRODUCT_IDS: Set<String> = setOf(
             PRO_SUBSCRIPTION_PRODUCT_ID,
             VIP_PRO_SUBSCRIPTION_PRODUCT_ID,
-            ELITE_PRO_SUBSCRIPTION_PRODUCT_ID
+            BUSINESS_SUBSCRIPTION_PRODUCT_ID
         )
 
         val POINTS_CATALOG: List<PointsProductSku> = listOf(
@@ -208,7 +208,7 @@ class PlayBillingManager(
             Log.w(TAG, "queryProductDetails failed: ${result.billingResult.responseCode} ${result.billingResult.debugMessage}")
         }
 
-        // Query VOX Pro ($9.99/mo), VIP Pro ($29.99/mo), and Elite Pro ($59.99/mo) Subscriptions
+        // Query VOX Pro ($9.99/mo), VIP Pro ($29.99/mo), and Business Account ($99.99/mo) Subscriptions
         val subsProducts = ALL_SUBSCRIPTION_PRODUCT_IDS.map { skuId ->
             QueryProductDetailsParams.Product.newBuilder()
                 .setProductId(skuId)

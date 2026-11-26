@@ -148,29 +148,36 @@ fun PurchaseDmBannerDialog(
     pointsBalance: Long,
     isSending: Boolean,
     existingBannerText: String,
+    isStaffFreePerks: Boolean = false,
+    isGroup: Boolean = false,
     onBuyBanner: (text: String, colorHex: String) -> Unit,
     onGoBuyPoints: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var bannerDraft by remember { mutableStateOf(existingBannerText) }
     var selectedColor by remember { mutableStateOf(DmBannerColor.ELECTRIC_CYAN) }
-    val hasEnoughPoints = pointsBalance >= 1L
+    val hasEnoughPoints = isStaffFreePerks || pointsBalance >= 1L
+    val chatTargetLabel = if (isGroup) "this Group DM" else "this chat"
 
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
             Icon(
                 imageVector = Icons.Rounded.Campaign,
-                contentDescription = "DM Scrolling Banner",
+                contentDescription = if (isGroup) "Group DM Scrolling Banner" else "DM Scrolling Banner",
                 tint = parseAccentHex(selectedColor.hex, SnapBlue),
                 modifier = Modifier.size(28.dp)
             )
         },
-        title = { Text("24-Hour Scrolling DM Banner") },
+        title = { Text(if (isGroup) "24-Hour Group DM Scrolling Banner" else "24-Hour Scrolling DM Banner") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    text = "Pin a glowing marquee banner near the top of this chat for 24 hours. Costs 1 point (Balance: $pointsBalance pts).",
+                    text = if (isStaffFreePerks) {
+                        "Pin a glowing scrolling marquee banner at the top of $chatTargetLabel for 24 hours. FREE Staff Perk (0 pts)."
+                    } else {
+                        "Pin a glowing scrolling marquee banner at the top of $chatTargetLabel for 24 hours. Costs 1 point (Balance: $pointsBalance pts)."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -260,7 +267,7 @@ fun PurchaseDmBannerDialog(
             ) {
                 Icon(Icons.Rounded.Stars, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Launch (1 pt)")
+                Text(if (isStaffFreePerks) "Launch (FREE Staff)" else "Launch (1 pt)")
             }
         },
         dismissButton = {
@@ -280,8 +287,10 @@ fun PriorityBreakInChirpDialog(
     recipientName: String,
     recipientOptedIn: Boolean,
     myThreadOptIn: Boolean,
+    myGlobalOptIn: Boolean = false,
     pointsBalance: Long,
     isSending: Boolean,
+    isStaffFreePerks: Boolean = false,
     onToggleMyThreadOptIn: (Boolean) -> Unit,
     onSendPriorityChirp: (message: String, pointsCost: Int) -> Unit,
     onGoBuyPoints: () -> Unit,
@@ -289,7 +298,7 @@ fun PriorityBreakInChirpDialog(
 ) {
     var selectedCost by remember { mutableIntStateOf(1) }
     var alertDraft by remember { mutableStateOf("") }
-    val hasEnoughPoints = pointsBalance >= selectedCost.toLong()
+    val hasEnoughPoints = isStaffFreePerks || pointsBalance >= selectedCost.toLong()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -431,7 +440,11 @@ fun PriorityBreakInChirpDialog(
                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                         )
                         Text(
-                            text = "Let them send you Priority Chirps in this chat",
+                            text = if (myGlobalOptIn) {
+                                "Global opt-in is also ON in Profile Settings (all close friends can reach you)"
+                            } else {
+                                "Let them send you Priority Chirps in this chat"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -460,7 +473,13 @@ fun PriorityBreakInChirpDialog(
                 ),
                 modifier = Modifier.testTag("confirm_send_priority_chirp_button")
             ) {
-                Text("Send (${selectedCost} pt${if (selectedCost == 1) "" else "s"})")
+                Text(
+                    if (isStaffFreePerks) {
+                        "Send (FREE Staff)"
+                    } else {
+                        "Send (${selectedCost} pt${if (selectedCost == 1) "" else "s"})"
+                    }
+                )
             }
         },
         dismissButton = {
@@ -623,4 +642,170 @@ fun PriorityChirpMessageCard(
             }
         }
     }
+}
+
+/**
+ * High-visibility urgent alert card rendered inside Group DM chat history when a Group DM Admin
+ * sends an Urgent Group Alert to everyone's phone.
+ */
+@Composable
+fun GroupUrgentAlertMessageCard(
+    message: DirectMessage,
+    modifier: Modifier = Modifier
+) {
+    val lines = message.text.split("\n", limit = 2)
+    val alertTitle = lines.firstOrNull()?.trim().orEmpty().ifBlank { "Urgent Group Alert" }
+    val alertBody = if (lines.size > 1) lines[1].trim() else alertTitle
+    val showSeparateTitle = lines.size > 1 && alertTitle.isNotBlank()
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = LiveCoral.copy(alpha = 0.16f),
+        border = BorderStroke(1.5.dp, LiveCoral),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("group_urgent_alert_message_${message.id}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(LiveCoral),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.NotificationsActive,
+                    contentDescription = "Urgent Group Alert",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = "🚨 URGENT GROUP ALERT · ${message.senderName.uppercase()}",
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                    color = LiveCoral
+                )
+                if (showSeparateTitle) {
+                    Text(
+                        text = alertTitle,
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Text(
+                    text = alertBody,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Dialog for a Group DM Administrator (or VOX Staff) to broadcast an Urgent Group Alert
+ * with high-priority phone notifications (sound + vibration) to every member in the Group DM.
+ */
+@Composable
+fun SendGroupUrgentAlertDialog(
+    groupTitle: String,
+    recipientCount: Int,
+    isSending: Boolean,
+    onSendAlert: (title: String, message: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var titleDraft by remember { mutableStateOf("Urgent Group Alert") }
+    var messageDraft by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = { if (!isSending) onDismiss() },
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.NotificationsActive,
+                contentDescription = "Send Urgent Group Alert",
+                tint = LiveCoral,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "Send Urgent Group Alert",
+                fontWeight = FontWeight.ExtraBold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Sends a high-priority phone notification with sound & vibration to all $recipientCount member${if (recipientCount == 1) "" else "s"} in \"$groupTitle\" and posts an urgent alert banner in the chat.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = titleDraft,
+                    onValueChange = { titleDraft = it.take(80) },
+                    label = { Text("Alert Title") },
+                    placeholder = { Text("Urgent Group Alert") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("group_urgent_alert_title_input")
+                )
+
+                OutlinedTextField(
+                    value = messageDraft,
+                    onValueChange = { messageDraft = it.take(300) },
+                    label = { Text("Urgent Alert Message") },
+                    placeholder = { Text("e.g., Everyone jump on PTT right now — important update!") },
+                    supportingText = { Text("${messageDraft.length}/300 characters") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("group_urgent_alert_message_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val cleanMsg = messageDraft.trim()
+                    if (cleanMsg.isNotEmpty()) {
+                        onSendAlert(titleDraft.trim().ifBlank { "Urgent Group Alert" }, cleanMsg)
+                    }
+                },
+                enabled = !isSending && messageDraft.trim().isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = LiveCoral,
+                    contentColor = Color.White
+                ),
+                modifier = Modifier.testTag("confirm_send_group_urgent_alert_button")
+            ) {
+                Text(
+                    text = if (isSending) "Sending…" else "Send Alert to Phones",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isSending,
+                modifier = Modifier.testTag("cancel_send_group_urgent_alert_button")
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
 }

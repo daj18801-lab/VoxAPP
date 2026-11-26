@@ -19,11 +19,17 @@ import androidx.compose.material.icons.automirrored.rounded.Assignment
 import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.SupportAgent
 import androidx.compose.material.icons.rounded.TimerOff
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -31,10 +37,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -55,6 +67,7 @@ fun GroupDmAdminControlsSheet(
     thread: DirectThread,
     currentUserId: String,
     isGroupAdminOrAppAdmin: Boolean,
+    isAppStaff: Boolean = false,
     directoryByUid: Map<String, DirectoryEntry> = emptyMap(),
     canManageWorkOrders: Boolean = false,
     onDismiss: () -> Unit,
@@ -63,16 +76,31 @@ fun GroupDmAdminControlsSheet(
     onRemoveBounce: (userId: String, displayName: String) -> Unit,
     onBanUser: (userId: String, displayName: String) -> Unit,
     onUnbanUser: (userId: String, displayName: String) -> Unit,
+    onEditGroupName: (newName: String) -> Unit = {},
+    onRemoveMember: (userId: String, displayName: String) -> Unit = { _, _ -> },
+    onSetGroupDisabled: (disabled: Boolean, reason: String) -> Unit = { _, _ -> },
     onToggleSupportStaff: (userId: String, displayName: String, promote: Boolean) -> Unit = { _, _, _ -> },
     onToggleSupervisor: (userId: String, displayName: String, makeSupervisor: Boolean) -> Unit = { _, _, _ -> },
     onSendWorkOrderClick: (userId: String, displayName: String) -> Unit = { _, _ -> },
-    onTogglePttAllowed: (userId: String, displayName: String, allowed: Boolean) -> Unit = { _, _, _ -> }
+    onTogglePttAllowed: (userId: String, displayName: String, allowed: Boolean) -> Unit = { _, _, _ -> },
+    onToggleAnonymousModeDisabled: (disabled: Boolean) -> Unit = {},
+    onOpenSendGroupAlert: () -> Unit = {}
 ) {
     val nowMs = rememberPresenceClockMillis()
     val adminUid = thread.effectiveGroupAdminId()
     val requiresPttSelection = thread.requiresAdminPttSelection()
+    val canFullModerate = isGroupAdminOrAppAdmin || isAppStaff
+    var groupNameDraft by remember(thread.id, thread.groupName) { mutableStateOf(thread.groupName) }
+    var disableReasonDraft by remember(thread.id, thread.groupDisabledReason) {
+        mutableStateOf(thread.groupDisabledReason)
+    }
     val manageableMembers = thread.participantIds.filter { memberUid ->
-        if (memberUid == currentUserId || memberUid == adminUid) {
+        if (memberUid == currentUserId) {
+            false
+        } else if (isAppStaff) {
+            // App Admin & Support Staff can moderate any member in the Group DM
+            true
+        } else if (memberUid == adminUid) {
             false
         } else if (!isGroupAdminOrAppAdmin && thread.isGroupSupport(memberUid)) {
             // Group DM Support Staff can only moderate regular members, not other Support Staff
@@ -99,25 +127,246 @@ fun GroupDmAdminControlsSheet(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Icon(
-                    imageVector = if (isGroupAdminOrAppAdmin) Icons.Rounded.AdminPanelSettings else Icons.Rounded.SupportAgent,
-                    contentDescription = if (isGroupAdminOrAppAdmin) "Group DM Administrator" else "Group DM Support Staff",
-                    tint = if (isGroupAdminOrAppAdmin) VoiceCyan else SafetyEmerald
+                    imageVector = if (canFullModerate) Icons.Rounded.AdminPanelSettings else Icons.Rounded.SupportAgent,
+                    contentDescription = if (isAppStaff) "VOX Staff Group Controls" else if (isGroupAdminOrAppAdmin) "Group DM Administrator" else "Group DM Support Staff",
+                    tint = if (isAppStaff) LiveCoral else if (isGroupAdminOrAppAdmin) VoiceCyan else SafetyEmerald
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = if (isGroupAdminOrAppAdmin) "Group DM Admin Controls" else "Group DM Support Controls",
+                        text = when {
+                            isAppStaff -> "VOX Staff Group DM Controls"
+                            isGroupAdminOrAppAdmin -> "Group DM Admin Controls"
+                            else -> "Group DM Support Controls"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = if (isGroupAdminOrAppAdmin) {
-                            "Mute, bounce (24h), ban, appoint Support Staff, or manage PTT speakers."
-                        } else {
-                            "Group DM Support Staff can mute or bounce (24h) regular members."
+                        text = when {
+                            isAppStaff -> "Edit group name, mute, remove or ban members, or disable this Group DM for violations."
+                            isGroupAdminOrAppAdmin -> "Mute, bounce (24h), ban, appoint Support Staff, or manage PTT speakers."
+                            else -> "Group DM Support Staff can mute or bounce (24h) regular members."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+
+            if (canFullModerate) {
+                // Urgent Group Alert — Sends high-priority phone notification to every member
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = LiveCoral.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.NotificationsActive,
+                                contentDescription = "Urgent Group Alert",
+                                tint = LiveCoral,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "Urgent Group Alert (All Phones)",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.ExtraBold),
+                                color = LiveCoral
+                            )
+                        }
+                        Text(
+                            text = "Send a high-priority urgent alert message that pushes a loud phone notification with vibration to everyone in this Group DM.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Button(
+                            onClick = {
+                                onDismiss()
+                                onOpenSendGroupAlert()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = LiveCoral,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("group_dm_admin_send_alert_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.NotificationsActive,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Send Urgent Alert to Group", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                // Disable Anonymous Mode ("Hide Name") Toggle Card
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (thread.anonymousModeDisabled) ModAmber.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(
+                        1.dp,
+                        if (thread.anonymousModeDisabled) ModAmber else MaterialTheme.colorScheme.outlineVariant
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (thread.anonymousModeDisabled) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
+                            contentDescription = "Anonymous Mode setting",
+                            tint = if (thread.anonymousModeDisabled) ModAmber else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Disable Anonymous Mode",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (thread.anonymousModeDisabled) {
+                                    "ON — Members cannot hide their name or send anonymous messages."
+                                } else {
+                                    "OFF — Members can toggle Hide Name to send anonymous messages."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = thread.anonymousModeDisabled,
+                            onCheckedChange = { disableAnon ->
+                                onToggleAnonymousModeDisabled(disableAnon)
+                            },
+                            modifier = Modifier.testTag("group_dm_disable_anonymous_switch")
+                        )
+                    }
+                }
+            }
+
+            if (isAppStaff) {
+                // Edit Group Name Card
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, VoiceCyan.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Edit Group DM Name",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = VoiceCyan
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = groupNameDraft,
+                                onValueChange = { groupNameDraft = it.take(60) },
+                                placeholder = { Text("Group DM name…") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("staff_edit_group_name_input")
+                            )
+                            Button(
+                                onClick = {
+                                    val clean = groupNameDraft.trim()
+                                    if (clean.isNotEmpty()) {
+                                        onEditGroupName(clean)
+                                    }
+                                },
+                                enabled = groupNameDraft.trim().isNotEmpty() && groupNameDraft.trim() != thread.groupName,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                                modifier = Modifier.testTag("staff_save_group_name_button")
+                            ) {
+                                Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Save")
+                            }
+                        }
+                    }
+                }
+
+                // Disable / Re-enable Group DM Card
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (thread.groupDisabled) LiveCoral.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, if (thread.groupDisabled) LiveCoral else LiveCoral.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = if (thread.groupDisabled) "Group DM Currently DISABLED" else "Disable Group DM (Violations)",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = LiveCoral
+                        )
+                        Text(
+                            text = if (thread.groupDisabled) {
+                                "Members cannot send messages or PTT. Disabled by ${thread.groupDisabledByName.ifBlank { "VOX Staff" }}."
+                            } else {
+                                "Disabling locks messaging and PTT for all members in this Group DM if policy violations occurred."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (!thread.groupDisabled) {
+                            OutlinedTextField(
+                                value = disableReasonDraft,
+                                onValueChange = { disableReasonDraft = it.take(240) },
+                                label = { Text("Violation Reason") },
+                                placeholder = { Text("e.g., Harassment, spam, or policy violation…") },
+                                maxLines = 2,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("staff_disable_group_reason_input")
+                            )
+                        }
+                        Button(
+                            onClick = {
+                                onSetGroupDisabled(!thread.groupDisabled, disableReasonDraft.trim())
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (thread.groupDisabled) SafetyEmerald else LiveCoral,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("staff_toggle_group_disabled_button")
+                        ) {
+                            Icon(Icons.Rounded.Block, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = if (thread.groupDisabled) "Re-enable Group DM" else "Disable Group DM",
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
 
@@ -269,7 +518,7 @@ fun GroupDmAdminControlsSheet(
                                     Text(if (isBounced) "Unbounce" else "Bounce", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
 
-                                if (isGroupAdminOrAppAdmin) {
+                                if (canFullModerate) {
                                     OutlinedButton(
                                         onClick = {
                                             if (isBanned) onUnbanUser(memberUid, name)
@@ -290,6 +539,28 @@ fun GroupDmAdminControlsSheet(
                                         Spacer(Modifier.width(4.dp))
                                         Text(if (isBanned) "Unban" else "Ban", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
+                                }
+                            }
+
+                            if (isAppStaff && (thread.companyOwnerId.isBlank() || memberUid != thread.companyOwnerId)) {
+                                OutlinedButton(
+                                    onClick = { onRemoveMember(memberUid, name) },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.6f)),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = LiveCoral),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("group_dm_remove_$memberUid"),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PersonRemove,
+                                        contentDescription = "Remove $name from Group DM",
+                                        tint = LiveCoral,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Remove Member from Group DM", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
 
@@ -473,7 +744,7 @@ fun GroupDmAdminControlsSheet(
                 }
             }
 
-            if (isGroupAdminOrAppAdmin && thread.bannedUserIds.isNotEmpty()) {
+            if (canFullModerate && thread.bannedUserIds.isNotEmpty()) {
                 HorizontalDivider()
                 Text(
                     text = "Banned From Group DM (${thread.bannedUserIds.size})",

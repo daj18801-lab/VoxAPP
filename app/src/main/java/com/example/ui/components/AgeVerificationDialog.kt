@@ -168,7 +168,7 @@ fun AgeVerificationDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "Verify you are 18+ using your Google Account birthday or Google Play Age Signals to lock or view locked photos.",
+                    text = "Verify you are 18+ using your Google Account birthday or Google Play Age Signals for age-restricted features.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

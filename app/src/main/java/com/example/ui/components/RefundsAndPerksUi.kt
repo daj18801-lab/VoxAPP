@@ -18,11 +18,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CardGiftcard
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CurrencyExchange
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.MarkEmailRead
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -134,13 +139,16 @@ fun AdminNotificationsCard(
 
             if (notifications.isEmpty()) {
                 Text(
-                    text = "Support refund reports and Support 30-perk (5-day) threshold alerts will appear here.",
+                    text = "Support refund reports and 5-day Support Staff alerts (5+ Pro packages, >50 points, or 30+ perks) will appear here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
-                notifications.take(8).forEach { notif ->
-                    val isPerkAlert = notif.typeEnum() == AdminNotificationType.SUPPORT_PERK_THRESHOLD_30_IN_5D
+                notifications.take(10).forEach { notif ->
+                    val notifType = notif.typeEnum()
+                    val isPerkAlert = notifType == AdminNotificationType.SUPPORT_PERK_THRESHOLD_30_IN_5D ||
+                        notifType == AdminNotificationType.SUPPORT_PRO_PACKAGES_5_IN_5D ||
+                        notifType == AdminNotificationType.SUPPORT_POINTS_50_IN_5D
                     val accent = if (isPerkAlert) LiveCoral else ModAmber
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
@@ -414,16 +422,41 @@ fun AppPerkGrantsSection(
     modifier: Modifier = Modifier
 ) {
     val nowMs = rememberPresenceClockMillis()
-    val support5dCount = remember(perkGrants, nowMs) {
-        val cutoff = nowMs - PerkGrant.SUPPORT_ALERT_WINDOW_MS
-        perkGrants.count { grant ->
+    val cutoff = nowMs - PerkGrant.SUPPORT_ALERT_WINDOW_MS
+    val supportUserGrants5d = remember(perkGrants, cutoff) {
+        perkGrants.filter { grant ->
             grant.grantedByTierEnum() == StaffTier.SUPPORT &&
-                (grant.createdAtMillis >= cutoff ||
-                    (grant.createdAt?.toDate()?.time ?: 0L) >= cutoff)
+                !grant.isSelfPerkUsage() &&
+                grant.effectiveTimestampMillis() >= cutoff
         }
     }
+    val support5dCount = supportUserGrants5d.size
+    val support5dProPackages = remember(supportUserGrants5d) {
+        supportUserGrants5d.count { it.perkTypeEnum().isProPackage() }
+    }
+    val support5dPoints = remember(supportUserGrants5d) {
+        supportUserGrants5d
+            .filter { it.perkTypeEnum() == AppPerkType.BONUS_POINTS }
+            .sumOf { it.effectivePointsAmount() }
+    }
+    val maxSingleStaffPro5d = remember(supportUserGrants5d) {
+        supportUserGrants5d
+            .filter { it.perkTypeEnum().isProPackage() }
+            .groupBy { it.grantedById }
+            .values
+            .maxOfOrNull { it.size } ?: 0
+    }
+    val maxSingleStaffPoints5d = remember(supportUserGrants5d) {
+        supportUserGrants5d
+            .filter { it.perkTypeEnum() == AppPerkType.BONUS_POINTS }
+            .groupBy { it.grantedById }
+            .values
+            .maxOfOrNull { list -> list.sumOf { it.effectivePointsAmount() } } ?: 0L
+    }
     val progress = (support5dCount.toFloat() / PerkGrant.SUPPORT_ALERT_THRESHOLD.toFloat()).coerceIn(0f, 1f)
-    val thresholdReached = support5dCount >= PerkGrant.SUPPORT_ALERT_THRESHOLD
+    val proAlertReached = maxSingleStaffPro5d >= PerkGrant.SUPPORT_PRO_PACKAGE_THRESHOLD
+    val pointsAlertReached = maxSingleStaffPoints5d > PerkGrant.SUPPORT_POINTS_THRESHOLD
+    val thresholdReached = support5dCount >= PerkGrant.SUPPORT_ALERT_THRESHOLD || proAlertReached || pointsAlertReached
 
     Card(
         modifier = modifier
@@ -451,19 +484,19 @@ fun AppPerkGrantsSection(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Grant App Perks",
+                        text = "Grant Pro Packages, Points & Perks",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "App Admins & Support Staff can grant any VOX perk to a user.",
+                        text = "Support Staff get all VOX perks free of charge (logged under their profile) and can gift Pro packages or add points to users.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            // Live Support 5-day perk counter (alert at 30 perks in 5 days)
+            // Live Support 5-day perk & abuse monitors
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -475,15 +508,60 @@ fun AppPerkGrantsSection(
             ) {
                 Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (proAlertReached) LiveCoral.copy(alpha = 0.14f) else VoiceCyan.copy(alpha = 0.10f)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                Text(
+                                    text = "Pro Pkgs (5d)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "$support5dProPackages (alert ≥ ${PerkGrant.SUPPORT_PRO_PACKAGE_THRESHOLD})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (proAlertReached) LiveCoral else VoiceCyan
+                                )
+                            }
+                        }
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (pointsAlertReached) LiveCoral.copy(alpha = 0.14f) else ModAmber.copy(alpha = 0.12f)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                Text(
+                                    text = "Points Given (5d)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "$support5dPoints pts (alert > ${PerkGrant.SUPPORT_POINTS_THRESHOLD})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (pointsAlertReached) LiveCoral else ModAmber
+                                )
+                            }
+                        }
+                    }
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "Support 5-Day Perk Total",
+                            text = "Support 5-Day Total Grants",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -491,7 +569,7 @@ fun AppPerkGrantsSection(
                             text = "$support5dCount / ${PerkGrant.SUPPORT_ALERT_THRESHOLD}",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
-                            color = if (thresholdReached) LiveCoral else VoiceCyan
+                            color = if (support5dCount >= PerkGrant.SUPPORT_ALERT_THRESHOLD) LiveCoral else VoiceCyan
                         )
                     }
                     LinearProgressIndicator(
@@ -505,9 +583,9 @@ fun AppPerkGrantsSection(
                     )
                     Text(
                         text = if (thresholdReached) {
-                            "Alert triggered: Support Staff reached $support5dCount perks in 5 days. App Admins have been notified."
+                            "Admin Alert Triggered: A Support Staff member exceeded a 5-day grant limit (5 Pro packages, >50 points, or 30 total perks). Check Admin Alerts or Staff Logs."
                         } else {
-                            "App Admins are automatically notified if Support Staff grant 30 perks in total within 5 days."
+                            "App Admins are automatically notified if a Support Staff member gives 5+ Pro packages or >50 points within 5 days. Abuse results in Support Staff removal."
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (thresholdReached) LiveCoral else MaterialTheme.colorScheme.onSurfaceVariant
@@ -524,26 +602,30 @@ fun AppPerkGrantsSection(
             ) {
                 Icon(
                     imageVector = Icons.Rounded.CardGiftcard,
-                    contentDescription = "Grant App Perk",
+                    contentDescription = "Grant Pro Package, Points or Perk",
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(Modifier.width(8.dp))
-                Text("Grant Any App Perk", fontWeight = FontWeight.Bold)
+                Text("Give Pro Package, Points or Perk", fontWeight = FontWeight.Bold)
             }
 
             if (perkGrants.isNotEmpty()) {
                 HorizontalDivider()
                 Text(
-                    text = "Recent Perk Grants (${perkGrants.size})",
+                    text = "Recent Perk & Usage Log (${perkGrants.size})",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold
                 )
-                perkGrants.take(8).forEach { grant ->
+                perkGrants.take(10).forEach { grant ->
+                    val isSelfUsage = grant.isSelfPerkUsage()
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        border = BorderStroke(
+                            1.dp,
+                            if (isSelfUsage) VoiceCyan.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outlineVariant
+                        )
                     ) {
                         Column(
                             modifier = Modifier.padding(10.dp),
@@ -554,13 +636,29 @@ fun AppPerkGrantsSection(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Text(
-                                    text = "${grant.perkLabel} → ${grant.targetName}",
+                                    text = if (isSelfUsage) {
+                                        "${grant.perkLabel} (Self Perk)"
+                                    } else {
+                                        "${grant.perkLabel} → ${grant.targetName}"
+                                    },
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.weight(1f),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = if (isSelfUsage) VoiceCyan.copy(alpha = 0.14f) else SafetyEmerald.copy(alpha = 0.14f)
+                                ) {
+                                    Text(
+                                        text = if (isSelfUsage) "SELF PERK" else "GRANTED",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelfUsage) VoiceCyan else SafetyEmerald,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
                                 StaffTierBadge(tier = grant.grantedByTierEnum())
                             }
                             if (grant.perkDetail.isNotBlank()) {
@@ -992,7 +1090,7 @@ fun GrantAppPerkDialog(
 
                 Text("2. Select Perk", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AppPerkType.entries.forEach { perk ->
+                    AppPerkType.entries.filter { it.isGrantableToUsers() }.forEach { perk ->
                         val picked = selectedPerk == perk
                         Surface(
                             modifier = Modifier
@@ -1133,4 +1231,334 @@ fun GrantAppPerkDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+@Composable
+fun SupportStaffPerkAuditSection(
+    staffUserId: String,
+    staffDisplayName: String,
+    perkGrants: List<PerkGrant>,
+    isAdmin: Boolean,
+    onRemoveSupportStaff: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val nowMs = rememberPresenceClockMillis()
+    val cutoff = nowMs - PerkGrant.SUPPORT_ALERT_WINDOW_MS
+    val staffLogs = remember(perkGrants, staffUserId) {
+        perkGrants.filter { it.grantedById == staffUserId }
+    }
+    val selfPerkCount = remember(staffLogs) { staffLogs.count { it.isSelfPerkUsage() } }
+    val userGrants5d = remember(staffLogs, cutoff) {
+        staffLogs.filter { !it.isSelfPerkUsage() && it.effectiveTimestampMillis() >= cutoff }
+    }
+    val proPackages5d = remember(userGrants5d) {
+        userGrants5d.count { it.perkTypeEnum().isProPackage() }
+    }
+    val pointsGiven5d = remember(userGrants5d) {
+        userGrants5d
+            .filter { it.perkTypeEnum() == AppPerkType.BONUS_POINTS }
+            .sumOf { it.effectivePointsAmount() }
+    }
+    val proOverLimit = proPackages5d >= PerkGrant.SUPPORT_PRO_PACKAGE_THRESHOLD
+    val pointsOverLimit = pointsGiven5d > PerkGrant.SUPPORT_POINTS_THRESHOLD
+    val anyAbuseFlag = proOverLimit || pointsOverLimit
+
+    var expanded by remember(staffUserId) { mutableStateOf(false) }
+    var showConfirmRemoveDialog by remember(staffUserId) { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (anyAbuseFlag) LiveCoral.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(
+            1.dp,
+            if (anyAbuseFlag) LiveCoral.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant
+        ),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("support_perk_audit_$staffUserId")
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.AutoAwesome,
+                    contentDescription = "Free Support Staff Perks",
+                    tint = if (anyAbuseFlag) LiveCoral else VoiceCyan,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "Free Staff Perks Active · Usage & Grant Log",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (anyAbuseFlag) LiveCoral else MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    color = VoiceCyan.copy(alpha = 0.12f)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
+                        Text(
+                            text = "Self Perks",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "$selfPerkCount used",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = VoiceCyan
+                        )
+                    }
+                }
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (proOverLimit) LiveCoral.copy(alpha = 0.16f) else SafetyEmerald.copy(alpha = 0.12f)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
+                        Text(
+                            text = "5d Pro Pkgs",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "$proPackages5d / ${PerkGrant.SUPPORT_PRO_PACKAGE_THRESHOLD}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (proOverLimit) LiveCoral else SafetyEmerald
+                        )
+                    }
+                }
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (pointsOverLimit) LiveCoral.copy(alpha = 0.16f) else ModAmber.copy(alpha = 0.14f)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
+                        Text(
+                            text = "5d Points",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "$pointsGiven5d / ${PerkGrant.SUPPORT_POINTS_THRESHOLD}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (pointsOverLimit) LiveCoral else ModAmber
+                        )
+                    }
+                }
+            }
+
+            if (anyAbuseFlag) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.WarningAmber,
+                        contentDescription = "Threshold Exceeded",
+                        tint = LiveCoral,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = buildString {
+                            append("5-day limit alert: ")
+                            if (proOverLimit) append("$proPackages5d Pro packages given")
+                            if (proOverLimit && pointsOverLimit) append(" · ")
+                            if (pointsOverLimit) append("$pointsGiven5d pts given")
+                            append(". Remove support role if abused.")
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LiveCoral,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = { expanded = !expanded },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("perk_audit_toggle_$staffUserId"),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.History,
+                        contentDescription = "Toggle perk log",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = if (expanded) "Hide Log (${staffLogs.size})" else "Perk Log (${staffLogs.size})",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+
+                if (isAdmin) {
+                    OutlinedButton(
+                        onClick = { showConfirmRemoveDialog = true },
+                        modifier = Modifier.testTag("remove_support_abuse_$staffUserId"),
+                        border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.65f)),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PersonRemove,
+                            contentDescription = "Remove Support Staff",
+                            tint = LiveCoral,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "Revoke Support",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = LiveCoral,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            if (expanded) {
+                HorizontalDivider()
+                if (staffLogs.isEmpty()) {
+                    Text(
+                        text = "No app perks used or granted by $staffDisplayName yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        staffLogs.take(25).forEach { entry ->
+                            val isSelf = entry.isSelfPerkUsage()
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = if (isSelf) {
+                                                entry.perkLabel
+                                            } else {
+                                                "${entry.perkLabel} → ${entry.targetName}"
+                                            },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.weight(1f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = if (isSelf) VoiceCyan.copy(alpha = 0.14f) else ModAmber.copy(alpha = 0.16f)
+                                        ) {
+                                            Text(
+                                                text = if (isSelf) "SELF FREE" else "GIFTED",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isSelf) VoiceCyan else ModAmber,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                    if (entry.perkDetail.isNotBlank()) {
+                                        Text(
+                                            text = entry.perkDetail,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = entry.reason.ifBlank {
+                                                if (isSelf) "Free Support Staff perk" else "Granted to user"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.weight(1f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = formatTimestampShort(entry.createdAt),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showConfirmRemoveDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmRemoveDialog = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.PersonRemove,
+                    contentDescription = null,
+                    tint = LiveCoral
+                )
+            },
+            title = { Text("Remove Support Staff?") },
+            text = {
+                Text(
+                    "Revoke Support Staff status from $staffDisplayName? They will immediately lose all free app perks, moderation tools, and the ability to grant Pro packages or points."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showConfirmRemoveDialog = false
+                        onRemoveSupportStaff()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = LiveCoral, contentColor = Color.White),
+                    modifier = Modifier.testTag("confirm_revoke_support_$staffUserId")
+                ) {
+                    Text("Remove Support Staff")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmRemoveDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }

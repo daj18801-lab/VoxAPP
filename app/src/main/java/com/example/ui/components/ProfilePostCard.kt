@@ -88,6 +88,7 @@ fun ProfilePostCard(
     onBoostPost: (() -> Unit)? = null,
     onOpenComments: (() -> Unit)? = null,
     onSharePost: (() -> Unit)? = null,
+    isStaffFreePerks: Boolean = false,
     onToggleLike: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
@@ -96,9 +97,7 @@ fun ProfilePostCard(
     val liked = post.isLikedBy(currentUserId)
     val isBoosted = post.isCurrentlyBoosted()
     val effectiveAvatarPhoto = latestAuthorPhotoBase64?.ifBlank { post.authorPhotoBase64 } ?: post.authorPhotoBase64
-    val showLockedPaywall = post.locked && post.imageBase64.isNotBlank() && (!isUnlocked || !viewerIsAdultVerified)
-    val postImageBitmap = if (showLockedPaywall) null else rememberBase64ImageBitmap(post.imageBase64)
-    val blurredBitmap = if (showLockedPaywall) rememberBlurredBase64ImageBitmap(post.imageBase64) else null
+    val postImageBitmap = rememberBase64ImageBitmap(post.imageBase64)
     var showFullPhoto by remember { mutableStateOf(false) }
 
     Surface(
@@ -244,146 +243,8 @@ fun ProfilePostCard(
                 )
             }
 
-            // Locked Photo Paywall OR Unlocked Photo
-            if (showLockedPaywall) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(250.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0xFF0E1B33))
-                        .testTag("locked_post_photo_${post.id}"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (blurredBitmap != null) {
-                        Image(
-                            bitmap = blurredBitmap,
-                            contentDescription = "Locked photo preview",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color(0xA6081224))
-                    )
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(18.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
-                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
-                            modifier = Modifier.size(46.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Lock,
-                                    contentDescription = "Locked photo",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        }
-                        Text(
-                            text = if (!viewerIsAdultVerified) "18+ Locked Photo" else "Locked Photo",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                        if (!viewerIsAdultVerified) {
-                            Text(
-                                text = "You must verify that you are 18 or older to view or unlock locked photos.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.88f),
-                                textAlign = TextAlign.Center
-                            )
-                            if (onRequestAgeVerification != null) {
-                                Button(
-                                    onClick = onRequestAgeVerification,
-                                    shape = RoundedCornerShape(999.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = ModAmber,
-                                        contentColor = Color.Black
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
-                                    modifier = Modifier.testTag("verify_age_from_post_${post.id}")
-                                ) {
-                                    Text(
-                                        text = "Verify Age (18+)",
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.ExtraBold)
-                                    )
-                                }
-                            }
-                        } else {
-                            Text(
-                                text = "Unlock for 2 pts (\$2) or subscribe for \$15/mo to view all locked photos from ${post.authorName}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.88f),
-                                textAlign = TextAlign.Center
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
-                            ) {
-                                if (onUnlockPost != null) {
-                                    Button(
-                                        onClick = onUnlockPost,
-                                        enabled = !isProcessingUnlock,
-                                        shape = RoundedCornerShape(999.dp),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = MaterialTheme.colorScheme.primary,
-                                            contentColor = Color.White
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                                        modifier = Modifier.testTag("unlock_photo_button_${post.id}")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.LockOpen,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "Unlock · 2 pts (\$2)",
-                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                                        )
-                                    }
-                                }
-                                if (onSubscribeCreator != null) {
-                                    OutlinedButton(
-                                        onClick = onSubscribeCreator,
-                                        enabled = !isProcessingUnlock,
-                                        shape = RoundedCornerShape(999.dp),
-                                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.7f)),
-                                        colors = ButtonDefaults.outlinedButtonColors(
-                                            containerColor = Color.White.copy(alpha = 0.14f),
-                                            contentColor = Color.White
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                                        modifier = Modifier.testTag("subscribe_creator_from_post_${post.id}")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.CardMembership,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(5.dp))
-                                        Text(
-                                            text = "Sub \$15/mo",
-                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if (postImageBitmap != null) {
+            // Public Photo Attachment (youth-friendly: no locked photo paywall)
+            if (postImageBitmap != null) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -399,38 +260,6 @@ fun ProfilePostCard(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    if (post.locked) {
-                        val isOwner = post.authorId == currentUserId
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = if (isOwner) ModAmber.copy(alpha = 0.92f) else SafetyEmerald.copy(alpha = 0.92f),
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(10.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isOwner) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                                Text(
-                                    text = if (isOwner) {
-                                        "Locked · 2 pts (${post.unlockedByUserIds.size} unlocked)"
-                                    } else {
-                                        "Unlocked"
-                                    },
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = Color.White
-                                )
-                            }
-                        }
-                    }
                 }
             }
 
@@ -502,8 +331,8 @@ fun ProfilePostCard(
                     }
                 }
 
-                // Share Pill (STRICTLY ONLY FOR UNLOCKED POSTS — LOCKED PICTURES CANNOT BE SHARED)
-                if (post.isShareable() && onSharePost != null) {
+                // Share Pill
+                if (onSharePost != null) {
                     Surface(
                         shape = RoundedCornerShape(999.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
@@ -530,33 +359,9 @@ fun ProfilePostCard(
                             )
                         }
                     }
-                } else if (post.locked) {
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                        modifier = Modifier.testTag("locked_no_share_badge_${post.id}")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Lock,
-                                contentDescription = "Locked photos cannot be shared",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Text(
-                                text = "No Share",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
                 }
 
-                // Boost to Top of Discovery Pill (Author only · 5 pts / $5)
+                // Boost to Top of Discovery Pill (Author only · 5 pts / FREE for Staff)
                 if (post.authorId == currentUserId && onBoostPost != null) {
                     Surface(
                         shape = RoundedCornerShape(999.dp),
@@ -574,12 +379,17 @@ fun ProfilePostCard(
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.RocketLaunch,
-                                contentDescription = "Boost to top of Discovery for 5 points",
+                                contentDescription = "Boost to top of Discovery",
                                 tint = ModAmber,
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = if (isBoosted) "Re-boost · 5 pts (\$5)" else "Boost to Top · 5 pts (\$5)",
+                                text = when {
+                                    isStaffFreePerks && isBoosted -> "Re-boost · FREE (Staff)"
+                                    isStaffFreePerks -> "Boost to Top · FREE (Staff)"
+                                    isBoosted -> "Re-boost · 5 pts (\$5)"
+                                    else -> "Boost to Top · 5 pts (\$5)"
+                                },
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                 color = ModAmber
                             )
@@ -587,18 +397,10 @@ fun ProfilePostCard(
                     }
                 }
             }
-
-            if (post.locked && post.authorId == currentUserId) {
-                Text(
-                    text = "Locked photo · Earns \$1 per 2-pt unlock · Sharing disabled",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
         }
     }
 
-    if (showFullPhoto && post.imageBase64.isNotBlank() && !showLockedPaywall) {
+    if (showFullPhoto && post.imageBase64.isNotBlank()) {
         FullScreenPhotoDialog(
             photoBase64 = post.imageBase64,
             contentDescription = "Full photo by ${post.authorName}",

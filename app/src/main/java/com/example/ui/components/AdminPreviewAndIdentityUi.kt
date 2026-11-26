@@ -55,6 +55,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.rounded.DragIndicator
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
 import com.example.data.AdminPreviewMode
 import com.example.data.StaffTier
 import com.example.data.UserProfile
@@ -62,6 +70,7 @@ import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.VoiceCyan
+import kotlin.math.roundToInt
 
 private val ADMIN_DISGUISE_SWATCHES = listOf(
     "#FF3B30", // Crimson Red
@@ -81,15 +90,17 @@ private val ADMIN_DISGUISE_MEMBERSHIPS = listOf(
     "FREE" to "Free Member",
     "PRO" to "VOX Pro",
     "VIP_PRO" to "VIP Pro",
-    "ELITE_PRO" to "Elite Pro",
+    "BUSINESS" to "Business Account",
     "SUPPORT" to "Support Staff",
     "ADMIN" to "Admin"
 )
 
 /**
- * Persistent top banner shown ONLY to the real App Admin whenever Account Preview Mode
- * (Free / VOX Pro / VIP Pro / Elite Pro / Support Staff) OR Custom Identity Disguise is active.
- * Guarantees the Admin can always switch accounts or restore normal Admin view in 1 tap.
+ * Floating, draggable quick-switcher card anchored on the right side for the real App Admin
+ * whenever Account Preview Mode (Free / VOX Pro / VIP Pro / Support Staff)
+ * OR Custom Identity Disguise is active.
+ * Can be dragged anywhere on screen; if exited via the close button, logs the admin out
+ * and back in as Admin.
  */
 @Composable
 fun AdminPreviewFloatingBanner(
@@ -99,84 +110,143 @@ fun AdminPreviewFloatingBanner(
     customMembershipLabel: String,
     onSelectPreviewMode: (AdminPreviewMode) -> Unit,
     onResetIdentityDisguise: () -> Unit,
+    onExitAndReloginAsAdmin: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showQuickSwitcher by remember { mutableStateOf(false) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
+    var offsetY by remember { mutableFloatStateOf(0f) }
 
     Surface(
-        color = Color(0xFF1A1033),
-        shadowElevation = 6.dp,
-        border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.7f)),
+        shape = RoundedCornerShape(18.dp),
+        color = Color(0xF01A1033),
+        shadowElevation = 10.dp,
+        border = BorderStroke(1.5.dp, ModAmber.copy(alpha = 0.85f)),
         modifier = modifier
-            .fillMaxWidth()
             .statusBarsPadding()
-            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .padding(end = 8.dp)
+            .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    offsetX += dragAmount.x
+                    offsetY += dragAmount.y
+                }
+            }
+            .widthIn(min = 168.dp, max = 236.dp)
             .testTag("admin_preview_banner")
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Icon(
-                imageVector = Icons.Rounded.AdminPanelSettings,
-                contentDescription = "Admin sandbox active",
-                tint = ModAmber,
-                modifier = Modifier.size(18.dp)
-            )
-            Column(modifier = Modifier.weight(1f)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.DragIndicator,
+                    contentDescription = "Drag floating admin widget",
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(16.dp)
+                )
+                Icon(
+                    imageVector = Icons.Rounded.AdminPanelSettings,
+                    contentDescription = "Admin preview active",
+                    tint = ModAmber,
+                    modifier = Modifier.size(16.dp)
+                )
                 Text(
-                    text = buildString {
-                        if (previewMode.isPreviewActive()) {
-                            append("Viewing as: ${previewMode.label}")
-                        } else {
-                            append("Admin Identity Disguise Active")
-                        }
-                    },
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                    text = if (previewMode.isPreviewActive()) previewMode.shortLabel else "Disguise",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.ExtraBold),
                     color = Color.White,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
-                if (hasCustomDisguise) {
-                    Text(
-                        text = buildString {
-                            if (customDisplayName.isNotBlank()) append("Name: $customDisplayName")
-                            if (customMembershipLabel.isNotBlank()) {
-                                if (isNotEmpty()) append(" · ")
-                                append("Badge: $customMembershipLabel")
-                            }
-                        }.ifBlank { "Custom color active" },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = VoiceCyan,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                IconButton(
+                    onClick = { onExitAndReloginAsAdmin() },
+                    modifier = Modifier
+                        .size(28.dp)
+                        .testTag("admin_banner_exit_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Exit preview and re-login as Admin",
+                        tint = LiveCoral,
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
-            TextButton(
-                onClick = { showQuickSwitcher = true },
-                modifier = Modifier.testTag("admin_banner_switch_button")
-            ) {
-                Text("Switch", color = VoiceCyan, fontWeight = FontWeight.Bold)
-            }
-            TextButton(
-                onClick = {
-                    if (previewMode.isPreviewActive()) {
-                        onSelectPreviewMode(AdminPreviewMode.ADMIN)
-                    } else {
-                        onResetIdentityDisguise()
-                    }
-                },
-                modifier = Modifier.testTag("admin_banner_exit_button")
-            ) {
+
+            if (hasCustomDisguise) {
                 Text(
-                    text = if (previewMode.isPreviewActive()) "Exit" else "Reset",
-                    color = LiveCoral,
-                    fontWeight = FontWeight.Bold
+                    text = buildString {
+                        if (customDisplayName.isNotBlank()) append(customDisplayName)
+                        if (customMembershipLabel.isNotBlank()) {
+                            if (isNotEmpty()) append(" · ")
+                            append(customMembershipLabel)
+                        }
+                    }.ifBlank { "Custom color active" },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = VoiceCyan,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = VoiceCyan.copy(alpha = 0.18f),
+                    border = BorderStroke(1.dp, VoiceCyan.copy(alpha = 0.55f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { showQuickSwitcher = true }
+                        .testTag("admin_banner_switch_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SwapHoriz,
+                            contentDescription = "Switch account preview",
+                            tint = VoiceCyan,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Switch",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = VoiceCyan
+                        )
+                    }
+                }
+                if (previewMode.isPreviewActive()) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = ModAmber.copy(alpha = 0.2f),
+                        border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.6f)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onSelectPreviewMode(AdminPreviewMode.ADMIN) }
+                            .testTag("admin_banner_restore_admin_button")
+                    ) {
+                        Text(
+                            text = "Admin",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = ModAmber,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -188,7 +258,7 @@ fun AdminPreviewFloatingBanner(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Preview how each membership tier looks or test Support Staff moderation tools. Your real Admin account stays safely logged in.",
+                        text = "Drag the floating widget anywhere on screen. Closing it with X logs you out and right back in as Admin.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -260,7 +330,7 @@ fun AdminPreviewFloatingBanner(
 
 /**
  * Full Admin Sandbox Card shown in Profile Settings & Safety Center for the real App Admin:
- * 1) Account View Switcher (Admin, Support Staff, Free, VOX Pro, VIP Pro, Elite Pro)
+ * 1) Account View Switcher (Admin, Support Staff, Free, VOX Pro, VIP Pro)
  * 2) Custom Identity Disguise (any username, any hex color, any membership badge — toggle ON/OFF)
  */
 @OptIn(ExperimentalLayoutApi::class)
@@ -317,7 +387,7 @@ fun AdminSandboxControlCard(
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                     )
                     Text(
-                        text = "Test Free, VOX Pro, VIP Pro, Elite Pro, or Support Staff tools — or customize how your username appears.",
+                        text = "Test Free, VOX Pro, VIP Pro, or Support Staff tools — or customize how your username appears.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

@@ -28,12 +28,10 @@ class DirectMessageSyncWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        if (!DirectMessageNotificationPrefs.isDmNotificationsEnabled(applicationContext)) {
-            return Result.success()
-        }
         if (!DirectMessageNotificationHelper.hasNotificationPermission(applicationContext)) {
             return Result.success()
         }
+        val dmNotifsEnabled = DirectMessageNotificationPrefs.isDmNotificationsEnabled(applicationContext)
 
         val currentUid = try {
             Firebase.auth.currentUser?.uid
@@ -52,6 +50,23 @@ class DirectMessageSyncWorker(
             val baselineSeeded = DirectMessageNotificationPrefs.isBaselineSeeded(applicationContext, currentUid)
             for (doc in snapshot.documents) {
                 val thread = doc.toObject(DirectThread::class.java) ?: continue
+                if (thread.isGroup && thread.lastGroupAlertAtMillis > 0L && thread.lastGroupAlertSenderId != currentUid) {
+                    if (baselineSeeded) {
+                        DirectMessageNotificationHelper.notifyGroupUrgentAlertIfNew(
+                            context = applicationContext,
+                            thread = thread,
+                            currentUserId = currentUid
+                        )
+                    } else {
+                        DirectMessageNotificationPrefs.setLastGroupAlertMillis(
+                            context = applicationContext,
+                            uid = currentUid,
+                            threadId = thread.id,
+                            alertMillis = thread.lastGroupAlertAtMillis
+                        )
+                    }
+                }
+                if (!dmNotifsEnabled) continue
                 if (!thread.isUnreadFor(currentUid) ||
                     thread.lastMessageSenderId.isBlank() ||
                     thread.lastMessageSenderId == currentUid

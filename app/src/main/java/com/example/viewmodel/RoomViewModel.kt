@@ -26,8 +26,11 @@ import com.example.media.VoiceMeterEngine
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -79,6 +82,15 @@ class RoomViewModel(
 
     private val _slowModeCountdown = MutableStateFlow(0)
     val slowModeCountdown: StateFlow<Int> = _slowModeCountdown.asStateFlow()
+
+    /** True when the user entered this chat room while keeping Live PTT active (room audio muted). */
+    private val _isRoomAudioMutedForPtt = MutableStateFlow(false)
+    val isRoomAudioMutedForPtt: StateFlow<Boolean> = _isRoomAudioMutedForPtt.asStateFlow()
+
+    fun setRoomAudioMutedForPtt(muted: Boolean) {
+        _isRoomAudioMutedForPtt.value = muted
+        liveKitManager.setRemoteAudioMuted(muted)
+    }
 
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 12)
     val events: SharedFlow<String> = _events.asSharedFlow()
@@ -268,7 +280,9 @@ class RoomViewModel(
                     roomName = roomId,
                     participantIdentity = currentUserId,
                     participantName = profile.displayName.ifBlank { "Member" }
-                ).onFailure { lkErr ->
+                ).onSuccess {
+                    liveKitManager.setRemoteAudioMuted(_isRoomAudioMutedForPtt.value)
+                }.onFailure { lkErr ->
                     Log.w(TAG, "LiveKit connection failed", lkErr)
                     _events.tryEmit("Audio/video server error: ${lkErr.message}")
                 }
@@ -1082,6 +1096,14 @@ class RoomViewModel(
         stopHardwareCapture()
         liveKitManager.disconnect()
         slowModeJob?.cancel()
+        if (!isLeavingVoluntarily) {
+            isLeavingVoluntarily = true
+            val count = (roomState.value as? UiState.Success)?.data?.participantCount ?: 0L
+            val wasInv = _isCurrentlyInvisible.value
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                runCatching { repository.leaveRoom(roomId, count, wasInv) }
+            }
+        }
     }
 
     private companion object {

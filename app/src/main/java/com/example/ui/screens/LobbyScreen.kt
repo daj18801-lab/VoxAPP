@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Verified
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -106,6 +107,7 @@ import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
+import com.example.ui.theme.SnapBlue
 import com.example.ui.theme.VoiceCyan
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -165,9 +167,12 @@ fun LobbyScreen(
     val invisibleActive = staffCapabilities.effectiveCanEnterInvisible && (userProfile?.invisibleModePreferred == true)
 
     val activeState = if (showOnlyMyRooms) myRoomsState else publicRoomsState
-    val filteredRooms = remember(activeState, searchQuery, selectedCategory) {
+    val filteredRooms = remember(activeState, searchQuery, selectedCategory, staffCapabilities.isStaff) {
         val list = (activeState as? UiState.Success)?.data.orEmpty()
         list.filter { room ->
+            if (room.isOfficialVoxChatRoom() && room.hiddenFromLobby && !staffCapabilities.isStaff) {
+                return@filter false
+            }
             val matchesCategory = selectedCategory == null || room.categoryEnum() == selectedCategory
             val q = searchQuery.trim()
             val matchesQuery = q.isEmpty() ||
@@ -175,7 +180,7 @@ fun LobbyScreen(
                 room.topic.contains(q, ignoreCase = true) ||
                 room.hostName.contains(q, ignoreCase = true)
             matchesCategory && matchesQuery
-        }
+        }.sortedWith(compareByDescending<ChatRoom> { it.isOfficialVoxChatRoom() })
     }
 
     Box(
@@ -534,9 +539,12 @@ fun LobbyScreen(
             sheetState = sheetState,
             containerColor = MaterialTheme.colorScheme.surface
         ) {
+            val myPrivateRoomCap = userProfile?.maxPrivateRoomUsers(staffCapabilities.tier)
+                ?: ChatRoom.FREE_MAX_PRIVATE_USERS
             CreateRoomSheetContent(
                 isSubmitting = isCreatingRoom,
                 existingLiveRoomTitle = if (hasActiveRoomLimit) myLiveRoom?.displayTitle() else null,
+                myPrivateRoomCap = myPrivateRoomCap,
                 onCancel = { showCreateSheet = false },
                 onSubmit = { title, topic, category, coverKey, visibility, videoEnabled, autoModEnabled, autoModBlockMode, linksBlocked, slowModeSeconds, maxSpeakers, pinLocked, roomPinCode ->
                     onCreateRoom(
@@ -622,14 +630,16 @@ private fun LiveRoomCard(
     onCloseRoomClick: () -> Unit
 ) {
     val hostTier = room.hostTierEnum()
+    val isOfficial = room.isOfficialVoxChatRoom()
 
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(
-            width = 1.dp,
+            width = if (isOfficial) 1.4.dp else 1.dp,
             color = when {
                 isBouncedOut -> LiveCoral.copy(alpha = 0.55f)
+                isOfficial -> SnapBlue.copy(alpha = 0.65f)
                 isHost -> MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                 else -> MaterialTheme.colorScheme.outlineVariant
             }
@@ -651,7 +661,13 @@ private fun LiveRoomCard(
                 modifier = Modifier
                     .size(9.dp)
                     .clip(CircleShape)
-                    .background(if (isBouncedOut) LiveCoral else SafetyEmerald)
+                    .background(
+                        when {
+                            isBouncedOut -> LiveCoral
+                            isOfficial -> SnapBlue
+                            else -> SafetyEmerald
+                        }
+                    )
             )
 
             // Compact Room Info Column
@@ -665,12 +681,51 @@ private fun LiveRoomCard(
                 ) {
                     Text(
                         text = room.displayTitle(),
-                        style = MaterialTheme.typography.titleSmall,
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = if (isOfficial) FontWeight.ExtraBold else FontWeight.SemiBold
+                        ),
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
+                    if (isOfficial) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = SnapBlue.copy(alpha = 0.16f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Verified,
+                                    contentDescription = "Official VOX room",
+                                    tint = SnapBlue,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Text(
+                                    text = "OFFICIAL",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = SnapBlue
+                                )
+                            }
+                        }
+                    }
+                    if (room.hiddenFromLobby) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = ModAmber.copy(alpha = 0.18f)
+                        ) {
+                            Text(
+                                text = "HIDDEN",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = ModAmber,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                     if (room.videoEnabled) {
                         Icon(
                             imageVector = Icons.Rounded.Videocam,
@@ -784,15 +839,20 @@ private fun LiveRoomCard(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(15.dp)
                 )
+                val countText = if (room.visibilityEnum() == RoomVisibility.PRIVATE && room.maxPrivateUsers > 0L) {
+                    "${room.participantCount}/${room.maxPrivateUsers}"
+                } else {
+                    "${room.participantCount}"
+                }
                 Text(
-                    text = "${room.participantCount}",
+                    text = countText,
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurface
                 )
             }
 
             // Room Admin / App Admin compact controls or clean entry arrow
-            if (canManageRoom) {
+            if (canManageRoom && !isOfficial) {
                 IconButton(
                     onClick = onEditRoomClick,
                     modifier = Modifier
@@ -898,6 +958,7 @@ private fun EmptyRoomsCard(
 private fun CreateRoomSheetContent(
     isSubmitting: Boolean,
     existingLiveRoomTitle: String? = null,
+    myPrivateRoomCap: Int = ChatRoom.FREE_MAX_PRIVATE_USERS,
     onCancel: () -> Unit,
     onSubmit: (
         title: String,
@@ -1052,12 +1113,12 @@ private fun CreateRoomSheetContent(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = "Private Room Capacity by Membership",
+                        text = "Private Room Capacity (Your Limit: $myPrivateRoomCap users)",
                         style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "Free: 25 users · VOX Pro: 50 users · VIP Pro: 75 users · Elite Pro: 100 users",
+                        text = "Free: 25 users · Pro: 50 users · VIP: 75 users · Elite: 100 users",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

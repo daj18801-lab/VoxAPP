@@ -25,6 +25,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Business
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Gavel
@@ -1098,6 +1099,159 @@ fun RequestSuspensionDialog(
 }
 
 /**
+ * Dialog for Support Staff to request App Admin approval before editing, removing,
+ * suspending, or banning a Business Account. No changes are applied until an App Admin approves.
+ */
+@Composable
+fun RequestBusinessActionApprovalDialog(
+    targetName: String,
+    initialAction: com.example.data.BusinessApprovalAction = com.example.data.BusinessApprovalAction.EDIT,
+    onSubmit: (action: com.example.data.BusinessApprovalAction, reason: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedAction by remember(initialAction) { mutableStateOf(initialAction) }
+    var reasonDraft by remember { mutableStateOf("") }
+    val trimmed = reasonDraft.trim()
+    val businessGold = usernameColor(StaffTier.USER, isBusiness = true)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(businessGold.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Business,
+                    contentDescription = "Business Account Admin approval",
+                    tint = businessGold,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+        },
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "Request App Admin Approval",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = targetName,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = businessGold
+                    )
+                    BusinessAccountBadge()
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = businessGold.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, businessGold.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Support Staff cannot directly remove, ban, suspend, or edit a Business Account. Your request will be sent to an App Admin — no changes are made until approved.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+
+                Text(
+                    text = "Requested Action",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    com.example.data.BusinessApprovalAction.entries.forEach { action ->
+                        val isSelected = selectedAction == action
+                        val accent = when (action) {
+                            com.example.data.BusinessApprovalAction.BAN -> LiveCoral
+                            com.example.data.BusinessApprovalAction.REMOVE -> ModAmber
+                            com.example.data.BusinessApprovalAction.SUSPEND -> LiveCoral
+                            com.example.data.BusinessApprovalAction.EDIT -> businessGold
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected) accent.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                            border = BorderStroke(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) accent else MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { selectedAction = action }
+                                .testTag("biz_approval_action_${action.name.lowercase()}")
+                        ) {
+                            Text(
+                                text = action.label,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isSelected) accent else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = reasonDraft,
+                    onValueChange = { reasonDraft = it.take(360) },
+                    label = { Text("Reason & Details for App Admin (Required)") },
+                    placeholder = { Text("Explain what needs to be changed, removed, or moderated…") },
+                    minLines = 3,
+                    maxLines = 5,
+                    supportingText = {
+                        Text("${trimmed.length}/360 characters (minimum 3)")
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("biz_approval_reason_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (trimmed.length >= 3) {
+                        onSubmit(selectedAction, trimmed)
+                    }
+                },
+                enabled = trimmed.length >= 3,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ModAmber,
+                    contentColor = Color.Black
+                ),
+                modifier = Modifier.testTag("confirm_biz_approval_request_button")
+            ) {
+                Text("Send for Admin Approval", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+/**
  * Queue card shown in SafetyScreen for Admins (with Review actions) & Support (status tracker).
  */
 @Composable
@@ -1107,6 +1261,7 @@ fun PendingSuspensionRequestsCard(
     onReviewRequest: (SuspensionRequest) -> Unit
 ) {
     val pendingCount = requests.count { it.statusEnum() == SuspensionRequestStatus.PENDING }
+    val businessGold = usernameColor(StaffTier.USER, isBusiness = true)
     Surface(
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -1128,16 +1283,16 @@ fun PendingSuspensionRequestsCard(
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Gavel,
-                    contentDescription = "Support suspension requests",
+                    contentDescription = "Support suspension and business approval requests",
                     tint = LiveCoral,
                     modifier = Modifier.size(22.dp)
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = if (isAdmin) {
-                            "Support Suspension Requests ($pendingCount Pending)"
+                            "Support Approval & Suspension Requests ($pendingCount Pending)"
                         } else {
-                            "Submitted Suspension Requests ($pendingCount Pending)"
+                            "Submitted Support Requests ($pendingCount Pending)"
                         },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
@@ -1145,9 +1300,9 @@ fun PendingSuspensionRequestsCard(
                     )
                     Text(
                         text = if (isAdmin) {
-                            "Users listed as Pending are immediately suspended until your review."
+                            "Review Support suspension requests and Business Account approval requests (Edit, Remove, Suspend, Ban)."
                         } else {
-                            "Users stay suspended until an App Administrator completes review."
+                            "Standard requests suspend pending review; Business Account actions wait for App Admin approval."
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1157,23 +1312,28 @@ fun PendingSuspensionRequestsCard(
 
             if (requests.isEmpty()) {
                 Text(
-                    text = "No Support suspension requests have been submitted.",
+                    text = "No Support requests have been submitted.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
                 requests.take(20).forEach { req ->
                     val st = req.statusEnum()
+                    val isBizReq = req.isBusinessApprovalRequest() || isBusinessGoldForStaff(req.targetUserId)
                     val statusColor = when (st) {
-                        SuspensionRequestStatus.PENDING -> LiveCoral
+                        SuspensionRequestStatus.PENDING -> if (isBizReq) businessGold else LiveCoral
                         SuspensionRequestStatus.APPROVED_BAN -> LiveCoral
                         SuspensionRequestStatus.APPROVED_TIMED -> ModAmber
+                        SuspensionRequestStatus.APPROVED_ACTION -> SafetyEmerald
                         SuspensionRequestStatus.DISMISSED_LIFTED -> SafetyEmerald
                     }
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f)),
+                        border = BorderStroke(
+                            width = if (isBizReq) 1.2.dp else 1.dp,
+                            color = (if (isBizReq) businessGold else statusColor).copy(alpha = 0.45f)
+                        ),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(
@@ -1186,13 +1346,30 @@ fun PendingSuspensionRequestsCard(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = req.targetName.ifBlank { req.targetUserId.take(12) },
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = req.targetName.ifBlank { req.targetUserId.take(12) },
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = if (isBizReq) FontWeight.ExtraBold else FontWeight.Bold,
+                                            color = if (isBizReq) businessGold else MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (isBizReq) {
+                                            BusinessAccountBadge()
+                                        }
+                                    }
+                                    if (isBizReq) {
+                                        Text(
+                                            text = "Action Requested: ${req.businessActionLabel()}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = businessGold
+                                        )
+                                    }
                                     Text(
                                         text = "Requested by ${req.requestedByName.ifBlank { "Support" }} · ${formatTimestampShort(req.createdAt)}",
                                         style = MaterialTheme.typography.labelSmall,
@@ -1231,15 +1408,18 @@ fun PendingSuspensionRequestsCard(
                                 Button(
                                     onClick = { onReviewRequest(req) },
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = LiveCoral,
-                                        contentColor = Color.White
+                                        containerColor = if (isBizReq) ModAmber else LiveCoral,
+                                        contentColor = if (isBizReq) Color.Black else Color.White
                                     ),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .heightIn(min = 48.dp)
                                         .testTag("admin_review_suspension_${req.id}")
                                 ) {
-                                    Text("Review Suspension Request")
+                                    Text(
+                                        text = if (isBizReq) "Review Business Approval Request" else "Review Suspension Request",
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }
@@ -1329,9 +1509,12 @@ fun SupportRequestSuspensionCard(
                 )
             } else {
                 eligibleUsers.forEach { entry ->
+                    val isBiz = entry.isBusinessAccount()
+                    val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = if (isBiz) BorderStroke(1.dp, bizGold.copy(alpha = 0.45f)) else null,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -1342,33 +1525,45 @@ fun SupportRequestSuspensionCard(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = entry.displayName.ifBlank { entry.userId.take(10) },
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = entry.displayName.ifBlank { entry.userId.take(10) },
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = if (isBiz) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                        color = if (isBiz) bizGold else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (isBiz) {
+                                        BusinessAccountBadge()
+                                    }
+                                }
                                 if (entry.handle.isNotBlank()) {
                                     Text(
-                                        text = "@${entry.handle}",
+                                        text = "@${entry.handle}${if (isBiz) " · Requires Admin Approval" else ""}",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = if (isBiz) bizGold else MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                             }
                             Button(
                                 onClick = { onSelectTarget(entry) },
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = LiveCoral,
-                                    contentColor = Color.White
+                                    containerColor = if (isBiz) ModAmber else LiveCoral,
+                                    contentColor = if (isBiz) Color.Black else Color.White
                                 ),
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 modifier = Modifier
                                     .heightIn(min = 48.dp)
                                     .testTag("support_request_suspend_${entry.userId}")
                             ) {
-                                Text("Suspend")
+                                Text(
+                                    text = if (isBiz) "Req. Admin" else "Suspend",
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }
@@ -1385,20 +1580,49 @@ fun SupportRequestSuspensionCard(
 fun AdminReviewSuspensionRequestDialog(
     request: SuspensionRequest,
     onSubmitDecision: (decision: SuspensionRequestStatus, timedHours: Int, adminNote: String) -> Unit,
+    onOpenEditBusinessUser: ((String) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
-    var selectedDecision by remember { mutableStateOf(SuspensionRequestStatus.DISMISSED_LIFTED) }
+    val isBizReq = request.isBusinessApprovalRequest() || isBusinessGoldForStaff(request.targetUserId)
+    val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
+    val defaultDecision = when {
+        isBizReq && (request.requestType == com.example.data.BusinessApprovalAction.REMOVE.requestType ||
+            request.requestType == com.example.data.BusinessApprovalAction.EDIT.requestType) ->
+            SuspensionRequestStatus.APPROVED_ACTION
+        isBizReq && request.requestType == com.example.data.BusinessApprovalAction.BAN.requestType ->
+            SuspensionRequestStatus.APPROVED_BAN
+        isBizReq && request.requestType == com.example.data.BusinessApprovalAction.SUSPEND.requestType ->
+            SuspensionRequestStatus.APPROVED_TIMED
+        else -> SuspensionRequestStatus.DISMISSED_LIFTED
+    }
+    var selectedDecision by remember(request.id) { mutableStateOf(defaultDecision) }
     var selectedHours by remember { mutableIntStateOf(24) }
     var noteDraft by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(
-                text = "Admin Review · ${request.targetName}",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = if (isBizReq) "Admin Business Approval" else "Admin Review · ${request.targetName}",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                if (isBizReq) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = request.targetName.ifBlank { request.targetUserId.take(12) },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = bizGold
+                        )
+                        BusinessAccountBadge()
+                    }
+                }
+            }
         },
         text = {
             Column(
@@ -1407,8 +1631,8 @@ fun AdminReviewSuspensionRequestDialog(
             ) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = LiveCoral.copy(alpha = 0.12f),
-                    border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.35f)),
+                    color = (if (isBizReq) bizGold else LiveCoral).copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, (if (isBizReq) bizGold else LiveCoral).copy(alpha = 0.4f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -1416,10 +1640,11 @@ fun AdminReviewSuspensionRequestDialog(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "Submitted by ${request.requestedByName.ifBlank { "Support Staff" }}",
+                            text = "Submitted by ${request.requestedByName.ifBlank { "Support Staff" }}" +
+                                if (isBizReq) " · ${request.businessActionLabel()}" else "",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
-                            color = LiveCoral
+                            color = if (isBizReq) bizGold else LiveCoral
                         )
                         Text(
                             text = request.reason,
@@ -1435,16 +1660,28 @@ fun AdminReviewSuspensionRequestDialog(
                     fontWeight = FontWeight.Bold
                 )
 
-                val decisions = listOf(
-                    SuspensionRequestStatus.DISMISSED_LIFTED to "Dismiss & Lift Suspension",
-                    SuspensionRequestStatus.APPROVED_TIMED to "Convert to Timed Suspension",
-                    SuspensionRequestStatus.APPROVED_BAN to "Approve Permanent Ban"
-                )
+                val decisions = buildList {
+                    if (isBizReq) {
+                        when (request.requestType) {
+                            com.example.data.BusinessApprovalAction.REMOVE.requestType ->
+                                add(SuspensionRequestStatus.APPROVED_ACTION to "Approve & Remove Business Account")
+                            com.example.data.BusinessApprovalAction.EDIT.requestType ->
+                                add(SuspensionRequestStatus.APPROVED_ACTION to "Approve Edit Request (Open Editor)")
+                        }
+                    }
+                    add(
+                        SuspensionRequestStatus.DISMISSED_LIFTED to
+                            if (isBizReq) "Dismiss Request (No Changes)" else "Dismiss & Lift Suspension"
+                    )
+                    add(SuspensionRequestStatus.APPROVED_TIMED to "Approve Timed Suspension")
+                    add(SuspensionRequestStatus.APPROVED_BAN to "Approve Permanent Ban & Device Ban")
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     decisions.forEach { (status, label) ->
                         val isSelected = selectedDecision == status
                         val accent = when (status) {
                             SuspensionRequestStatus.DISMISSED_LIFTED -> SafetyEmerald
+                            SuspensionRequestStatus.APPROVED_ACTION -> bizGold
                             SuspensionRequestStatus.APPROVED_TIMED -> ModAmber
                             else -> LiveCoral
                         }
@@ -1492,7 +1729,7 @@ fun AdminReviewSuspensionRequestDialog(
                     value = noteDraft,
                     onValueChange = { noteDraft = it.take(280) },
                     label = { Text("Admin Review Note (Required)") },
-                    placeholder = { Text("Explain your decision for the user's moderation file…") },
+                    placeholder = { Text("Explain your decision for the moderation record…") },
                     minLines = 2,
                     maxLines = 4,
                     modifier = Modifier
@@ -1507,20 +1744,28 @@ fun AdminReviewSuspensionRequestDialog(
                     val clean = noteDraft.trim()
                     if (clean.isNotEmpty()) {
                         onSubmitDecision(selectedDecision, selectedHours, clean)
+                        if (selectedDecision == SuspensionRequestStatus.APPROVED_ACTION &&
+                            request.requestType == com.example.data.BusinessApprovalAction.EDIT.requestType
+                        ) {
+                            onOpenEditBusinessUser?.invoke(request.targetUserId)
+                        }
                     }
                 },
                 enabled = noteDraft.trim().isNotEmpty(),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = when (selectedDecision) {
                         SuspensionRequestStatus.DISMISSED_LIFTED -> SafetyEmerald
+                        SuspensionRequestStatus.APPROVED_ACTION -> ModAmber
                         SuspensionRequestStatus.APPROVED_TIMED -> ModAmber
                         else -> LiveCoral
                     },
-                    contentColor = Color.White
+                    contentColor = if (selectedDecision == SuspensionRequestStatus.APPROVED_ACTION ||
+                        selectedDecision == SuspensionRequestStatus.APPROVED_TIMED
+                    ) Color.Black else Color.White
                 ),
                 modifier = Modifier.testTag("confirm_admin_review_decision_button")
             ) {
-                Text("Save Admin Decision")
+                Text("Save Admin Decision", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

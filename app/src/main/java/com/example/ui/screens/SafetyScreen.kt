@@ -22,22 +22,35 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Business
 import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Flag
+import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.ManageAccounts
+import androidx.compose.material.icons.rounded.MarkEmailRead
+import androidx.compose.material.icons.rounded.MeetingRoom
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material.icons.rounded.PersonRemove
+import androidx.compose.material.icons.rounded.PhonelinkErase
+import androidx.compose.material.icons.rounded.Pin
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.SupportAgent
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Verified
 import androidx.compose.material.icons.rounded.VerifiedUser
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -55,6 +68,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +86,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import com.example.R
 import com.example.data.AdminNotification
 import com.example.data.AlertSeverity
@@ -79,15 +94,19 @@ import com.example.data.AppBroadcast
 import com.example.data.AppConfig
 import com.example.data.AdminPreviewMode
 import com.example.data.AppPerkType
+import com.example.data.BusinessApprovalAction
 import com.example.data.ChatRoom
 import com.example.data.CreatorSubscription
+import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
 import com.example.data.PerkGrant
 import com.example.data.PointTransaction
 import com.example.data.PresenceStatus
+import com.example.data.ProTier
 import com.example.data.RefundReport
 import com.example.data.RefundType
 import com.example.data.ReportStatus
+import com.example.data.RoomStatus
 import com.example.data.SafetyReport
 import com.example.data.StaffCapabilities
 import com.example.data.StaffInvite
@@ -104,24 +123,30 @@ import com.example.ui.components.AdminNotificationsCard
 import com.example.ui.components.AdminReviewSuspensionRequestDialog
 import com.example.ui.components.AdminSandboxControlCard
 import com.example.ui.components.AppPerkGrantsSection
+import com.example.ui.components.BusinessAccountBadge
+import com.example.ui.components.FeatureRestrictionsDialog
 import com.example.ui.components.GrantAppPerkDialog
 import com.example.ui.components.IssueRefundDialog
 import com.example.ui.components.PendingSuspensionRequestsCard
 import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.RefundsManagementSection
+import com.example.ui.components.RequestBusinessActionApprovalDialog
 import com.example.ui.components.RequestSuspensionDialog
 import com.example.ui.components.ResolveInvestigationDialog
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.SupportRequestSuspensionCard
+import com.example.ui.components.SupportStaffPerkAuditSection
 import com.example.ui.components.UserFileNotesDialog
 import com.example.ui.components.UserModerationFilesCard
 import com.example.ui.components.formatTimestampShort
+import com.example.ui.components.isBusinessGoldForStaff
 import com.example.ui.components.rememberPresenceClockMillis
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.PresenceOnlineGreen
 import com.example.ui.theme.SafetyEmerald
+import com.example.ui.theme.SnapBlue
 import com.example.ui.theme.VoiceCyan
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -182,6 +207,12 @@ fun SafetyScreen(
         severity: AlertSeverity,
         onSent: () -> Unit
     ) -> Unit = { _, _, _, _ -> },
+    onSendMassVoxDm: (
+        title: String,
+        message: String,
+        isUrgentAlert: Boolean,
+        onSent: () -> Unit
+    ) -> Unit = { _, _, _, _ -> },
     onDeleteAppBroadcast: (String) -> Unit = {},
     onBack: (() -> Unit)? = null,
     moderationFiles: List<UserModerationFile> = emptyList(),
@@ -238,7 +269,39 @@ fun SafetyScreen(
     realUserProfile: UserProfile? = userProfile,
     adminPreviewMode: AdminPreviewMode = AdminPreviewMode.ADMIN,
     onSelectAdminPreviewMode: (AdminPreviewMode) -> Unit = {},
-    onSaveAdminCustomIdentity: (String, String, String) -> Unit = { _, _, _ -> }
+    onSaveAdminCustomIdentity: (String, String, String) -> Unit = { _, _, _ -> },
+    businessHelpThreads: List<DirectThread> = emptyList(),
+    onEnterBusinessHelpDm: (DirectThread, Boolean) -> Unit = { _, _ -> },
+    onEnterReportedGroupDmById: (threadId: String, invisible: Boolean) -> Unit = { _, _ -> },
+    onEndBusinessHelp: (String) -> Unit = {},
+    onLoadUserProfileForRestrictions: suspend (userId: String) -> UserProfile? = { null },
+    onUpdateUserFeatureRestrictions: (
+        targetUserId: String,
+        targetName: String,
+        disabledFeatures: List<String>?,
+        featureSuspensions: Map<String, Long>,
+        reason: String,
+        onSaved: () -> Unit
+    ) -> Unit = { _, _, _, _, _, _ -> },
+    onRemoveUserFromBusinessAccount: (businessOwnerId: String, targetUserId: String, targetName: String, reportId: String) -> Unit = { _, _, _, _ -> },
+    onAdminBanReportedDevice: (targetUserId: String, targetName: String, reason: String, reportId: String) -> Unit = { _, _, _, _ -> },
+    onSubmitBusinessApprovalRequest: (
+        targetUserId: String,
+        targetName: String,
+        action: BusinessApprovalAction,
+        reason: String,
+        onSubmitted: () -> Unit
+    ) -> Unit = { _, _, _, _, _ -> },
+    onAdminRevokeBusinessAccount: (targetUserId: String, targetName: String, reason: String) -> Unit = { _, _, _ -> },
+    officialVoxChatRoom: ChatRoom? = null,
+    onUpdateOfficialVoxChat: (
+        enabled: Boolean,
+        hiddenFromLobby: Boolean,
+        pinLocked: Boolean,
+        roomPinCode: String,
+        onSaved: () -> Unit
+    ) -> Unit = { _, _, _, _, _ -> },
+    onOpenOfficialVoxChat: () -> Unit = {}
 ) {
     val reports = (reportsState as? UiState.Success)?.data.orEmpty()
     val openCount = reports.count { it.statusEnum() == ReportStatus.OPEN }
@@ -257,17 +320,34 @@ fun SafetyScreen(
     }
 
     var adminConsoleTab by remember { mutableIntStateOf(0) }
+    var supportConsoleTab by remember { mutableIntStateOf(0) }
     var inviteEmail by remember { mutableStateOf("") }
     var inviteName by remember { mutableStateOf("") }
     var inviteTier by remember { mutableStateOf(StaffTier.SUPPORT) }
     var inviteAllowInvisible by remember { mutableStateOf(false) }
     var userSearch by remember { mutableStateOf("") }
+    var businessSearch by remember { mutableStateOf("") }
 
     // App Banner & Trial Login Editor State (synced with Firestore AppConfig)
     var bannerTitleDraft by remember(appConfig.bannerTitle) { mutableStateOf(appConfig.bannerTitle) }
     var bannerMessageDraft by remember(appConfig.bannerMessage) { mutableStateOf(appConfig.bannerMessage) }
     var bannerEnabledDraft by remember(appConfig.bannerEnabled) { mutableStateOf(appConfig.bannerEnabled) }
     var trialLoginsEnabledDraft by remember(appConfig.trialLoginsEnabled) { mutableStateOf(appConfig.trialLoginsEnabled) }
+
+    // Official VOX CHAT Room Admin Control Draft State
+    var voxChatEnabledDraft by remember(officialVoxChatRoom?.status) {
+        mutableStateOf(officialVoxChatRoom?.statusEnum() != RoomStatus.CLOSED)
+    }
+    var voxChatHiddenDraft by remember(officialVoxChatRoom?.hiddenFromLobby) {
+        mutableStateOf(officialVoxChatRoom?.hiddenFromLobby == true)
+    }
+    var voxChatPinLockedDraft by remember(officialVoxChatRoom?.pinLocked) {
+        mutableStateOf(officialVoxChatRoom?.pinLocked == true)
+    }
+    var voxChatPinDraft by remember(officialVoxChatRoom?.roomPinCode) {
+        mutableStateOf(officialVoxChatRoom?.roomPinCode.orEmpty())
+    }
+    var voxChatPinError by remember { mutableStateOf<String?>(null) }
 
     var userBeingEdited by remember { mutableStateOf<UserProfile?>(null) }
     var userBeingSuspended by remember { mutableStateOf<UserProfile?>(null) }
@@ -276,12 +356,79 @@ fun SafetyScreen(
     var userBeingSentToSupport by remember { mutableStateOf<UserProfile?>(null) }
     var alertBeingEdited by remember { mutableStateOf<UserAlert?>(null) }
     var showSendBroadcastDialog by remember { mutableStateOf(false) }
+    var showMassVoxDmDialog by remember { mutableStateOf(false) }
     var inspectingModerationFile by remember { mutableStateOf<UserModerationFile?>(null) }
     var resolvingModerationFile by remember { mutableStateOf<UserModerationFile?>(null) }
     var supportRequestTarget by remember { mutableStateOf<DirectoryEntry?>(null) }
+    var supportBusinessApprovalTarget by remember { mutableStateOf<Pair<DirectoryEntry, BusinessApprovalAction>?>(null) }
+    var adminConfirmRevokeBusinessTarget by remember { mutableStateOf<DirectoryEntry?>(null) }
     var reviewingSuspensionRequest by remember { mutableStateOf<SuspensionRequest?>(null) }
     var showIssueRefundDialog by remember { mutableStateOf(false) }
     var showGrantPerkDialog by remember { mutableStateOf(false) }
+    var confirmRemoveBizUserReport by remember { mutableStateOf<SafetyReport?>(null) }
+    var confirmBanDeviceReport by remember { mutableStateOf<SafetyReport?>(null) }
+    var featureRestrictionsTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var loadedRestrictionProfile by remember { mutableStateOf<UserProfile?>(null) }
+    var isLoadingRestrictionProfile by remember { mutableStateOf(false) }
+
+    val profileByUid = remember(allUsers) { allUsers.associateBy { it.userId } }
+
+    LaunchedEffect(featureRestrictionsTarget) {
+        val target = featureRestrictionsTarget
+        if (target == null) {
+            loadedRestrictionProfile = null
+            isLoadingRestrictionProfile = false
+        } else {
+            val cached = profileByUid[target.first]
+            loadedRestrictionProfile = cached
+            isLoadingRestrictionProfile = cached == null
+            val fresh = onLoadUserProfileForRestrictions(target.first)
+            if (fresh != null) {
+                loadedRestrictionProfile = fresh
+            }
+            isLoadingRestrictionProfile = false
+        }
+    }
+
+    // Derive all Business Accounts from directoryEntries (visible to BOTH Support Staff & App Admins)
+    // and merge any Admin-loaded UserProfile records not yet in directoryEntries.
+    val businessAccounts = remember(directoryEntries, allUsers, nowMillis, staffTierByUid) {
+        val fromDir = directoryEntries.filter { it.isBusinessAccount(nowMillis) }
+        val knownUids = fromDir.map { it.userId }.toSet()
+        val extraFromUsers = allUsers
+            .filter { prof ->
+                val t = staffTierByUid[prof.userId] ?: StaffTier.USER
+                prof.userId !in knownUids && prof.isBusinessAccount(t, nowMillis)
+            }
+            .map { prof ->
+                DirectoryEntry(
+                    id = prof.userId,
+                    userId = prof.userId,
+                    displayName = prof.displayName,
+                    handle = prof.handle,
+                    bio = prof.bio,
+                    avatarColorHex = prof.avatarColorHex,
+                    photoBase64 = prof.photoBase64,
+                    proMember = prof.proMember,
+                    proExpiresAtMillis = prof.proExpiresAtMillis,
+                    proLifetime = prof.proLifetime,
+                    proTier = prof.proTier,
+                    disableMessaging = prof.disableMessaging,
+                    companySubAccount = prof.companySubAccount
+                )
+            }
+        (fromDir + extraFromUsers).sortedBy { it.displayName.lowercase() }
+    }
+    val businessUserIds = remember(businessAccounts) { businessAccounts.map { it.userId }.toSet() }
+    val filteredBusinessAccounts = remember(businessAccounts, businessSearch) {
+        val q = businessSearch.trim()
+        if (q.isEmpty()) businessAccounts
+        else businessAccounts.filter {
+            it.displayName.contains(q, ignoreCase = true) ||
+                it.handle.contains(q, ignoreCase = true) ||
+                it.bio.contains(q, ignoreCase = true)
+        }
+    }
 
     val filteredUsers = remember(allUsers, userSearch, staffTierByUid) {
         val q = userSearch.trim()
@@ -395,34 +542,42 @@ fun SafetyScreen(
                                 SegmentedButton(
                                     selected = adminConsoleTab == 0,
                                     onClick = { adminConsoleTab = 0 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 4),
+                                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 5),
                                     modifier = Modifier.testTag("admin_tab_support")
                                 ) {
-                                    Text("Staff")
+                                    Text("Staff", maxLines = 1)
                                 }
                                 SegmentedButton(
                                     selected = adminConsoleTab == 1,
                                     onClick = { adminConsoleTab = 1 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 4),
+                                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 5),
                                     modifier = Modifier.testTag("admin_tab_users")
                                 ) {
-                                    Text("Users")
+                                    Text("Users", maxLines = 1)
+                                }
+                                SegmentedButton(
+                                    selected = adminConsoleTab == 4,
+                                    onClick = { adminConsoleTab = 4 },
+                                    shape = SegmentedButtonDefaults.itemShape(index = 2, count = 5),
+                                    modifier = Modifier.testTag("admin_tab_business")
+                                ) {
+                                    Text("Biz", maxLines = 1)
                                 }
                                 SegmentedButton(
                                     selected = adminConsoleTab == 2,
                                     onClick = { adminConsoleTab = 2 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 2, count = 4),
+                                    shape = SegmentedButtonDefaults.itemShape(index = 3, count = 5),
                                     modifier = Modifier.testTag("admin_tab_alerts")
                                 ) {
-                                    Text("Alerts")
+                                    Text("Alerts", maxLines = 1)
                                 }
                                 SegmentedButton(
                                     selected = adminConsoleTab == 3,
                                     onClick = { adminConsoleTab = 3 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 3, count = 4),
+                                    shape = SegmentedButtonDefaults.itemShape(index = 4, count = 5),
                                     modifier = Modifier.testTag("admin_tab_app_config")
                                 ) {
-                                    Text("App")
+                                    Text("App", maxLines = 1)
                                 }
                             }
                         }
@@ -691,6 +846,15 @@ fun SafetyScreen(
                                                 }
                                             )
                                         }
+                                        SupportStaffPerkAuditSection(
+                                            staffUserId = role.userId,
+                                            staffDisplayName = role.displayName.ifBlank { "Support Member" },
+                                            perkGrants = perkGrants,
+                                            isAdmin = staffCapabilities.isAdmin,
+                                            onRemoveSupportStaff = {
+                                                onSetUserStaffTier(role.userId, role.displayName, StaffTier.USER, false)
+                                            }
+                                        )
                                     }
                                 }
                             }
@@ -806,9 +970,14 @@ fun SafetyScreen(
                                 directoryEntry = directoryByUid[user.userId],
                                 nowMillis = nowMillis,
                                 tier = userTier,
+                                isBusinessAccount = user.isBusinessAccount(userTier, nowMillis),
                                 isSelf = user.userId == currentUserId,
+                                staffPerkGrants = if (userTier == StaffTier.SUPPORT) perkGrants else emptyList(),
                                 onEdit = { userBeingEdited = user },
                                 onSuspend = { userBeingSuspended = user },
+                                onOpenFeatureRestrictions = {
+                                    featureRestrictionsTarget = user.userId to user.displayName
+                                },
                                 onAlert = { userReceivingAlert = user },
                                 onSendToRoom = { userBeingTransferred = user },
                                 onSendToSupport = { userBeingSentToSupport = user },
@@ -817,6 +986,15 @@ fun SafetyScreen(
                                         user.userId,
                                         user.displayName,
                                         !user.disableMessaging
+                                    )
+                                },
+                                onRevokeBusiness = {
+                                    adminConfirmRevokeBusinessTarget = directoryByUid[user.userId] ?: DirectoryEntry(
+                                        id = user.userId,
+                                        userId = user.userId,
+                                        displayName = user.displayName,
+                                        handle = user.handle,
+                                        proTier = ProTier.BUSINESS.name
                                     )
                                 },
                                 onSetStaffTier = { nextTier ->
@@ -892,6 +1070,358 @@ fun SafetyScreen(
                                             text = "Send App Message to All Users",
                                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                                         )
+                                    }
+                                }
+                            }
+                        }
+
+                        item(key = "admin_mass_vox_dm_card") {
+                            Card(
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                border = BorderStroke(1.2.dp, SnapBlue.copy(alpha = 0.55f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = SnapBlue.copy(alpha = 0.16f),
+                                            modifier = Modifier.size(40.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Verified,
+                                                    contentDescription = null,
+                                                    tint = SnapBlue,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Mass VOX Private Message",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "Send an official \"VOX\" private message directly to every user's inbox for updates and alerts. Users cannot reply.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    Button(
+                                        onClick = { showMassVoxDmDialog = true },
+                                        shape = RoundedCornerShape(999.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = SnapBlue,
+                                            contentColor = Color.White
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("admin_send_mass_vox_dm_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.MarkEmailRead,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Send VOX Private Message to Everyone",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        item(key = "admin_vox_chat_control_card") {
+                            val isVoxEnabled = officialVoxChatRoom?.statusEnum() != RoomStatus.CLOSED
+                            val isVoxHidden = officialVoxChatRoom?.hiddenFromLobby == true
+                            val isVoxPinLocked = officialVoxChatRoom?.pinLocked == true
+                            val voxOnlineCount = officialVoxChatRoom?.participantCount ?: 0L
+                            Card(
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                border = BorderStroke(
+                                    1.2.dp,
+                                    if (isVoxEnabled) SafetyEmerald.copy(alpha = 0.55f) else LiveCoral.copy(alpha = 0.55f)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("admin_vox_chat_control_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = SnapBlue.copy(alpha = 0.16f),
+                                            modifier = Modifier.size(40.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Forum,
+                                                    contentDescription = "VOX CHAT official room",
+                                                    tint = SnapBlue,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "VOX CHAT (Official Always-Open Room)",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "App-created permanent lounge controlled by Admins & Support Staff. Enable/disable, hide from Lobby, or PIN lock anytime.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = if (isVoxEnabled) SafetyEmerald.copy(alpha = 0.16f) else LiveCoral.copy(alpha = 0.16f)
+                                        ) {
+                                            Text(
+                                                text = if (isVoxEnabled) "ENABLED" else "DISABLED",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = if (isVoxEnabled) SafetyEmerald else LiveCoral,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = if (isVoxHidden) ModAmber.copy(alpha = 0.18f) else SnapBlue.copy(alpha = 0.14f)
+                                        ) {
+                                            Text(
+                                                text = if (isVoxHidden) "HIDDEN" else "VISIBLE",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = if (isVoxHidden) ModAmber else SnapBlue,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = if (isVoxPinLocked) ModAmber.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant
+                                        ) {
+                                            Text(
+                                                text = if (isVoxPinLocked) "PIN: ${officialVoxChatRoom?.roomPinCode.orEmpty()}" else "OPEN ACCESS",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = if (isVoxPinLocked) ModAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = MaterialTheme.colorScheme.surfaceVariant
+                                        ) {
+                                            Text(
+                                                text = "$voxOnlineCount online",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                            Text(
+                                                text = "Enable VOX CHAT",
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "When disabled, VOX CHAT is closed and members cannot join.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = voxChatEnabledDraft,
+                                            onCheckedChange = { voxChatEnabledDraft = it },
+                                            modifier = Modifier.testTag("admin_vox_chat_enable_switch")
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.VisibilityOff,
+                                                    contentDescription = null,
+                                                    tint = ModAmber,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Text(
+                                                    text = "Hide from Lobby",
+                                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                            }
+                                            Text(
+                                                text = "Hides VOX CHAT from regular users while Admins & Support can still access it.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = voxChatHiddenDraft,
+                                            onCheckedChange = { voxChatHiddenDraft = it },
+                                            modifier = Modifier.testTag("admin_vox_chat_hide_switch")
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Pin,
+                                                    contentDescription = null,
+                                                    tint = ModAmber,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Text(
+                                                    text = "PIN Lock VOX CHAT",
+                                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                            }
+                                            Text(
+                                                text = "Require a 4-digit PIN for regular members to enter VOX CHAT.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = voxChatPinLockedDraft,
+                                            onCheckedChange = { locked ->
+                                                voxChatPinLockedDraft = locked
+                                                if (!locked) {
+                                                    voxChatPinDraft = ""
+                                                    voxChatPinError = null
+                                                }
+                                            },
+                                            modifier = Modifier.testTag("admin_vox_chat_pin_switch")
+                                        )
+                                    }
+
+                                    if (voxChatPinLockedDraft) {
+                                        OutlinedTextField(
+                                            value = voxChatPinDraft,
+                                            onValueChange = { raw ->
+                                                voxChatPinDraft = raw.filter { it.isDigit() }.take(4)
+                                                voxChatPinError = null
+                                            },
+                                            label = { Text("4-Digit VOX CHAT PIN") },
+                                            placeholder = { Text("e.g. 1234") },
+                                            singleLine = true,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            supportingText = {
+                                                Text(
+                                                    text = voxChatPinError ?: "${voxChatPinDraft.length}/4 digits",
+                                                    color = if (voxChatPinError != null) LiveCoral else MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            },
+                                            isError = voxChatPinError != null,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("admin_vox_chat_pin_input")
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Button(
+                                            onClick = {
+                                                if (voxChatPinLockedDraft && voxChatPinDraft.length != 4) {
+                                                    voxChatPinError = "Enter a 4-digit PIN before saving."
+                                                } else {
+                                                    voxChatPinError = null
+                                                    onUpdateOfficialVoxChat(
+                                                        voxChatEnabledDraft,
+                                                        voxChatHiddenDraft,
+                                                        voxChatPinLockedDraft,
+                                                        if (voxChatPinLockedDraft) voxChatPinDraft else ""
+                                                    ) {}
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(999.dp),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = SafetyEmerald,
+                                                contentColor = Color.White
+                                            ),
+                                            modifier = Modifier
+                                                .weight(1.2f)
+                                                .height(48.dp)
+                                                .testTag("admin_vox_chat_save_button")
+                                        ) {
+                                            Text(
+                                                text = "Save VOX CHAT",
+                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = onOpenOfficialVoxChat,
+                                            shape = RoundedCornerShape(999.dp),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(48.dp)
+                                                .testTag("admin_vox_chat_enter_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.MeetingRoom,
+                                                contentDescription = "Enter VOX CHAT",
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "Enter",
+                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1134,11 +1664,209 @@ fun SafetyScreen(
                             }
                         }
                     }
+
+                    4 -> {
+                        item(key = "admin_business_tab_header") {
+                            BusinessAccountsTabHeaderCard(
+                                businessCount = businessAccounts.size,
+                                helpRequestCount = businessHelpThreads.size,
+                                isAdmin = true,
+                                searchQuery = businessSearch,
+                                onSearchChange = { businessSearch = it.take(40) }
+                            )
+                        }
+                        if (filteredBusinessAccounts.isEmpty()) {
+                            item(key = "admin_business_empty") {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = if (businessAccounts.isEmpty()) {
+                                            "No active Business Accounts yet. Business Account holders ($99.99/mo) automatically appear here in bold gold."
+                                        } else {
+                                            "No Business Accounts match \"$businessSearch\"."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(16.dp)
+                                    )
+                                }
+                            }
+                        } else {
+                            items(filteredBusinessAccounts, key = { "admin_biz_${it.userId}" }) { bizEntry ->
+                                val fullProf = profileByUid[bizEntry.userId]
+                                BusinessAccountDirectoryCard(
+                                    entry = bizEntry,
+                                    fullProfile = fullProf,
+                                    nowMillis = nowMillis,
+                                    isAdmin = true,
+                                    onAdminEdit = {
+                                        userBeingEdited = fullProf ?: UserProfile(
+                                            id = bizEntry.userId,
+                                            userId = bizEntry.userId,
+                                            displayName = bizEntry.displayName,
+                                            handle = bizEntry.handle,
+                                            bio = bizEntry.bio,
+                                            proTier = ProTier.BUSINESS.name,
+                                            disableMessaging = bizEntry.disableMessaging
+                                        )
+                                    },
+                                    onAdminSuspend = {
+                                        userBeingSuspended = fullProf ?: UserProfile(
+                                            id = bizEntry.userId,
+                                            userId = bizEntry.userId,
+                                            displayName = bizEntry.displayName,
+                                            handle = bizEntry.handle
+                                        )
+                                    },
+                                    onAdminRevokeBusiness = {
+                                        adminConfirmRevokeBusinessTarget = bizEntry
+                                    },
+                                    onAdminToggleMessaging = {
+                                        val currentlyDisabled = fullProf?.disableMessaging ?: bizEntry.disableMessaging
+                                        onToggleUserMessagingDisabled(
+                                            bizEntry.userId,
+                                            bizEntry.displayName,
+                                            !currentlyDisabled
+                                        )
+                                    },
+                                    onSendAlert = {
+                                        userReceivingAlert = fullProf ?: UserProfile(
+                                            id = bizEntry.userId,
+                                            userId = bizEntry.userId,
+                                            displayName = bizEntry.displayName,
+                                            handle = bizEntry.handle
+                                        )
+                                    },
+                                    onSupportRequestAdminApproval = {}
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Support Staff Console Tabs (Safety Tools vs Business Accounts Tab)
+            if (staffCapabilities.isSupport && !staffCapabilities.isAdmin) {
+                item(key = "support_console_tabs") {
+                    val businessGold = usernameColor(StaffTier.USER, isBusiness = true)
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = usernameColor(StaffTier.SUPPORT).copy(alpha = 0.09f),
+                        border = BorderStroke(1.dp, usernameColor(StaffTier.SUPPORT).copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SupportAgent,
+                                    contentDescription = "Support Staff Console",
+                                    tint = usernameColor(StaffTier.SUPPORT),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Text(
+                                    text = "Support Staff Console",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = usernameColor(StaffTier.SUPPORT)
+                                )
+                            }
+                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                SegmentedButton(
+                                    selected = supportConsoleTab == 0,
+                                    onClick = { supportConsoleTab = 0 },
+                                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                                    modifier = Modifier.testTag("support_tab_safety")
+                                ) {
+                                    Text("Safety Tools", maxLines = 1)
+                                }
+                                SegmentedButton(
+                                    selected = supportConsoleTab == 1,
+                                    onClick = { supportConsoleTab = 1 },
+                                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                                    modifier = Modifier.testTag("support_tab_business")
+                                ) {
+                                    Text(
+                                        text = "Business (${businessAccounts.size})",
+                                        color = if (supportConsoleTab == 1) businessGold else Color.Unspecified,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (supportConsoleTab == 1) {
+                    item(key = "support_business_tab_header") {
+                        BusinessAccountsTabHeaderCard(
+                            businessCount = businessAccounts.size,
+                            helpRequestCount = businessHelpThreads.size,
+                            isAdmin = false,
+                            searchQuery = businessSearch,
+                            onSearchChange = { businessSearch = it.take(40) }
+                        )
+                    }
+                    if (filteredBusinessAccounts.isEmpty()) {
+                        item(key = "support_business_empty") {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = if (businessAccounts.isEmpty()) {
+                                        "No active Business Accounts yet. Business Accounts appear here in bold gold."
+                                    } else {
+                                        "No Business Accounts match \"$businessSearch\"."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        items(filteredBusinessAccounts, key = { "support_biz_${it.userId}" }) { bizEntry ->
+                            BusinessAccountDirectoryCard(
+                                entry = bizEntry,
+                                fullProfile = null,
+                                nowMillis = nowMillis,
+                                isAdmin = false,
+                                onAdminEdit = {},
+                                onAdminSuspend = {},
+                                onAdminRevokeBusiness = {},
+                                onAdminToggleMessaging = {},
+                                onSendAlert = {
+                                    userReceivingAlert = UserProfile(
+                                        id = bizEntry.userId,
+                                        userId = bizEntry.userId,
+                                        displayName = bizEntry.displayName,
+                                        handle = bizEntry.handle
+                                    )
+                                },
+                                onSupportRequestAdminApproval = { action ->
+                                    supportBusinessApprovalTarget = bizEntry to action
+                                }
+                            )
+                        }
+                    }
                 }
             }
 
             // Staff-only Support Suspension Requests, Refunds, App Perks & Admin Alerts
-            if (staffCapabilities.isStaff) {
+            if (staffCapabilities.isStaff && (staffCapabilities.isAdmin || supportConsoleTab == 0)) {
                 if (staffCapabilities.isAdmin) {
                     item(key = "admin_notifications_section") {
                         AdminNotificationsCard(
@@ -1174,7 +1902,13 @@ fun SafetyScreen(
                         SupportRequestSuspensionCard(
                             directoryEntries = directoryEntries,
                             currentUserId = currentUserId,
-                            onSelectTarget = { entry -> supportRequestTarget = entry }
+                            onSelectTarget = { entry ->
+                                if (entry.isBusinessAccount() && !staffCapabilities.isAdmin) {
+                                    supportBusinessApprovalTarget = entry to BusinessApprovalAction.SUSPEND
+                                } else {
+                                    supportRequestTarget = entry
+                                }
+                            }
                         )
                     }
                 }
@@ -1183,7 +1917,14 @@ fun SafetyScreen(
                         directoryEntries = directoryEntries,
                         allUsers = allUsers,
                         currentUserId = currentUserId,
-                        onToggleMessaging = onToggleUserMessagingDisabled
+                        isAdmin = staffCapabilities.isAdmin,
+                        nowMillis = nowMillis,
+                        onOpenFeatureRestrictions = { uid, name ->
+                            featureRestrictionsTarget = uid to name
+                        },
+                        onRequestBusinessAdminApproval = { entry ->
+                            supportBusinessApprovalTarget = entry to BusinessApprovalAction.EDIT
+                        }
                     )
                 }
                 item(key = "staff_moderation_files_section") {
@@ -1256,10 +1997,171 @@ fun SafetyScreen(
                                 color = SafetyEmerald
                             )
                             Text(
-                                text = "Admins (Red) · Support Staff (Green) · Pro (Blue) · Room Admins/Co-Admins (Purple). Report limit: up to 3 different users, 1 report per user per hour.",
+                                text = "Admins (Red) · Support Staff (Green) · Business (Bold Gold) · Pro (Blue) · Room Admins/Co-Admins (Purple). Report limit: up to 3 different users, 1 report per user per hour.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                        }
+                    }
+                }
+            }
+
+            if (staffCapabilities.isStaff && businessHelpThreads.isNotEmpty()) {
+                item(key = "business_help_heading") {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SupportAgent,
+                            contentDescription = "Group DM Help & Reported Groups",
+                            tint = SafetyEmerald,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = "Group DM Help & Reported Groups (${businessHelpThreads.size})",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = SafetyEmerald
+                        )
+                    }
+                }
+                items(businessHelpThreads, key = { "biz_help_${it.id}" }) { bizThread ->
+                    val isReported = bizThread.reportStaffAccessOpen
+                    val isHelp = bizThread.staffHelpRequested
+                    val isBiz = bizThread.isCompanyThread()
+                    val cardAccent = when {
+                        bizThread.groupDisabled -> LiveCoral
+                        isReported -> ModAmber
+                        else -> SafetyEmerald
+                    }
+                    Card(
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = cardAccent.copy(alpha = 0.08f)),
+                        border = BorderStroke(1.2.dp, cardAccent.copy(alpha = 0.55f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = bizThread.groupName.ifBlank {
+                                        if (isBiz) "Business Group DM" else "Group DM (${bizThread.participantIds.size} members)"
+                                    },
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (isHelp) {
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = SafetyEmerald.copy(alpha = 0.2f)
+                                        ) {
+                                            Text(
+                                                text = "HELP",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = SafetyEmerald,
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+                                    if (isReported) {
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = ModAmber.copy(alpha = 0.22f)
+                                        ) {
+                                            Text(
+                                                text = "REPORTED",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = ModAmber,
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+                                    if (bizThread.groupDisabled) {
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = LiveCoral.copy(alpha = 0.2f)
+                                        ) {
+                                            Text(
+                                                text = "DISABLED",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = LiveCoral,
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            if (bizThread.staffHelpReason.isNotBlank()) {
+                                Text(
+                                    text = "Help Request: ${bizThread.staffHelpReason}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            if (bizThread.lastReportSummary.isNotBlank()) {
+                                Text(
+                                    text = "Report: ${bizThread.lastReportSummary}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = ModAmber
+                                )
+                            }
+                            if (bizThread.staffHelpReason.isBlank() && bizThread.lastReportSummary.isBlank()) {
+                                Text(
+                                    text = "Staff access is open for this Group DM. Enter visibly or invisibly to edit, mute, remove, ban, or disable the group.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { onEnterBusinessHelpDm(bizThread, false) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = SafetyEmerald,
+                                        contentColor = Color.White
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("enter_business_help_dm_${bizThread.id}")
+                                ) {
+                                    Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Visible", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                }
+                                Button(
+                                    onClick = { onEnterBusinessHelpDm(bizThread, true) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.secondary,
+                                        contentColor = MaterialTheme.colorScheme.onSecondary
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("enter_group_help_invisible_${bizThread.id}")
+                                ) {
+                                    Icon(Icons.Rounded.VisibilityOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Invisible", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                }
+                                OutlinedButton(
+                                    onClick = { onEndBusinessHelp(bizThread.id) },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                    modifier = Modifier.testTag("end_business_help_dm_${bizThread.id}")
+                                ) {
+                                    Text("End", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
                         }
                     }
                 }
@@ -1355,11 +2257,29 @@ fun SafetyScreen(
                                 ?: targetDir?.disableMessaging
                                 ?: false
                             val targetIsAdmin = (staffTierByUid[report.targetUserId] ?: targetDir?.tierEnum()) == StaffTier.ADMIN
+                            val targetIsBusiness = report.targetUserId in businessUserIds ||
+                                targetDir?.isBusinessAccount(nowMillis) == true ||
+                                targetUserProfile?.isBusinessAccount(nowMs = nowMillis) == true
+                            val isBizReport = report.isBusinessDmReport()
+                            val isGroupReport = report.isGroupDmReport()
+                            val bizOwnerId = report.businessOwnerIdFromReport()
+                            val supportBlockedByBusinessPolicy = !staffCapabilities.isAdmin &&
+                                (targetIsBusiness || (isBizReport && report.targetUserId == bizOwnerId))
                             SafetyReportCard(
                                 report = report,
                                 isHostOrAdmin = report.roomHostId == currentUserId || staffCapabilities.isAdmin,
-                                canToggleMessaging = staffCapabilities.isStaff && !targetIsAdmin && report.targetUserId != currentUserId,
+                                isAdminViewer = staffCapabilities.isAdmin,
+                                targetIsBusinessAccount = targetIsBusiness,
+                                canToggleMessaging = staffCapabilities.isAdmin && !targetIsAdmin && report.targetUserId != currentUserId,
                                 targetMessagingDisabled = targetMessagingDisabled,
+                                isBusinessDmReport = isBizReport,
+                                isGroupDmReport = isGroupReport,
+                                canEnterReportedGroupDm = staffCapabilities.isStaff && isGroupReport && report.roomId.isNotBlank(),
+                                canManageFeatureRestrictions = staffCapabilities.isStaff && !targetIsAdmin && !supportBlockedByBusinessPolicy && report.targetUserId != currentUserId,
+                                canRemoveFromBusiness = isBizReport && bizOwnerId.isNotBlank() &&
+                                    staffCapabilities.isStaff && !targetIsAdmin && !supportBlockedByBusinessPolicy && report.targetUserId != currentUserId,
+                                canRequestBusinessAdminApproval = supportBlockedByBusinessPolicy && report.targetUserId != currentUserId,
+                                canBanDevice = staffCapabilities.isAdmin && !targetIsAdmin && report.targetUserId != currentUserId,
                                 onToggleMessaging = {
                                     onToggleUserMessagingDisabled(
                                         report.targetUserId,
@@ -1367,6 +2287,26 @@ fun SafetyScreen(
                                         !targetMessagingDisabled
                                     )
                                 },
+                                onEnterReportedGroupVisible = {
+                                    onEnterReportedGroupDmById(report.roomId, false)
+                                },
+                                onEnterReportedGroupInvisible = {
+                                    onEnterReportedGroupDmById(report.roomId, true)
+                                },
+                                onOpenFeatureRestrictions = {
+                                    featureRestrictionsTarget = report.targetUserId to report.targetName
+                                },
+                                onRemoveFromBusiness = { confirmRemoveBizUserReport = report },
+                                onRequestBusinessAdminApproval = {
+                                    val entry = targetDir ?: DirectoryEntry(
+                                        id = report.targetUserId,
+                                        userId = report.targetUserId,
+                                        displayName = report.targetName,
+                                        proTier = ProTier.BUSINESS.name
+                                    )
+                                    supportBusinessApprovalTarget = entry to BusinessApprovalAction.BAN
+                                },
+                                onBanDevice = { confirmBanDeviceReport = report },
                                 onResolve = {
                                     onResolveReport(report.id, ReportStatus.RESOLVED, "Reviewed and action taken")
                                 },
@@ -1504,12 +2444,119 @@ fun SafetyScreen(
         )
     }
 
+    supportBusinessApprovalTarget?.let { (target, initialAction) ->
+        RequestBusinessActionApprovalDialog(
+            targetName = target.displayName.ifBlank { target.userId.take(10) },
+            initialAction = initialAction,
+            onSubmit = { action, reason ->
+                onSubmitBusinessApprovalRequest(
+                    target.userId,
+                    target.displayName.ifBlank { "Business Account" },
+                    action,
+                    reason
+                ) {
+                    supportBusinessApprovalTarget = null
+                }
+            },
+            onDismiss = { supportBusinessApprovalTarget = null }
+        )
+    }
+
+    adminConfirmRevokeBusinessTarget?.let { target ->
+        var revokeReason by remember(target.userId) { mutableStateOf("") }
+        val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
+        AlertDialog(
+            onDismissRequest = { adminConfirmRevokeBusinessTarget = null },
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.Business,
+                    contentDescription = "Remove Business Account",
+                    tint = LiveCoral
+                )
+            },
+            title = { Text("Remove Business Account?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = target.displayName.ifBlank { target.userId.take(12) },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = bizGold
+                        )
+                        BusinessAccountBadge()
+                    }
+                    Text(
+                        text = "This downgrades the account to Free, deactivates its Company Codes, and sends an urgent Admin notice.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = revokeReason,
+                        onValueChange = { revokeReason = it.take(240) },
+                        label = { Text("Admin Reason (Required)") },
+                        placeholder = { Text("Explain why this Business Account is being removed…") },
+                        minLines = 2,
+                        maxLines = 4,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_revoke_business_reason_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val clean = revokeReason.trim()
+                        if (clean.length >= 3) {
+                            onAdminRevokeBusinessAccount(
+                                target.userId,
+                                target.displayName.ifBlank { "Business Account" },
+                                clean
+                            )
+                            adminConfirmRevokeBusinessTarget = null
+                        }
+                    },
+                    enabled = revokeReason.trim().length >= 3,
+                    colors = ButtonDefaults.buttonColors(containerColor = LiveCoral, contentColor = Color.White),
+                    modifier = Modifier.testTag("confirm_admin_revoke_business_button")
+                ) {
+                    Text("Remove Business", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { adminConfirmRevokeBusinessTarget = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     reviewingSuspensionRequest?.let { req ->
         AdminReviewSuspensionRequestDialog(
             request = req,
             onSubmitDecision = { decision, timedHours, adminNote ->
                 onAdminReviewSuspensionRequest(req, decision, timedHours, adminNote) {
                     reviewingSuspensionRequest = null
+                }
+            },
+            onOpenEditBusinessUser = { targetUid ->
+                val prof = profileByUid[targetUid] ?: directoryByUid[targetUid]?.let { d ->
+                    UserProfile(
+                        id = d.userId,
+                        userId = d.userId,
+                        displayName = d.displayName,
+                        handle = d.handle,
+                        bio = d.bio,
+                        proTier = d.proTier,
+                        disableMessaging = d.disableMessaging
+                    )
+                }
+                if (prof != null) {
+                    userBeingEdited = prof
                 }
             },
             onDismiss = { reviewingSuspensionRequest = null }
@@ -1837,6 +2884,196 @@ fun SafetyScreen(
             }
         )
     }
+
+    if (showMassVoxDmDialog) {
+        var massTitle by remember { mutableStateOf("") }
+        var massBody by remember { mutableStateOf("") }
+        var massIsUrgent by remember { mutableStateOf(false) }
+        var isSendingMassDm by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { if (!isSendingMassDm) showMassVoxDmDialog = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.Verified,
+                    contentDescription = null,
+                    tint = SnapBlue
+                )
+            },
+            title = {
+                Text(
+                    text = "Send VOX Private Message to All Users",
+                    fontWeight = FontWeight.ExtraBold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Delivers an official \"VOX\" private message into every user's Chats inbox. Recipients can read it on-app or lock screen, and replies are disabled.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = !massIsUrgent,
+                            onClick = { massIsUrgent = false },
+                            label = { Text("Update", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = SnapBlue,
+                                selectedLabelColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("admin_mass_dm_type_update")
+                        )
+                        FilterChip(
+                            selected = massIsUrgent,
+                            onClick = { massIsUrgent = true },
+                            label = { Text("Urgent Alert", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = LiveCoral,
+                                selectedLabelColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("admin_mass_dm_type_alert")
+                        )
+                    }
+                    OutlinedTextField(
+                        value = massTitle,
+                        onValueChange = { massTitle = it.take(80) },
+                        label = { Text("Subject (optional)") },
+                        placeholder = { Text("e.g., VOX App Update or Important Alert") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_mass_dm_title_input")
+                    )
+                    OutlinedTextField(
+                        value = massBody,
+                        onValueChange = { massBody = it.take(400) },
+                        label = { Text("Private message to every user") },
+                        placeholder = { Text("Write your official VOX update or alert…") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_mass_dm_body_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isSendingMassDm = true
+                        onSendMassVoxDm(massTitle, massBody, massIsUrgent) {
+                            isSendingMassDm = false
+                            showMassVoxDmDialog = false
+                        }
+                    },
+                    enabled = massBody.trim().isNotEmpty() && !isSendingMassDm,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (massIsUrgent) LiveCoral else SnapBlue,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("admin_confirm_send_mass_dm_button")
+                ) {
+                    Text(if (isSendingMassDm) "Sending…" else "Send to All Users")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showMassVoxDmDialog = false },
+                    enabled = !isSendingMassDm
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    confirmRemoveBizUserReport?.let { rep ->
+        val ownerId = rep.businessOwnerIdFromReport()
+        AlertDialog(
+            onDismissRequest = { confirmRemoveBizUserReport = null },
+            icon = { Icon(Icons.Rounded.PersonRemove, contentDescription = null, tint = LiveCoral) },
+            title = { Text("Remove User from Business Account?") },
+            text = {
+                Text(
+                    "Remove ${rep.targetName} from this Business Account and its Group DM? Their unique Employee PIN will be permanently revoked so they cannot sign back in under another name."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmRemoveBizUserReport = null
+                        onRemoveUserFromBusinessAccount(ownerId, rep.targetUserId, rep.targetName, rep.id)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = LiveCoral, contentColor = Color.White),
+                    modifier = Modifier.testTag("confirm_remove_from_business_button")
+                ) {
+                    Text("Remove & Revoke PIN")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemoveBizUserReport = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    confirmBanDeviceReport?.let { rep ->
+        AlertDialog(
+            onDismissRequest = { confirmBanDeviceReport = null },
+            icon = { Icon(Icons.Rounded.PhonelinkErase, contentDescription = null, tint = LiveCoral) },
+            title = { Text("Ban User's Device?") },
+            text = {
+                Text(
+                    "Permanently ban ${rep.targetName} and their device from VOX? They will be blocked from signing in again on this device with any email."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmBanDeviceReport = null
+                        onAdminBanReportedDevice(
+                            rep.targetUserId,
+                            rep.targetName,
+                            "Device banned following reported message (${rep.categoryEnum().label})",
+                            rep.id
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = LiveCoral, contentColor = Color.White),
+                    modifier = Modifier.testTag("confirm_ban_reported_device_button")
+                ) {
+                    Text("Ban Device Permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBanDeviceReport = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    featureRestrictionsTarget?.let { (targetUid, targetName) ->
+        FeatureRestrictionsDialog(
+            targetName = targetName,
+            targetProfile = loadedRestrictionProfile ?: profileByUid[targetUid],
+            isLoadingProfile = isLoadingRestrictionProfile,
+            isAdmin = staffCapabilities.isAdmin,
+            onSave = { disabledFeatures, featureSuspensions, reason ->
+                onUpdateUserFeatureRestrictions(
+                    targetUid,
+                    targetName,
+                    disabledFeatures,
+                    featureSuspensions,
+                    reason
+                ) {
+                    featureRestrictionsTarget = null
+                }
+            },
+            onDismiss = { featureRestrictionsTarget = null }
+        )
+    }
 }
 
 @Composable
@@ -1845,13 +3082,17 @@ private fun AdminUserDirectoryCard(
     directoryEntry: DirectoryEntry?,
     nowMillis: Long,
     tier: StaffTier,
+    isBusinessAccount: Boolean = false,
     isSelf: Boolean,
+    staffPerkGrants: List<PerkGrant> = emptyList(),
     onEdit: () -> Unit,
     onSuspend: () -> Unit,
+    onOpenFeatureRestrictions: () -> Unit = {},
     onAlert: () -> Unit,
     onSendToRoom: () -> Unit,
     onSendToSupport: () -> Unit,
     onToggleMessagingDisabled: () -> Unit = {},
+    onRevokeBusiness: () -> Unit = {},
     onSetStaffTier: (StaffTier) -> Unit
 ) {
     val badges = buildList {
@@ -1862,12 +3103,19 @@ private fun AdminUserDirectoryCard(
         if (profile.disableMic) add("NO MIC" to ModAmber)
         if (profile.disableVideo) add("NO VIDEO" to ModAmber)
         if (profile.disableMessaging) add("NO MSG" to LiveCoral)
-    }
+        profile.activeFeatureRestrictionBadges(nowMillis).forEach { (label, isPerm) ->
+            add(label to if (isPerm) LiveCoral else ModAmber)
+        }
+    }.distinctBy { it.first }
+    val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
 
     Card(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(
+            width = if (isBusinessAccount) 1.3.dp else 1.dp,
+            color = if (isBusinessAccount) bizGold.copy(alpha = 0.55f) else MaterialTheme.colorScheme.outlineVariant
+        ),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -1885,9 +3133,14 @@ private fun AdminUserDirectoryCard(
                 )
                 Text(
                     text = if (isSelf) "${profile.displayName} (You)" else profile.displayName,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = usernameColor(tier)
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = if (isBusinessAccount) FontWeight.ExtraBold else FontWeight.SemiBold
+                    ),
+                    color = usernameColor(tier = tier, isBusiness = isBusinessAccount)
                 )
+                if (isBusinessAccount) {
+                    BusinessAccountBadge()
+                }
                 StaffTierBadge(tier = tier)
             }
             Text(
@@ -1941,6 +3194,17 @@ private fun AdminUserDirectoryCard(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Rename / Edit", style = MaterialTheme.typography.labelSmall)
                     }
+                    if (isBusinessAccount) {
+                        OutlinedButton(
+                            onClick = onRevokeBusiness,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("admin_revoke_biz_${profile.userId}")
+                        ) {
+                            Icon(Icons.Rounded.Business, contentDescription = null, tint = LiveCoral, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Remove Business", style = MaterialTheme.typography.labelSmall, color = LiveCoral)
+                        }
+                    }
                     OutlinedButton(
                         onClick = {
                             onSetStaffTier(if (tier == StaffTier.ADMIN) StaffTier.USER else StaffTier.ADMIN)
@@ -1986,6 +3250,15 @@ private fun AdminUserDirectoryCard(
                             Text("Suspend", style = MaterialTheme.typography.labelSmall)
                         }
                         OutlinedButton(
+                            onClick = onOpenFeatureRestrictions,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("admin_feature_restrictions_${profile.userId}")
+                        ) {
+                            Icon(Icons.Rounded.Tune, contentDescription = null, tint = ModAmber, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Features / Timers", style = MaterialTheme.typography.labelSmall, color = ModAmber)
+                        }
+                        OutlinedButton(
                             onClick = onToggleMessagingDisabled,
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                             modifier = Modifier.testTag("admin_toggle_msg_${profile.userId}")
@@ -2027,6 +3300,15 @@ private fun AdminUserDirectoryCard(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Send to Support", style = MaterialTheme.typography.labelSmall, color = SafetyEmerald)
                     }
+                }
+                if (tier == StaffTier.SUPPORT) {
+                    SupportStaffPerkAuditSection(
+                        staffUserId = profile.userId,
+                        staffDisplayName = profile.displayName.ifBlank { "Support Member" },
+                        perkGrants = staffPerkGrants,
+                        isAdmin = true,
+                        onRemoveSupportStaff = { onSetStaffTier(StaffTier.USER) }
+                    )
                 }
             }
         }
@@ -2138,20 +3420,260 @@ private fun SafetyMetricCard(
 }
 
 @Composable
+private fun BusinessAccountsTabHeaderCard(
+    businessCount: Int,
+    helpRequestCount: Int,
+    isAdmin: Boolean,
+    searchQuery: String,
+    onSearchChange: (String) -> Unit
+) {
+    val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = bizGold.copy(alpha = 0.11f),
+        border = BorderStroke(1.2.dp, bizGold.copy(alpha = 0.55f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("business_accounts_tab_header")
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Business,
+                    contentDescription = "Business Accounts",
+                    tint = bizGold,
+                    modifier = Modifier.size(24.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Business Accounts ($businessCount)",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                        color = bizGold
+                    )
+                    Text(
+                        text = if (isAdmin) {
+                            "Business Account holders appear in bold gold for Staff & Admins. Active Group DM help requests: $helpRequestCount."
+                        } else {
+                            "Support Staff can view Business Accounts and send alerts, but cannot remove, ban, or edit them without App Admin approval."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchChange,
+                placeholder = { Text("Search Business Accounts by name or @handle…") },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("business_tab_search_input")
+            )
+        }
+    }
+}
+
+@Composable
+private fun BusinessAccountDirectoryCard(
+    entry: DirectoryEntry,
+    fullProfile: UserProfile?,
+    nowMillis: Long,
+    isAdmin: Boolean,
+    onAdminEdit: () -> Unit,
+    onAdminSuspend: () -> Unit,
+    onAdminRevokeBusiness: () -> Unit,
+    onAdminToggleMessaging: () -> Unit,
+    onSendAlert: () -> Unit,
+    onSupportRequestAdminApproval: (BusinessApprovalAction) -> Unit
+) {
+    val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
+    val trueOnline = entry.isCurrentlyOnline(nowMillis)
+    val msgDisabled = fullProfile?.disableMessaging ?: entry.disableMessaging
+
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.3.dp, bizGold.copy(alpha = 0.55f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("business_account_card_${entry.userId}")
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PresenceStatusDot(
+                    status = if (trueOnline) PresenceStatus.ONLINE else PresenceStatus.OFFLINE
+                )
+                Text(
+                    text = entry.displayName.ifBlank { entry.userId.take(12) },
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                    color = bizGold
+                )
+                BusinessAccountBadge()
+            }
+            Text(
+                text = buildString {
+                    if (entry.handle.isNotBlank()) append("@${entry.handle} · ")
+                    append("Business Account (\$99.99/mo · up to 50 sub-accounts) · ")
+                    append(if (trueOnline) "Online" else "Offline")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (trueOnline) PresenceOnlineGreen else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (fullProfile?.globallyBanned == true || fullProfile?.currentlySuspended() == true || msgDisabled) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (fullProfile?.globallyBanned == true) {
+                        Surface(shape = RoundedCornerShape(6.dp), color = LiveCoral.copy(alpha = 0.16f)) {
+                            Text("BANNED", style = MaterialTheme.typography.labelSmall, color = LiveCoral, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+                        }
+                    }
+                    if (fullProfile?.currentlySuspended() == true) {
+                        Surface(shape = RoundedCornerShape(6.dp), color = ModAmber.copy(alpha = 0.16f)) {
+                            Text("SUSPENDED", style = MaterialTheme.typography.labelSmall, color = ModAmber, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+                        }
+                    }
+                    if (msgDisabled) {
+                        Surface(shape = RoundedCornerShape(6.dp), color = LiveCoral.copy(alpha = 0.16f)) {
+                            Text("NO MSG", style = MaterialTheme.typography.labelSmall, color = LiveCoral, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+                        }
+                    }
+                }
+            }
+
+            if (isAdmin) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onAdminEdit,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("biz_admin_edit_${entry.userId}")
+                    ) {
+                        Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Edit", style = MaterialTheme.typography.labelSmall)
+                    }
+                    OutlinedButton(
+                        onClick = onAdminRevokeBusiness,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("biz_admin_remove_${entry.userId}")
+                    ) {
+                        Icon(Icons.Rounded.Delete, contentDescription = null, tint = LiveCoral, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Remove Business", style = MaterialTheme.typography.labelSmall, color = LiveCoral)
+                    }
+                    OutlinedButton(
+                        onClick = onAdminSuspend,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("biz_admin_suspend_${entry.userId}")
+                    ) {
+                        Icon(Icons.Rounded.Timer, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Suspend", style = MaterialTheme.typography.labelSmall)
+                    }
+                    OutlinedButton(
+                        onClick = onAdminToggleMessaging,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("biz_admin_toggle_msg_${entry.userId}")
+                    ) {
+                        Icon(
+                            Icons.Rounded.Block,
+                            contentDescription = null,
+                            tint = if (msgDisabled) SafetyEmerald else LiveCoral,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            if (msgDisabled) "Enable Msg" else "Disable Msg",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (msgDisabled) SafetyEmerald else LiveCoral
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = onSendAlert,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Rounded.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Alert", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            } else {
+                Text(
+                    text = "Protected Business Account · Edit, Remove, Suspend, or Ban requires App Admin approval.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = bizGold
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { onSupportRequestAdminApproval(BusinessApprovalAction.EDIT) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = ModAmber,
+                            contentColor = Color.Black
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("biz_support_request_admin_${entry.userId}")
+                    ) {
+                        Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Request Admin Approval", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                    }
+                    OutlinedButton(
+                        onClick = onSendAlert,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Icon(Icons.Rounded.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Alert", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun StaffMessagingControlsCard(
     directoryEntries: List<DirectoryEntry>,
     allUsers: List<UserProfile>,
     currentUserId: String,
-    onToggleMessaging: (targetUserId: String, targetName: String, disabled: Boolean) -> Unit
+    isAdmin: Boolean = true,
+    nowMillis: Long = System.currentTimeMillis(),
+    onOpenFeatureRestrictions: (targetUserId: String, targetName: String) -> Unit,
+    onRequestBusinessAdminApproval: (DirectoryEntry) -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
     val profileByUid = remember(allUsers) { allUsers.associateBy { it.userId } }
-    val candidates = remember(directoryEntries, allUsers, currentUserId, searchQuery) {
+    val candidates = remember(directoryEntries, allUsers, currentUserId, searchQuery, nowMillis) {
         val base = directoryEntries
             .filter { it.userId != currentUserId && it.tierEnum() != StaffTier.ADMIN }
             .sortedWith(
-                compareByDescending<DirectoryEntry> {
-                    profileByUid[it.userId]?.disableMessaging ?: it.disableMessaging
+                compareByDescending<DirectoryEntry> { entry ->
+                    val prof = profileByUid[entry.userId]
+                    val badgeCount = prof?.activeFeatureRestrictionBadges(nowMillis)?.size ?: 0
+                    badgeCount > 0 || entry.disableMessaging
                 }.thenBy { it.displayName.lowercase() }
             )
         val q = searchQuery.trim()
@@ -2179,19 +3701,27 @@ private fun StaffMessagingControlsCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Block,
-                    contentDescription = "Staff messaging controls",
-                    tint = LiveCoral,
+                    imageVector = if (isAdmin) Icons.Rounded.Tune else Icons.Rounded.Schedule,
+                    contentDescription = "Feature restriction controls",
+                    tint = if (isAdmin) LiveCoral else ModAmber,
                     modifier = Modifier.size(20.dp)
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Staff Messaging Controls",
+                        text = if (isAdmin) {
+                            "Feature Restrictions & Timed Suspensions"
+                        } else {
+                            "Timed Feature Suspensions (Support)"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Support Staff & Admins can disable or re-enable a user's messaging across rooms and DMs.",
+                        text = if (isAdmin) {
+                            "Permanently disable or temporarily suspend DMs, Chat Rooms, Discovery Tab, Rooms Tab, Buying Points, Editing Profile, Posting, Login, or PTT."
+                        } else {
+                            "Support Staff can temporarily suspend any of the 9 features for a set time. Permanent disables require an App Admin. Business Accounts require Admin approval."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2216,8 +3746,12 @@ private fun StaffMessagingControlsCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
+                val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
                 candidates.forEach { entry ->
-                    val isDisabled = profileByUid[entry.userId]?.disableMessaging ?: entry.disableMessaging
+                    val prof = profileByUid[entry.userId]
+                    val activeBadges = prof?.activeFeatureRestrictionBadges(nowMillis).orEmpty()
+                    val isDisabled = prof?.disableMessaging ?: entry.disableMessaging
+                    val isBiz = entry.isBusinessAccount()
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2226,29 +3760,58 @@ private fun StaffMessagingControlsCard(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = entry.displayName,
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        fontWeight = if (isBiz) FontWeight.ExtraBold else FontWeight.SemiBold
+                                    ),
+                                    color = if (isBiz) bizGold else MaterialTheme.colorScheme.onSurface
+                                )
+                                if (isBiz) {
+                                    BusinessAccountBadge()
+                                }
+                            }
+                            val statusSummary = when {
+                                activeBadges.isNotEmpty() -> activeBadges.take(3).joinToString(" · ") { it.first }
+                                isDisabled -> "Messaging DISABLED"
+                                else -> "All 9 features active"
+                            }
                             Text(
-                                text = entry.displayName,
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "@${entry.handle} · ${if (isDisabled) "Messaging DISABLED" else "Messaging Active"}",
+                                text = "@${entry.handle} · $statusSummary",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isDisabled) LiveCoral else SafetyEmerald
+                                color = if (activeBadges.isNotEmpty() || isDisabled) ModAmber else SafetyEmerald
                             )
                         }
-                        OutlinedButton(
-                            onClick = {
-                                onToggleMessaging(entry.userId, entry.displayName, !isDisabled)
-                            },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("staff_toggle_messaging_${entry.userId}")
-                        ) {
-                            Text(
-                                text = if (isDisabled) "Enable Msg" else "Disable Msg",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isDisabled) SafetyEmerald else LiveCoral
-                            )
+                        if (isBiz && !isAdmin) {
+                            OutlinedButton(
+                                onClick = { onRequestBusinessAdminApproval(entry) },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("staff_biz_admin_only_${entry.userId}")
+                            ) {
+                                Text(
+                                    text = "Req. Admin",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = bizGold
+                                )
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    onOpenFeatureRestrictions(entry.userId, entry.displayName)
+                                },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("staff_feature_restrict_${entry.userId}")
+                            ) {
+                                Text(
+                                    text = if (isAdmin) "Restrict / Timer" else "Timed Suspend",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = if (isAdmin) LiveCoral else ModAmber
+                                )
+                            }
                         }
                     }
                 }
@@ -2261,9 +3824,24 @@ private fun StaffMessagingControlsCard(
 private fun SafetyReportCard(
     report: SafetyReport,
     isHostOrAdmin: Boolean,
+    isAdminViewer: Boolean = false,
+    targetIsBusinessAccount: Boolean = false,
     canToggleMessaging: Boolean = false,
     targetMessagingDisabled: Boolean = false,
+    isBusinessDmReport: Boolean = false,
+    isGroupDmReport: Boolean = false,
+    canEnterReportedGroupDm: Boolean = false,
+    canManageFeatureRestrictions: Boolean = false,
+    canRemoveFromBusiness: Boolean = false,
+    canRequestBusinessAdminApproval: Boolean = false,
+    canBanDevice: Boolean = false,
     onToggleMessaging: () -> Unit = {},
+    onEnterReportedGroupVisible: () -> Unit = {},
+    onEnterReportedGroupInvisible: () -> Unit = {},
+    onOpenFeatureRestrictions: () -> Unit = {},
+    onRemoveFromBusiness: () -> Unit = {},
+    onRequestBusinessAdminApproval: () -> Unit = {},
+    onBanDevice: () -> Unit = {},
     onResolve: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2307,10 +3885,42 @@ private fun SafetyReportCard(
                 )
             }
 
-            Text(
-                text = "${report.categoryEnum().label} · Reported ${report.targetName}",
-                style = MaterialTheme.typography.titleSmall
-            )
+            if (isBusinessDmReport || isGroupDmReport) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = ModAmber.copy(alpha = 0.16f),
+                    border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (isBusinessDmReport) {
+                            "Business Group DM Report · Staff access unlocked (enter Visible or Invisible to moderate)"
+                        } else {
+                            "Group DM Report · Support & Admins can enter this Group DM (Visible or Invisible)"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = ModAmber,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+
+            val bizGold = usernameColor(StaffTier.USER, isBusiness = true)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "${report.categoryEnum().label} · Reported ${report.targetName}",
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = if (targetIsBusinessAccount) FontWeight.ExtraBold else FontWeight.SemiBold
+                    ),
+                    color = if (targetIsBusinessAccount) bizGold else MaterialTheme.colorScheme.onSurface
+                )
+                if (targetIsBusinessAccount) {
+                    BusinessAccountBadge()
+                }
+            }
             Text(
                 text = "Room: ${report.roomTitle} · Filed by ${report.reporterName}",
                 style = MaterialTheme.typography.labelMedium,
@@ -2328,6 +3938,124 @@ private fun SafetyReportCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = SafetyEmerald
                 )
+            }
+
+            if (canEnterReportedGroupDm) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onEnterReportedGroupVisible,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SafetyEmerald,
+                            contentColor = Color.White
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("report_enter_group_visible_${report.id}")
+                    ) {
+                        Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Enter Visible", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                    }
+                    Button(
+                        onClick = onEnterReportedGroupInvisible,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary,
+                            contentColor = MaterialTheme.colorScheme.onSecondary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("report_enter_group_invisible_${report.id}")
+                    ) {
+                        Icon(Icons.Rounded.VisibilityOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Enter Invisible", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                    }
+                }
+            }
+
+            if (canManageFeatureRestrictions) {
+                OutlinedButton(
+                    onClick = onOpenFeatureRestrictions,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("report_feature_restrictions_${report.id}")
+                ) {
+                    Icon(
+                        imageVector = if (isAdminViewer) Icons.Rounded.Tune else Icons.Rounded.Schedule,
+                        contentDescription = null,
+                        tint = if (isAdminViewer) LiveCoral else ModAmber,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (isAdminViewer) {
+                            "Feature Restrictions / Timed Suspend (${report.targetName})"
+                        } else {
+                            "Timed Feature Suspension (${report.targetName})"
+                        },
+                        color = if (isAdminViewer) LiveCoral else ModAmber,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            if (canRequestBusinessAdminApproval) {
+                Button(
+                    onClick = onRequestBusinessAdminApproval,
+                    colors = ButtonDefaults.buttonColors(containerColor = ModAmber, contentColor = Color.Black),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("report_request_biz_admin_${report.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AdminPanelSettings,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Request App Admin Approval (Business Account)", fontWeight = FontWeight.Bold)
+                }
+            }
+
+            if (canRemoveFromBusiness) {
+                Button(
+                    onClick = onRemoveFromBusiness,
+                    colors = ButtonDefaults.buttonColors(containerColor = ModAmber, contentColor = Color.Black),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("report_remove_from_business_${report.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PersonRemove,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Remove ${report.targetName} from Business Account", fontWeight = FontWeight.Bold)
+                }
+            }
+
+            if (canBanDevice) {
+                Button(
+                    onClick = onBanDevice,
+                    colors = ButtonDefaults.buttonColors(containerColor = LiveCoral, contentColor = Color.White),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("report_ban_device_${report.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PhonelinkErase,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Ban ${report.targetName}'s Device (Block All Logins)", fontWeight = FontWeight.Bold)
+                }
             }
 
             if (canToggleMessaging) {

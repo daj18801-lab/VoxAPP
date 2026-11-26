@@ -295,12 +295,12 @@ fun TrialVoxStageApp(
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Lock,
-                                            contentDescription = "Locked photos unavailable in trial",
+                                            contentDescription = "Trial preview mode",
                                             tint = ModAmber,
                                             modifier = Modifier.size(18.dp)
                                         )
                                         Text(
-                                            text = "Showing unlocked public posts only. Trial users cannot view locked photos or buy points.",
+                                            text = "Previewing public community posts. Sign in with Google to post updates, join live rooms, or buy points.",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -310,7 +310,7 @@ fun TrialVoxStageApp(
                             if (unlockedPosts.isEmpty()) {
                                 item(key = "trial_no_posts") {
                                     Text(
-                                        text = "No public unlocked posts yet. Sign in with Google to share posts and connect with friends!",
+                                        text = "No public posts yet. Sign in with Google to share posts and connect with friends!",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(vertical = 24.dp)
@@ -442,11 +442,6 @@ fun TrialVoxStageApp(
                                             icon = Icons.Rounded.ShoppingCart,
                                             title = "Buying Points (Google Play)",
                                             subtitle = "Trial users cannot buy points. Sign in with Google to purchase point packs."
-                                        )
-                                        TrialRestrictedFeatureRow(
-                                            icon = Icons.Rounded.Lock,
-                                            title = "Viewing Locked 18+ Photos",
-                                            subtitle = "Trial users cannot view or unlock locked photos. Sign in with Google to verify 18+."
                                         )
 
                                         Button(

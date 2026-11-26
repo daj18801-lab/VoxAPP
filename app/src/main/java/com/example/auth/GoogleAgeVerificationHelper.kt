@@ -238,7 +238,7 @@ private fun parsePeopleApiBirthdays(jsonBody: String): GoogleAgeCheckOutcome {
         GoogleAgeCheckOutcome.UnderageBlocked(
             ageYears = exactAge,
             sourceLabel = "Google Account",
-            reason = "Your Google Account birthday indicates you are $exactAge years old. You must be 18 or older to lock or view locked photos."
+            reason = "Your Google Account birthday indicates you are $exactAge years old. You must be 18 or older for age-restricted features."
         )
     }
 }

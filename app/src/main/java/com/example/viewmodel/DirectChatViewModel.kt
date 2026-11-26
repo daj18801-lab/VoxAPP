@@ -20,6 +20,7 @@ import com.example.media.PrivateCallForegroundService
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -28,6 +29,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -60,8 +64,25 @@ class DirectChatViewModel(
     private val _useFrontCamera = MutableStateFlow(true)
     val useFrontCamera: StateFlow<Boolean> = _useFrontCamera.asStateFlow()
 
+    val remoteCallSpeakerName: StateFlow<String?> = liveKitManager.remoteActiveSpeakerName
+
     private val _snackbarEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val snackbarEvents: SharedFlow<String> = _snackbarEvents.asSharedFlow()
+
+    private val _isInvisibleOwnerMode = MutableStateFlow(false)
+    val isInvisibleOwnerMode: StateFlow<Boolean> = _isInvisibleOwnerMode.asStateFlow()
+
+    fun initOwnerMonitorMode(initialInvisible: Boolean) {
+        _isInvisibleOwnerMode.value = initialInvisible
+    }
+
+    fun setInvisibleOwnerMode(invisible: Boolean) {
+        _isInvisibleOwnerMode.value = invisible
+        _snackbarEvents.tryEmit(
+            if (invisible) "Switched to Invisible Mode — sub-accounts cannot see you."
+            else "Switched to Visible Mode — your messages will appear visibly as Company Owner."
+        )
+    }
 
     val threadState: StateFlow<UiState<DirectThread?>> = repository.observeDirectThread(threadId)
         .map<DirectThread?, UiState<DirectThread?>> { UiState.Success(it) }
@@ -76,12 +97,49 @@ class DirectChatViewModel(
             initialValue = UiState.Loading
         )
 
-    val messagesState: StateFlow<UiState<List<DirectMessage>>> = repository.observeDirectMessages(threadId)
-        .map<List<DirectMessage>, UiState<List<DirectMessage>>> { UiState.Success(it) }
-        .catch { err ->
-            val root = unwrapFirestoreError(err)
-            Log.w(TAG, "Error observing direct messages $threadId", root)
-            emit(UiState.Error(root.message ?: "Failed to load messages"))
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val messagesState: StateFlow<UiState<List<DirectMessage>>> = threadState
+        .map { state ->
+            when (state) {
+                is UiState.Loading -> null
+                is UiState.Error -> "" to false
+                is UiState.Success -> {
+                    val thread = state.data
+                    val asCompanyOwner = if (thread != null &&
+                        !thread.isGroup &&
+                        thread.companyOwnerId == currentUserId &&
+                        !thread.participantIds.contains(currentUserId)
+                    ) {
+                        currentUserId
+                    } else {
+                        ""
+                    }
+                    val asGroupStaffMod = thread != null &&
+                        thread.isGroup &&
+                        thread.hasStaffAccessOpen() &&
+                        !thread.participantIds.contains(currentUserId)
+                    asCompanyOwner to asGroupStaffMod
+                }
+            }
+        }
+        .distinctUntilChanged()
+        .flatMapLatest { accessMode ->
+            if (accessMode == null) {
+                flowOf(UiState.Loading)
+            } else {
+                val (asCompanyOwnerId, asBusinessStaffHelper) = accessMode
+                repository.observeDirectMessages(
+                    threadId = threadId,
+                    asCompanyOwnerId = asCompanyOwnerId,
+                    asBusinessStaffHelper = asBusinessStaffHelper
+                )
+                    .map<List<DirectMessage>, UiState<List<DirectMessage>>> { UiState.Success(it) }
+                    .catch { err ->
+                        val root = unwrapFirestoreError(err)
+                        Log.w(TAG, "Error observing direct messages $threadId", root)
+                        emit(UiState.Error(root.message ?: "Failed to load messages"))
+                    }
+            }
         }
         .stateIn(
             scope = viewModelScope,
@@ -103,6 +161,7 @@ class DirectChatViewModel(
 
     fun markReadIfNeeded(thread: DirectThread?, sendReadReceipt: Boolean = true) {
         if (thread == null) return
+        if (_isInvisibleOwnerMode.value || !thread.participantIds.contains(currentUserId)) return
         val needsClearUnread = thread.isUnreadFor(currentUserId)
         val allowReceipt = sendReadReceipt && thread.isReadReceiptsEnabledFor(currentUserId)
         val threadUpdatedMs = thread.updatedAt?.toDate()?.time ?: 0L
@@ -178,6 +237,13 @@ class DirectChatViewModel(
         hideSenderName: Boolean = false
     ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
+        val isOwnerMonitor = !thread.isGroup &&
+            thread.companyOwnerId == currentUserId &&
+            !thread.participantIds.contains(currentUserId)
+        if (isOwnerMonitor && _isInvisibleOwnerMode.value) {
+            _snackbarEvents.tryEmit("You are in Invisible Mode. Switch to Visible Mode to send messages.")
+            return
+        }
         val clean = text.trim()
         val cleanImage = imageBase64.trim()
         val cleanAudio = audioBase64.trim()
@@ -227,6 +293,7 @@ class DirectChatViewModel(
 
     fun sendScreenshotNotice(userName: String, senderTier: StaffTier) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
+        if (!thread.participantIds.contains(currentUserId)) return
         val safeName = userName.trim().ifBlank { "Someone" }
         viewModelScope.launch {
             repository.sendDirectMessage(
@@ -249,6 +316,7 @@ class DirectChatViewModel(
         onReported: () -> Unit = {}
     ) {
         val peerTitle = currentPeerTitle()
+        val isGroup = (threadState.value as? UiState.Success)?.data?.isGroup == true
         viewModelScope.launch {
             repository.reportDirectMessage(
                 threadId = threadId,
@@ -256,12 +324,42 @@ class DirectChatViewModel(
                 reporterName = reporterName,
                 message = message,
                 category = category,
-                extraDetails = details
+                extraDetails = details,
+                isGroupThread = isGroup
             ).onSuccess {
-                _snackbarEvents.tryEmit("Message reported to Admin & Support Safety Center.")
+                _snackbarEvents.tryEmit(
+                    if (isGroup) "Message reported — Admin & Support can now enter this Group DM."
+                    else "Message reported to Admin & Support Safety Center."
+                )
                 onReported()
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not submit message report")
+            }
+        }
+    }
+
+    fun reportGroupMember(
+        reporterName: String,
+        targetUserId: String,
+        targetName: String,
+        category: ReportCategory,
+        details: String,
+        onReported: () -> Unit = {}
+    ) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.reportGroupDmUser(
+                thread = thread,
+                reporterName = reporterName,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                category = category,
+                extraDetails = details
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Reported $targetName — Admin & Support can now enter this Group DM.")
+                onReported()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not submit user report")
             }
         }
     }
@@ -357,6 +455,7 @@ class DirectChatViewModel(
     fun setPttEnabled(enabled: Boolean, isAdmin: Boolean = false) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
         val peerName = thread.displayTitle(currentUserId).ifBlank { "this chat" }
+        val isGroupAdminHere = thread.isGroupAdmin(currentUserId)
         viewModelScope.launch {
             repository.setDirectThreadPttEnabled(
                 thread = thread,
@@ -364,6 +463,9 @@ class DirectChatViewModel(
                 autoEnableAllParticipants = isAdmin
             )
                 .onSuccess {
+                    if (!enabled && isGroupAdminHere && thread.groupAdminTalking) {
+                        repository.setGroupDmAdminTalking(threadId, false)
+                    }
                     if (!enabled && LivePttSessionManager.activeThreadId.value == threadId) {
                         LivePttSessionManager.disconnect(appContext)
                     }
@@ -371,6 +473,8 @@ class DirectChatViewModel(
                     val msg = when {
                         enabled && isAdmin ->
                             "Live Push-to-Talk CONNECTED! Automatically enabled for $peerName too."
+                        enabled && isGroupAdminHere ->
+                            "Admin Priority Push-to-Talk CONNECTED! You have full mic access to talk over anyone in $peerName."
                         enabled && otherAlreadyEnabled ->
                             "Live Push-to-Talk CONNECTED with $peerName! Hold the button to stream live audio."
                         enabled ->
@@ -382,6 +486,64 @@ class DirectChatViewModel(
                 }
                 .onFailure { err ->
                     _snackbarEvents.tryEmit(err.message ?: "Could not update Push-to-Talk")
+                }
+        }
+    }
+
+    fun setPttVoiceToText(enabled: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setDirectThreadPttVoiceToText(thread = thread, enabled = enabled)
+                .onSuccess {
+                    val updatedList = if (enabled) {
+                        (thread.pttVoiceToTextUserIds + currentUserId).distinct()
+                    } else {
+                        thread.pttVoiceToTextUserIds.filter { it != currentUserId }
+                    }
+                    LivePttSessionManager.syncActiveThreadPttFlags(
+                        context = appContext,
+                        thread = thread.copy(pttVoiceToTextUserIds = updatedList),
+                        currentUserId = currentUserId
+                    )
+                    _snackbarEvents.tryEmit(
+                        if (enabled) {
+                            "PTT Voice-to-Text ON — Push-to-Talk in this chat will also send as text so you won't miss anything."
+                        } else {
+                            "PTT Voice-to-Text turned off for this chat."
+                        }
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update PTT Voice-to-Text")
+                }
+        }
+    }
+
+    fun setGroupPttDnd(enabled: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setDirectThreadPttDnd(thread = thread, enabled = enabled)
+                .onSuccess {
+                    val updatedList = if (enabled) {
+                        (thread.pttDndUserIds + currentUserId).distinct()
+                    } else {
+                        thread.pttDndUserIds.filter { it != currentUserId }
+                    }
+                    LivePttSessionManager.syncActiveThreadPttFlags(
+                        context = appContext,
+                        thread = thread.copy(pttDndUserIds = updatedList),
+                        currentUserId = currentUserId
+                    )
+                    _snackbarEvents.tryEmit(
+                        if (enabled) {
+                            "Do Not Disturb ON — incoming PTT audio is muted and delivered as Voice-to-Text."
+                        } else {
+                            "Do Not Disturb turned off — incoming PTT voice audio resumed."
+                        }
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Do Not Disturb")
                 }
         }
     }
@@ -510,8 +672,11 @@ class DirectChatViewModel(
                 pointsCost = pointsCost
             ).onSuccess {
                 _snackbarEvents.tryEmit(
-                    if (pointsCost >= 2) "Urgent Break-In Chirp sent! (-2 pts)"
-                    else "Priority Chirp sent! (-1 pt)"
+                    when {
+                        senderTier.isStaff() -> "Priority Chirp sent! (Free Staff Perk)"
+                        pointsCost >= 2 -> "Urgent Break-In Chirp sent! (-2 pts)"
+                        else -> "Priority Chirp sent! (-1 pt)"
+                    }
                 )
             }.onFailure { err ->
                 val msg = err.message ?: "Could not send Priority Chirp"
@@ -528,6 +693,7 @@ class DirectChatViewModel(
         bannerText: String,
         colorHex: String,
         buyerName: String,
+        staffTier: StaffTier = StaffTier.USER,
         onInsufficientPoints: () -> Unit = {},
         onSuccess: () -> Unit = {}
     ) {
@@ -539,9 +705,13 @@ class DirectChatViewModel(
                 thread = thread,
                 bannerText = bannerText,
                 colorHex = colorHex,
-                buyerName = buyerName
+                buyerName = buyerName,
+                staffTier = staffTier
             ).onSuccess {
-                _snackbarEvents.tryEmit("24-Hour Scrolling Banner is LIVE in this DM! (-1 pt)")
+                _snackbarEvents.tryEmit(
+                    if (staffTier.isStaff()) "24-Hour Scrolling Banner is LIVE in this DM! (Free Staff Perk)"
+                    else "24-Hour Scrolling Banner is LIVE in this DM! (-1 pt)"
+                )
                 onSuccess()
             }.onFailure { err ->
                 val msg = err.message ?: "Could not set scrolling banner"
@@ -596,16 +766,72 @@ class DirectChatViewModel(
         }
     }
 
-    fun banGroupMember(targetUserId: String, targetName: String) {
+    fun banGroupMember(
+        targetUserId: String,
+        targetName: String,
+        alsoRemoveFromParticipants: Boolean = false
+    ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
         viewModelScope.launch {
-            repository.banGroupDmUser(thread, targetUserId, targetName)
+            repository.banGroupDmUser(thread, targetUserId, targetName, alsoRemoveFromParticipants)
                 .onSuccess {
                     _snackbarEvents.tryEmit("$targetName banned from this group DM.")
                 }
                 .onFailure { err ->
                     _snackbarEvents.tryEmit(err.message ?: "Could not ban member")
                 }
+        }
+    }
+
+    fun staffEditGroupName(newName: String, actorName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.staffEditGroupDmName(thread, newName, actorName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Group renamed to \"${newName.trim()}\".")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not rename group")
+                }
+        }
+    }
+
+    fun staffRemoveGroupMember(targetUserId: String, targetName: String, actorName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.staffRemoveGroupDmMember(thread, targetUserId, targetName, actorName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Removed $targetName from this group DM.")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not remove member")
+                }
+        }
+    }
+
+    fun staffSetGroupDisabled(disabled: Boolean, reason: String, actorName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.staffSetGroupDmDisabled(thread, disabled, reason, actorName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (disabled) "Group DM disabled due to violations."
+                        else "Group DM re-enabled."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update group status")
+                }
+        }
+    }
+
+    fun switchStaffVisibility(invisible: Boolean, staffName: String) {
+        setInvisibleOwnerMode(invisible)
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        if (!invisible && thread.isGroup && thread.hasStaffAccessOpen() && !thread.staffHelpJoinedIds.contains(currentUserId)) {
+            viewModelScope.launch {
+                repository.joinBusinessStaffHelp(thread, staffName, invisible = false)
+            }
         }
     }
 
@@ -651,6 +877,52 @@ class DirectChatViewModel(
                 .onFailure { err ->
                     _snackbarEvents.tryEmit(err.message ?: "Could not update PTT speaker permissions")
                 }
+        }
+    }
+
+    fun setGroupAnonymousModeDisabled(disabled: Boolean, actorName: String) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setGroupDmAnonymousModeDisabled(thread, disabled, actorName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (disabled) "Anonymous Mode (Hide Name) disabled for this Group DM."
+                        else "Anonymous Mode (Hide Name) enabled for this Group DM."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Anonymous Mode setting")
+                }
+        }
+    }
+
+    fun sendGroupUrgentAlert(
+        senderName: String,
+        senderTier: StaffTier,
+        title: String,
+        message: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        if (_isSending.value) return
+        viewModelScope.launch {
+            _isSending.value = true
+            repository.sendGroupDmUrgentAlert(
+                thread = thread,
+                senderName = senderName,
+                senderTier = senderTier,
+                title = title,
+                message = message
+            ).onSuccess {
+                val recipientCount = (thread.participantIds.size - 1).coerceAtLeast(0)
+                _snackbarEvents.tryEmit(
+                    "Urgent Group Alert sent to $recipientCount member${if (recipientCount == 1) "" else "s"}'s phones!"
+                )
+                onSuccess()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send urgent group alert")
+            }
+            _isSending.value = false
         }
     }
 
@@ -731,6 +1003,49 @@ class DirectChatViewModel(
                 onSubmitted()
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not submit request")
+            }
+        }
+    }
+
+    fun requestBusinessStaffHelp(reason: String, onRequested: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.requestBusinessStaffHelp(threadId, reason)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Requested VOX Staff Help — Support Staff or App Admin can now enter this Group DM.")
+                    onRequested()
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not request VOX Staff help")
+                }
+        }
+    }
+
+    fun endBusinessStaffHelp(actorName: String, onEnded: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.endBusinessStaffHelp(threadId, actorName)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("VOX Staff help session ended. Group DM privacy restored.")
+                    onEnded()
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not end staff help session")
+                }
+        }
+    }
+
+    fun forceStopDisabledSubAccountMedia(micDisabled: Boolean, videoDisabled: Boolean) {
+        if (micDisabled && _isMicActive.value) {
+            _isMicActive.value = false
+            viewModelScope.launch {
+                liveKitManager.setMicEnabled(false)
+                _snackbarEvents.tryEmit("Your microphone was disabled by your company owner.")
+            }
+        }
+        if (videoDisabled && _isCamActive.value) {
+            _isCamActive.value = false
+            viewModelScope.launch {
+                liveKitManager.setCameraEnabled(false)
+                _snackbarEvents.tryEmit("Your video camera was disabled by your company owner.")
             }
         }
     }

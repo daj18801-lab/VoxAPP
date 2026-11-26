@@ -5601,7 +5601,7 @@ test("45. Group DM Support Staff, Tiered Caps (7/15/25/50), and >15-Member PTT S
     await db.collection("users").doc(charlieUid).set(makeUser(charlieUid, "Charlie", "charlie45"));
   });
 
-  // 1) Free user Group DM capped at 7 users (creating with 8 fails; creating with 7 succeeds; adding 8th fails)
+  // 1) Free user Group DM capped at 5 users (creating with 6 fails; creating with 5 succeeds; adding 6th fails)
   const freeGroupId = "group_tier_free_45";
   const baseThread = (ids) => ({
     participantIds: ids,
@@ -5625,11 +5625,11 @@ test("45. Group DM Support Staff, Tiered Caps (7/15/25/50), and >15-Member PTT S
     updatedAt: pastDate(9000),
   });
 
-  await assertFails(aliceDb.collection("directThreads").doc("group_free_8").set(baseThread(makeParticipants(8))));
-  await assertSucceeds(aliceDb.collection("directThreads").doc(freeGroupId).set(baseThread(makeParticipants(7))));
+  await assertFails(aliceDb.collection("directThreads").doc("group_free_6").set(baseThread(makeParticipants(6))));
+  await assertSucceeds(aliceDb.collection("directThreads").doc(freeGroupId).set(baseThread(makeParticipants(5))));
   await assertFails(
     aliceDb.collection("directThreads").doc(freeGroupId).update({
-      participantIds: makeParticipants(8),
+      participantIds: makeParticipants(6),
       updatedAt: pastDate(8900),
     })
   );
@@ -6543,6 +6543,249 @@ test("48. VIP Pro company sub-accounts, supervisors, work orders, employee reque
       reviewedByName: "Lead - Sarah",
       reviewerNote: "Pick up 4 straps from Bay 2.",
       updatedAt: pastDate(600),
+    })
+  );
+});
+
+test("49. Business tier ($99.99/mo), sub-account 1-on-1 company DMs, owner invisible/visible access, and owner sub-account controls (suspend/ban/buzz/fileNotes)", async () => {
+  const OWNER_UID = "biz_owner_49";
+  const EMP1_UID = "biz_emp1_49";
+  const EMP2_UID = "biz_emp2_49";
+  const OUTSIDER_UID = "biz_outsider_49";
+  const CO_THREAD_ID = `company_${OWNER_UID}`;
+  const SUB1_CODE = "EMP_BIZ001";
+  const SUB2_CODE = "EMP_BIZ002";
+  const SUB_DM_ID = `c1v1_${OWNER_UID}_${EMP1_UID}_${EMP2_UID}`;
+  const exp30d = Date.now() + 86400000 * 30;
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("users").doc(OWNER_UID).set(validProfilePayload(OWNER_UID, {
+      displayName: "Biz Boss",
+      age13Verified: true,
+      birthYear: 1988,
+      proMember: true,
+      proTier: "VIP_PRO",
+      proExpiresAtMillis: exp30d,
+      totalSpentCents: 2999,
+    }));
+    await db.collection("users").doc(EMP1_UID).set(validProfilePayload(EMP1_UID, {
+      displayName: "Driver 1",
+      companySubAccount: true,
+      parentCompanyOwnerId: OWNER_UID,
+      companyName: "Biz Logistics",
+      companyThreadId: CO_THREAD_ID,
+      subAccountId: SUB1_CODE,
+    }));
+    await db.collection("users").doc(EMP2_UID).set(validProfilePayload(EMP2_UID, {
+      displayName: "Driver 2",
+      companySubAccount: true,
+      parentCompanyOwnerId: OWNER_UID,
+      companyName: "Biz Logistics",
+      companyThreadId: CO_THREAD_ID,
+      subAccountId: SUB2_CODE,
+    }));
+    await db.collection("users").doc(OUTSIDER_UID).set(validProfilePayload(OUTSIDER_UID, { displayName: "Outsider" }));
+    await db.collection("directThreads").doc(CO_THREAD_ID).set({
+      participantIds: [OWNER_UID, EMP1_UID, EMP2_UID],
+      isGroup: true,
+      groupName: "Biz Logistics",
+      groupAdminId: OWNER_UID,
+      companyOwnerId: OWNER_UID,
+      groupSupervisorIds: [],
+      groupSupportIds: [],
+      userAId: OWNER_UID,
+      userAName: "Biz Boss",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: EMP1_UID,
+      userBName: "Driver 1",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "HQ created",
+      lastMessageSenderId: OWNER_UID,
+      unreadByUserIds: [],
+      createdAt: pastDate(5000),
+      updatedAt: pastDate(5000),
+    });
+    await db.collection("companySubAccounts").doc(SUB1_CODE).set({
+      ownerId: OWNER_UID,
+      ownerName: "Biz Boss",
+      companyName: "Biz Logistics",
+      companyThreadId: CO_THREAD_ID,
+      subName: "Driver 1",
+      roleTitle: "Field",
+      accessCode: SUB1_CODE,
+      claimedUserId: EMP1_UID,
+      claimedEmail: "d1@example.com",
+      supervisor: false,
+      supervisorUids: [],
+      doNotDisturb: false,
+      active: true,
+      claimedAtMillis: Date.now() - 10000,
+      createdAt: pastDate(5000),
+      updatedAt: pastDate(5000),
+    });
+  });
+
+  const ownerDb = testEnv.authenticatedContext(OWNER_UID).firestore();
+  const emp1Db = testEnv.authenticatedContext(EMP1_UID).firestore();
+  const emp2Db = testEnv.authenticatedContext(EMP2_UID).firestore();
+  const outsiderDb = testEnv.authenticatedContext(OUTSIDER_UID).firestore();
+
+  // 1. VIP Pro owner upgrades to Business Account ($99.99/mo -> 9999 cents)
+  const upgBatch = ownerDb.batch();
+  upgBatch.update(ownerDb.collection("users").doc(OWNER_UID), {
+    proMember: true,
+    proTier: "BUSINESS",
+    proExpiresAtMillis: Date.now() + 86400000 * 30,
+    totalSpentCents: 2999 + 9999,
+    updatedAt: pastDate(2000),
+  });
+  upgBatch.set(ownerDb.collection("pointTransactions").doc("tx_biz_49"), {
+    type: "BUSINESS_MEMBERSHIP",
+    buyerId: OWNER_UID,
+    buyerName: "Biz Boss",
+    creatorId: "",
+    creatorName: "",
+    postId: "",
+    pointsDelta: 0,
+    grossCents: 9999,
+    creatorShareCents: 0,
+    platformShareCents: 9999,
+    createdAt: pastDate(2000),
+  });
+  await assertSucceeds(upgBatch.commit());
+
+  // 2. Sub-account CAN create a 1-on-1 DM with another member of the Company Group DM
+  await assertSucceeds(
+    emp1Db.collection("directThreads").doc(SUB_DM_ID).set({
+      participantIds: [EMP1_UID, EMP2_UID],
+      isGroup: false,
+      companyOwnerId: OWNER_UID,
+      userAId: EMP1_UID,
+      userAName: "Driver 1",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: EMP2_UID,
+      userBName: "Driver 2",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: pastDate(1800),
+      updatedAt: pastDate(1800),
+    })
+  );
+
+  // Sub-account CANNOT create a 1-on-1 DM with an outsider not in the Company Group DM
+  await assertFails(
+    emp1Db.collection("directThreads").doc(`c1v1_${OWNER_UID}_${EMP1_UID}_${OUTSIDER_UID}`).set({
+      participantIds: [EMP1_UID, OUTSIDER_UID],
+      isGroup: false,
+      companyOwnerId: OWNER_UID,
+      userAId: EMP1_UID,
+      userAName: "Driver 1",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: OUTSIDER_UID,
+      userBName: "Outsider",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "",
+      lastMessageSenderId: "",
+      unreadByUserIds: [],
+      createdAt: pastDate(1750),
+      updatedAt: pastDate(1750),
+    })
+  );
+
+  // Emp1 sends a message in the company 1-on-1 DM (with companyOwnerId denormalized)
+  await assertSucceeds(
+    emp1Db.collection("directThreads").doc(SUB_DM_ID).collection("messages").doc("m1").set({
+      threadId: SUB_DM_ID,
+      participantIds: [EMP1_UID, EMP2_UID],
+      companyOwnerId: OWNER_UID,
+      senderId: EMP1_UID,
+      senderName: "Driver 1",
+      senderTier: "USER",
+      text: "Meet me at dock 4",
+      createdAt: pastDate(1700),
+    })
+  );
+
+  // 3. Company Owner CAN list/read sub-account 1-on-1 DMs & messages INVISIBLY (not in participantIds)
+  await assertSucceeds(ownerDb.collection("directThreads").where("companyOwnerId", "==", OWNER_UID).get());
+  await assertSucceeds(ownerDb.collection("directThreads").doc(SUB_DM_ID).get());
+  await assertSucceeds(
+    ownerDb.collection("directThreads").doc(SUB_DM_ID).collection("messages")
+      .where("companyOwnerId", "==", OWNER_UID).get()
+  );
+
+  // Company Owner CAN ALSO send a message VISIBLY in the sub-account 1-on-1 DM
+  await assertSucceeds(
+    ownerDb.collection("directThreads").doc(SUB_DM_ID).collection("messages").doc("m2_owner").set({
+      threadId: SUB_DM_ID,
+      participantIds: [EMP1_UID, EMP2_UID],
+      companyOwnerId: OWNER_UID,
+      senderId: OWNER_UID,
+      senderName: "Biz Boss (Owner)",
+      senderTier: "USER",
+      text: "Check in at dock 5 instead.",
+      createdAt: pastDate(1600),
+    })
+  );
+  await assertSucceeds(
+    ownerDb.collection("directThreads").doc(SUB_DM_ID).update({
+      lastMessageText: "Check in at dock 5 instead.",
+      lastMessageSenderId: OWNER_UID,
+      unreadByUserIds: [EMP1_UID, EMP2_UID],
+      updatedAt: pastDate(1600),
+    })
+  );
+
+  // Outsider CANNOT read or send in sub-account 1-on-1 DM
+  await assertFails(outsiderDb.collection("directThreads").doc(SUB_DM_ID).get());
+  await assertFails(
+    outsiderDb.collection("directThreads").doc(SUB_DM_ID).collection("messages").doc("m1").get()
+  );
+
+  // 4. Owner full sub-account controls: Suspend, Buzz Phone, Ban, and Private File Notes
+  await assertSucceeds(
+    ownerDb.collection("companySubAccounts").doc(SUB1_CODE).update({
+      suspendedUntilMillis: Date.now() + 3600000,
+      moderationReason: "Late to shift check-in",
+      lastBuzzAtMillis: Date.now(),
+      lastBuzzMessage: "Answer dispatch immediately",
+      lastBuzzByName: "Biz Boss",
+      updatedAt: pastDate(1500),
+    })
+  );
+
+  // Owner adds a private File Note; Owner can read it; Sub-account & Outsider CANNOT read it
+  await assertSucceeds(
+    ownerDb.collection("companySubAccounts").doc(SUB1_CODE).collection("fileNotes").doc("note1").set({
+      ownerId: OWNER_UID,
+      subAccountId: SUB1_CODE,
+      authorId: OWNER_UID,
+      authorName: "Biz Boss",
+      category: "INCIDENT",
+      note: "Issued verbal warning for missed radio check.",
+      createdAt: pastDate(1400),
+    })
+  );
+  await assertSucceeds(ownerDb.collection("companySubAccounts").doc(SUB1_CODE).collection("fileNotes").get());
+  await assertFails(emp1Db.collection("companySubAccounts").doc(SUB1_CODE).collection("fileNotes").get());
+  await assertFails(outsiderDb.collection("companySubAccounts").doc(SUB1_CODE).collection("fileNotes").get());
+
+  // Owner bans sub-account
+  await assertSucceeds(
+    ownerDb.collection("companySubAccounts").doc(SUB1_CODE).update({
+      banned: true,
+      active: false,
+      moderationReason: "Removed from company roster",
+      updatedAt: pastDate(1300),
     })
   );
 });

@@ -38,6 +38,7 @@ import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Verified
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -157,10 +158,22 @@ fun ChatsHomeScreen(
     }
 
     val rawThreads = (directThreadsState as? UiState.Success)?.data.orEmpty()
-    val allThreads = remember(rawThreads, isSubAccount, userProfile?.companyThreadId) {
+    val allThreads = remember(rawThreads, isSubAccount, userProfile?.companyThreadId, userProfile?.parentCompanyOwnerId, currentUserId) {
         if (isSubAccount) {
             val targetId = userProfile?.companyThreadId.orEmpty()
-            rawThreads.filter { targetId.isNotBlank() && it.id == targetId }
+            val ownerId = userProfile?.parentCompanyOwnerId.orEmpty()
+            rawThreads
+                .filter { thread ->
+                    (targetId.isNotBlank() && thread.id == targetId) ||
+                        (ownerId.isNotBlank() &&
+                            !thread.isGroup &&
+                            thread.companyOwnerId == ownerId &&
+                            thread.participantIds.contains(currentUserId))
+                }
+                .sortedByDescending { thread ->
+                    if (thread.id == targetId) Long.MAX_VALUE
+                    else (thread.updatedAt?.toDate()?.time ?: 0L)
+                }
         } else {
             rawThreads
         }
@@ -475,9 +488,21 @@ fun ChatsHomeScreen(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = if (pendingWorkOrdersCount > 0) "Work Orders ($pendingWorkOrdersCount)" else "Work Orders & Requests",
+                                            text = if (pendingWorkOrdersCount > 0) "Orders ($pendingWorkOrdersCount)" else "Work Orders",
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = onOpenFriendsTab,
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier
+                                            .height(48.dp)
+                                            .testTag("sub_account_message_teammate_button")
+                                    ) {
+                                        Text(
+                                            text = "1-on-1 DM",
+                                            maxLines = 1
                                         )
                                     }
                                 }
@@ -921,6 +946,7 @@ private fun SnapChatFeedRow(
     onAvatarClick: () -> Unit
 ) {
     val isGroup = thread.isGroup
+    val isVoxOfficial = thread.voxOfficial
     val title = thread.displayTitle(currentUserId)
     val otherColorHex = thread.otherColorHex(currentUserId)
     val otherTier = if (isGroup) StaffTier.USER else thread.otherTier(currentUserId)
@@ -940,7 +966,27 @@ private fun SnapChatFeedRow(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (isGroup) {
+            if (isVoxOfficial) {
+                Box(
+                    modifier = Modifier
+                        .size(50.dp)
+                        .clip(CircleShape)
+                        .background(SnapBlue)
+                        .border(
+                            width = if (isUnread) 2.dp else 1.dp,
+                            color = if (isUnread) ModAmber else Color.White.copy(alpha = 0.35f),
+                            shape = CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Verified,
+                        contentDescription = "Official VOX Message",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            } else if (isGroup) {
                 Box(
                     modifier = Modifier
                         .size(50.dp)
@@ -980,24 +1026,40 @@ private fun SnapChatFeedRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (!isGroup) {
+                    if (!isGroup && !isVoxOfficial) {
                         PresenceStatusDot(
                             status = otherStatus,
                             modifier = Modifier.testTag("chat_row_presence_${thread.id}")
                         )
                     }
-                    val otherUid = if (isGroup) null else thread.otherUserId(currentUserId)
+                    val otherUid = if (isGroup || isVoxOfficial) null else thread.otherUserId(currentUserId)
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = if (isUnread) FontWeight.ExtraBold else FontWeight.SemiBold
+                            fontWeight = if (isUnread || isVoxOfficial) FontWeight.ExtraBold else FontWeight.SemiBold
                         ),
-                        color = if (isGroup) MaterialTheme.colorScheme.onSurface else usernameColor(otherTier, userId = otherUid),
+                        color = when {
+                            isVoxOfficial -> SnapBlue
+                            isGroup -> MaterialTheme.colorScheme.onSurface
+                            else -> usernameColor(otherTier, userId = otherUid)
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    if (isGroup) {
+                    if (isVoxOfficial) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = SnapBlue.copy(alpha = 0.16f)
+                        ) {
+                            Text(
+                                text = "Official • No Reply",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                color = SnapBlue,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                    } else if (isGroup) {
                         Surface(
                             shape = RoundedCornerShape(999.dp),
                             color = MaterialTheme.colorScheme.primaryContainer

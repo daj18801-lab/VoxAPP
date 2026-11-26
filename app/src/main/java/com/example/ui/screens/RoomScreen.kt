@@ -5,10 +5,16 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,6 +34,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -37,6 +44,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.AddReaction
 import androidx.compose.material.icons.rounded.Cameraswitch
 import androidx.compose.material.icons.rounded.Edit
@@ -54,6 +62,9 @@ import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WavingHand
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -67,6 +78,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -83,6 +95,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -98,6 +111,7 @@ import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.media.LiveKitVideoView
+import com.example.media.LivePttSessionManager
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.RemoteVideoTrack
@@ -153,7 +167,15 @@ fun RoomScreen(
     val liveVoiceAmplitude by viewModel.liveVoiceAmplitude.collectAsStateWithLifecycle()
     val slowModeCountdown by viewModel.slowModeCountdown.collectAsStateWithLifecycle()
     val isCurrentlyInvisible by viewModel.isCurrentlyInvisible.collectAsStateWithLifecycle()
+    val isRoomAudioMutedForPtt by viewModel.isRoomAudioMutedForPtt.collectAsStateWithLifecycle()
+    val pttActiveThreadId by LivePttSessionManager.activeThreadId.collectAsStateWithLifecycle()
+    val pttIsConnected by LivePttSessionManager.isConnected.collectAsStateWithLifecycle()
+    val pttIsConnecting by LivePttSessionManager.isConnecting.collectAsStateWithLifecycle()
+    val pttPeerName by LivePttSessionManager.activePeerName.collectAsStateWithLifecycle()
+    val isPttActive = !pttActiveThreadId.isNullOrBlank() && (pttIsConnected || pttIsConnecting)
 
+    var showPttConflictDialog by remember { mutableStateOf(false) }
+    var handledPttConflictForRoomId by remember { mutableStateOf<String?>(null) }
     var showModCenter by remember { mutableStateOf(false) }
     var showParticipants by remember { mutableStateOf(false) }
     var showEditRoomDialog by remember { mutableStateOf(false) }
@@ -218,7 +240,11 @@ fun RoomScreen(
     }
 
     BackHandler {
-        viewModel.leaveRoomAndExit(onExitRoom)
+        if (showParticipants) {
+            showParticipants = false
+        } else {
+            viewModel.leaveRoomAndExit(onExitRoom)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -248,6 +274,18 @@ fun RoomScreen(
     LaunchedEffect(room?.id) {
         if (room != null && room.status == "LIVE") {
             viewModel.ensureJoined(room, userProfile)
+        }
+    }
+
+    LaunchedEffect(room?.id, isPttActive) {
+        val liveRoomId = room?.takeIf { it.status == "LIVE" }?.id
+        if (liveRoomId != null && isPttActive && handledPttConflictForRoomId != liveRoomId) {
+            handledPttConflictForRoomId = liveRoomId
+            viewModel.setRoomAudioMutedForPtt(true)
+            showPttConflictDialog = true
+        } else if (!isPttActive && isRoomAudioMutedForPtt) {
+            viewModel.setRoomAudioMutedForPtt(false)
+            showPttConflictDialog = false
         }
     }
 
@@ -314,6 +352,59 @@ fun RoomScreen(
                             onOpenParticipants = { showParticipants = true },
                             onOpenModCenter = { showModCenter = true }
                         )
+
+                        // Active PTT Room Audio Muted Banner
+                        if (isRoomAudioMutedForPtt) {
+                            Surface(
+                                color = ModAmber.copy(alpha = 0.16f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("room_ptt_audio_muted_banner")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Rounded.VolumeOff,
+                                            contentDescription = "Room audio muted while PTT is active",
+                                            tint = ModAmber,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "PTT Active (${pttPeerName.ifBlank { "Private Chat" }}) · Room audio muted",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = ModAmber,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    TextButton(
+                                        onClick = {
+                                            LivePttSessionManager.disconnect(context)
+                                            viewModel.setRoomAudioMutedForPtt(false)
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.testTag("room_ptt_banner_close_ptt_button")
+                                    ) {
+                                        Text(
+                                            text = "Close PTT & Hear",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = ModAmber
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
                         // Stealth Invisible Mode Banner (shown to the invisible Admin / Support / Room Admin)
                         if (isCurrentlyInvisible) {
@@ -533,6 +624,81 @@ fun RoomScreen(
         }
         }
 
+        // Right-side slide-over Chatroom User List Drawer
+        AnimatedVisibility(
+            visible = showParticipants && room != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.48f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { showParticipants = false }
+                    )
+                    .testTag("room_user_list_scrim")
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showParticipants && room != null,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+        ) {
+            val activeDrawerRoom = room
+            if (activeDrawerRoom != null) {
+                Surface(
+                    shape = RoundedCornerShape(topStart = 24.dp, bottomStart = 24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 8.dp,
+                    shadowElevation = 14.dp,
+                    border = BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.84f)
+                        .widthIn(max = 360.dp)
+                        .testTag("room_user_list_right_drawer")
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                            .navigationBarsPadding()
+                    ) {
+                        ParticipantsSheetContent(
+                            room = activeDrawerRoom,
+                            participants = participants,
+                            currentUserId = viewModel.currentUserId,
+                            staffCapabilities = staffCapabilities,
+                            onSelectParticipant = { p ->
+                                showParticipants = false
+                                actionTarget = ActionTarget(p.userId, p.displayName, p.staffTierEnum(), p, null)
+                            },
+                            onApproveSpeaker = { p ->
+                                viewModel.changeParticipantRole(
+                                    p.userId,
+                                    p.displayName,
+                                    userProfile.displayName,
+                                    ParticipantRole.SPEAKER
+                                )
+                            },
+                            onClose = { showParticipants = false }
+                        )
+                    }
+                }
+            }
+        }
+
         TopSnackbarOverlay(
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.TopCenter)
@@ -612,28 +778,7 @@ fun RoomScreen(
         }
     }
 
-    if (showParticipants && room != null) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showParticipants = false },
-            sheetState = sheetState,
-            containerColor = MaterialTheme.colorScheme.surface
-        ) {
-            ParticipantsSheetContent(
-                room = room,
-                participants = participants,
-                currentUserId = viewModel.currentUserId,
-                staffCapabilities = staffCapabilities,
-                onSelectParticipant = { p ->
-                    showParticipants = false
-                    actionTarget = ActionTarget(p.userId, p.displayName, p.staffTierEnum(), p, null)
-                },
-                onApproveSpeaker = { p ->
-                    viewModel.changeParticipantRole(p.userId, p.displayName, userProfile.displayName, ParticipantRole.SPEAKER)
-                }
-            )
-        }
-    }
+    // Participants list is now rendered as a right-side slide-over drawer inside the root Box above.
 
     val currentTarget = actionTarget
     if (currentTarget != null && room != null) {
@@ -730,6 +875,69 @@ fun RoomScreen(
                 onDismiss = { actionTarget = null }
             )
         }
+    }
+
+    if (showPttConflictDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                viewModel.setRoomAudioMutedForPtt(true)
+                showPttConflictDialog = false
+            },
+            modifier = Modifier.testTag("room_ptt_conflict_dialog"),
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.RecordVoiceOver,
+                    contentDescription = "Push-to-Talk active",
+                    tint = ModAmber
+                )
+            },
+            title = {
+                Text(
+                    text = "Push-to-Talk Is Active",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "You have an active Push-to-Talk session (${pttPeerName.ifBlank { "Private Chat" }}). " +
+                        "You cannot hear chat room audio while PTT is open. " +
+                        "Choose whether to close PTT so you can hear this room, or keep PTT open and enter with no room audio."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        LivePttSessionManager.disconnect(context)
+                        viewModel.setRoomAudioMutedForPtt(false)
+                        showPttConflictDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SafetyEmerald,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.testTag("room_ptt_conflict_close_ptt_button")
+                ) {
+                    Text(
+                        text = "Close PTT & Hear Room",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.setRoomAudioMutedForPtt(true)
+                        showPttConflictDialog = false
+                    },
+                    modifier = Modifier.testTag("room_ptt_conflict_keep_ptt_button")
+                ) {
+                    Text(
+                        text = "Keep PTT (No Room Audio)",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        )
     }
 
     transferTarget?.let { target ->
