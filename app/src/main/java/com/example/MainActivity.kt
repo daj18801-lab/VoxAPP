@@ -18,14 +18,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Assignment
+import androidx.compose.material.icons.automirrored.rounded.Assignment
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.GraphicEq
+import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material3.AlertDialog
@@ -54,6 +58,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -89,24 +94,31 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.ui.text.font.FontWeight
 import com.example.auth.AuthScreen
+import com.example.auth.SubAccountLoginPrefs
 import com.example.auth.TrialSession
 import com.example.auth.TrialSessionManager
 import com.example.auth.authStateFlow
 import com.example.auth.signOutFromVoxStage
 import com.example.billing.PlayBillingEvent
 import com.example.billing.PlayBillingManager
+import com.example.data.AdminPreviewMode
 import com.example.data.AlertSeverity
+import com.example.data.AppBroadcast
 import com.example.data.AppConfig
 import com.example.data.DirectThread
 import com.example.data.ProTier
 import com.example.data.ReportStatus
 import com.example.data.SuspensionRequestStatus
 import com.example.data.UiState
+import com.example.data.UserAlert
 import com.example.data.UserProfile
 import com.example.data.VoxStageRepository
+import com.example.data.WorkOrderStatus
 import com.example.ui.screens.ChatsHomeScreen
+import com.example.ui.screens.CompanyTeamConsoleScreen
 import com.example.ui.screens.DirectChatScreen
 import com.example.ui.screens.DiscoverUsersScreen
+import com.example.ui.screens.EmployeeWorkHubScreen
 import com.example.ui.screens.FriendsScreen
 import com.example.ui.screens.IncomingAlertModalDialog
 import com.example.ui.screens.LobbyScreen
@@ -114,13 +126,20 @@ import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.ReelsScreen
 import com.example.ui.screens.RoomScreen
 import com.example.ui.screens.SafetyScreen
+import com.example.ui.screens.SubAccountBasicProfileScreen
 import com.example.ui.screens.TrialVoxStageApp
+import com.example.ui.screens.WorkOrderAlertModalDialog
+import com.example.security.DeviceBanManager
+import com.example.security.MessageSpamTracker
 import com.example.ui.components.AccountSuspendedGateScreen
+import com.example.ui.components.AdminPreviewFloatingBanner
 import com.example.ui.components.Age13GateDialog
 import com.example.ui.components.AgeVerificationDialog
 import com.example.ui.components.FloatingPttOverlayBubble
+import com.example.ui.components.LocalCustomNameColors
 import com.example.ui.components.LocalProUserIds
 import com.example.ui.components.LocalSpotlightFrameByUserId
+import com.example.ui.components.SpamWarningModalDialog
 import com.example.ui.components.StrikeWarningModalDialog
 import com.example.ui.components.TopSnackbarOverlay
 import com.example.ui.components.formatTimestampShort
@@ -154,6 +173,8 @@ const val ROUTE_FRIENDS = "friends"
 const val ROUTE_DISCOVER = "discover"
 const val ROUTE_SAFETY = "safety"
 const val ROUTE_PROFILE = "profile"
+const val ROUTE_WORK_HUB = "work_hub"
+const val ROUTE_COMPANY_TEAM = "company_team"
 const val ROUTE_USER_PROFILE = "user/{userId}"
 const val ROUTE_DM = "dm/{threadId}"
 const val ROUTE_ROOM = "room/{roomId}"
@@ -171,6 +192,13 @@ private val topDestinations = listOf(
     TopDestination(ROUTE_REELS, "Reels", Icons.Rounded.VideoLibrary, Icons.Outlined.VideoLibrary, "nav_reels"),
     TopDestination(ROUTE_DISCOVER_USERS, "Discover", Icons.Rounded.Explore, Icons.Outlined.Explore, "nav_discover_users"),
     TopDestination(ROUTE_DISCOVER, "Rooms", Icons.Rounded.GraphicEq, Icons.Outlined.GraphicEq, "nav_discover"),
+    TopDestination(ROUTE_PROFILE, "Profile", Icons.Rounded.Person, Icons.Outlined.PersonOutline, "nav_profile")
+)
+
+private val subAccountTopDestinations = listOf(
+    TopDestination(ROUTE_CHATS, "Team DM", Icons.Rounded.ChatBubble, Icons.Outlined.ChatBubbleOutline, "nav_chats"),
+    TopDestination(ROUTE_WORK_HUB, "Work", Icons.AutoMirrored.Rounded.Assignment, Icons.AutoMirrored.Outlined.Assignment, "nav_work_hub"),
+    TopDestination(ROUTE_FRIENDS, "Team", Icons.Rounded.Groups, Icons.Outlined.Groups, "nav_team_friends"),
     TopDestination(ROUTE_PROFILE, "Profile", Icons.Rounded.Person, Icons.Outlined.PersonOutline, "nav_profile")
 )
 
@@ -387,7 +415,10 @@ private fun AuthenticatedVoxStageApp(
         }
     )
 
+    val realStaffCapabilities by mainViewModel.realStaffCapabilities.collectAsStateWithLifecycle()
     val staffCapabilities by mainViewModel.staffCapabilities.collectAsStateWithLifecycle()
+    val adminPreviewMode by mainViewModel.adminPreviewMode.collectAsStateWithLifecycle()
+    val realUserProfileState by mainViewModel.realUserProfileState.collectAsStateWithLifecycle()
     val userProfileState by mainViewModel.userProfileState.collectAsStateWithLifecycle()
     val directThreadsState by mainViewModel.directThreadsState.collectAsStateWithLifecycle()
     val friendships by mainViewModel.friendshipsState.collectAsStateWithLifecycle()
@@ -433,6 +464,11 @@ private fun AuthenticatedVoxStageApp(
     val refundReports by mainViewModel.refundReportsState.collectAsStateWithLifecycle()
     val perkGrants by mainViewModel.perkGrantsState.collectAsStateWithLifecycle()
     val adminNotifications by mainViewModel.adminNotificationsState.collectAsStateWithLifecycle()
+    val companySubAccounts by mainViewModel.companySubAccountsState.collectAsStateWithLifecycle()
+    val incomingWorkOrders by mainViewModel.incomingWorkOrdersState.collectAsStateWithLifecycle()
+    val teamWorkOrders by mainViewModel.teamWorkOrdersState.collectAsStateWithLifecycle()
+    val myEmployeeRequests by mainViewModel.myEmployeeRequestsState.collectAsStateWithLifecycle()
+    val teamEmployeeRequests by mainViewModel.teamEmployeeRequestsState.collectAsStateWithLifecycle()
     val nowClockMs = rememberPresenceClockMillis()
 
     // Google Play Store Billing client for buying points
@@ -442,11 +478,46 @@ private fun AuthenticatedVoxStageApp(
         onDispose { playBillingManager.endConnection() }
     }
 
+    val realUserProfile = (realUserProfileState as? UiState.Success)?.data
     val userProfile = (userProfileState as? UiState.Success)?.data
+    val isSubAccount = userProfile?.companySubAccount == true
+    val isDndActive = userProfile?.doNotDisturb == true
+    val latestIsDndActive by rememberUpdatedState(isDndActive)
+    val allDirectThreads = remember(directThreadsState) {
+        (directThreadsState as? UiState.Success)?.data.orEmpty()
+    }
+    val companyThread = remember(allDirectThreads, isSubAccount, userProfile?.companyThreadId, currentUserId) {
+        allDirectThreads.firstOrNull { thread ->
+            if (isSubAccount) {
+                thread.id == userProfile?.companyThreadId
+            } else {
+                thread.companyOwnerId == currentUserId || thread.isGroupSupervisor(currentUserId)
+            }
+        }
+    }
+    val canManageCompany = userProfile?.canManageCompanySubAccounts(staffCapabilities.tier) == true
+    val isCompanySupervisor = companyThread?.isGroupSupervisor(currentUserId) == true
+    val unackWorkOrdersCount = remember(incomingWorkOrders) {
+        incomingWorkOrders.count { it.statusEnum() == WorkOrderStatus.OPEN }
+    }
     val nightModeEnabled = userProfile?.nightModeEnabled ?: false
     val myPointsBalance = userProfile?.pointsBalance ?: 0L
     val subscribedCreatorIds = remember(mySubscriptions) {
         mySubscriptions.filter { it.isCurrentlyActive() }.map { it.creatorId }.toSet()
+    }
+
+    // Complete pending Company Employee Sub-Account claim immediately after Google Sign-In
+    LaunchedEffect(currentUserId, realUserProfile?.userId) {
+        val profile = realUserProfile ?: return@LaunchedEffect
+        val pending = SubAccountLoginPrefs.getPendingClaim(context) ?: return@LaunchedEffect
+        SubAccountLoginPrefs.clear(context)
+        if (!profile.companySubAccount) {
+            mainViewModel.claimCompanySubAccount(
+                subNameInput = pending.subName,
+                accessCodeInput = pending.accessCode,
+                myEmail = initialEmail
+            )
+        }
     }
     var profileInitialTab by remember { mutableIntStateOf(0) }
     var showAgeVerificationDialog by remember { mutableStateOf(false) }
@@ -464,11 +535,70 @@ private fun AuthenticatedVoxStageApp(
         mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context))
     }
     var dismissedInAppFloatingPttThreadId by remember { mutableStateOf<String?>(null) }
+    var dismissedNonUrgentAlertKeys by remember(currentUserId) {
+        mutableStateOf(DirectMessageNotificationPrefs.getDismissedNonUrgentAlertKeys(context, currentUserId))
+    }
+    var activePopupAlert by remember(currentUserId) { mutableStateOf<UserAlert?>(null) }
+    val nextPendingUserAlert = remember(unreadAlerts, dismissedNonUrgentAlertKeys, isDndActive) {
+        unreadAlerts.firstOrNull { alert ->
+            val key = "${alert.id}_${alert.updatedAt?.seconds ?: 0L}"
+            val isUrgent = alert.severityEnum() == AlertSeverity.URGENT
+            if (isDndActive && !isUrgent) false
+            else isUrgent || key !in dismissedNonUrgentAlertKeys
+        }
+    }
+    LaunchedEffect(nextPendingUserAlert?.id, nextPendingUserAlert?.updatedAt, activePopupAlert?.id) {
+        if (activePopupAlert == null && nextPendingUserAlert != null) {
+            activePopupAlert = nextPendingUserAlert
+            if (nextPendingUserAlert.severityEnum() != AlertSeverity.URGENT) {
+                val key = "${nextPendingUserAlert.id}_${nextPendingUserAlert.updatedAt?.seconds ?: 0L}"
+                DirectMessageNotificationPrefs.markNonUrgentAlertDismissed(context, currentUserId, key)
+                dismissedNonUrgentAlertKeys = dismissedNonUrgentAlertKeys + key
+            }
+        }
+    }
+    LaunchedEffect(unreadAlerts) {
+        val current = activePopupAlert
+        if (current != null && unreadAlerts.none { it.id == current.id }) {
+            activePopupAlert = null
+        }
+    }
     var dismissedBroadcastIds by remember(currentUserId) {
         mutableStateOf(DirectMessageNotificationPrefs.getDismissedBroadcastIds(context, currentUserId))
     }
-    val nextUnreadAppBroadcast = remember(appBroadcasts, dismissedBroadcastIds) {
-        appBroadcasts.firstOrNull { it.id.isNotBlank() && it.id !in dismissedBroadcastIds }
+    var activePopupBroadcast by remember(currentUserId) { mutableStateOf<AppBroadcast?>(null) }
+    val nextUnreadAppBroadcast = remember(appBroadcasts, dismissedBroadcastIds, isDndActive) {
+        appBroadcasts.firstOrNull {
+            it.id.isNotBlank() &&
+                it.id !in dismissedBroadcastIds &&
+                (!isDndActive || it.severityEnum() == AlertSeverity.URGENT)
+        }
+    }
+    LaunchedEffect(activePopupAlert?.id, nextUnreadAppBroadcast?.id, activePopupBroadcast?.id) {
+        if (activePopupAlert == null && activePopupBroadcast == null && nextUnreadAppBroadcast != null) {
+            activePopupBroadcast = nextUnreadAppBroadcast
+            if (nextUnreadAppBroadcast.severityEnum() != AlertSeverity.URGENT) {
+                DirectMessageNotificationPrefs.markBroadcastDismissed(context, currentUserId, nextUnreadAppBroadcast.id)
+                dismissedBroadcastIds = dismissedBroadcastIds + nextUnreadAppBroadcast.id
+            }
+        }
+    }
+    var dismissedWorkOrderIds by remember(currentUserId) { mutableStateOf(emptySet<String>()) }
+    val activeWorkOrderAlert = remember(incomingWorkOrders, dismissedWorkOrderIds, isDndActive) {
+        incomingWorkOrders.firstOrNull { order ->
+            order.statusEnum() == WorkOrderStatus.OPEN &&
+                order.id !in dismissedWorkOrderIds &&
+                (!isDndActive || order.isUrgent())
+        }
+    }
+    var lastAlertedWorkOrderId by remember(currentUserId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(activeWorkOrderAlert?.id) {
+        val order = activeWorkOrderAlert ?: return@LaunchedEffect
+        if (order.id != lastAlertedWorkOrderId) {
+            lastAlertedWorkOrderId = order.id
+            com.example.media.PttChirpSoundEngine.playPriorityBreakInChirp(urgent = order.isUrgent())
+            LivePttSessionManager.triggerPttHaptic(context)
+        }
     }
     val appLifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(appLifecycleOwner, context) {
@@ -506,14 +636,44 @@ private fun AuthenticatedVoxStageApp(
     val directoryPhotoByUid = remember(directoryEntries) {
         directoryEntries.associate { it.userId to it.photoBase64 }
     }
-    val proUserIds = remember(directoryEntries, userProfile?.proMember, userProfile?.proExpiresAtMillis, currentUserId) {
+    val proUserIds = remember(
+        directoryEntries,
+        userProfile?.proMember,
+        userProfile?.proExpiresAtMillis,
+        userProfile?.proLifetime,
+        realUserProfile?.customMembershipTier,
+        adminPreviewMode,
+        currentUserId
+    ) {
         buildSet {
             directoryEntries.forEach { entry ->
                 if (entry.isProActive()) add(entry.userId)
             }
-            if (userProfile?.isProSubscriberOnly() == true) {
-                add(currentUserId)
+            val myDisguiseTier = realUserProfile?.customMembershipTier?.uppercase().orEmpty()
+            val showMeAsPro = when {
+                adminPreviewMode == AdminPreviewMode.FREE || adminPreviewMode == AdminPreviewMode.SUPPORT -> false
+                adminPreviewMode == AdminPreviewMode.VOX_PRO ||
+                    adminPreviewMode == AdminPreviewMode.VIP_PRO ||
+                    adminPreviewMode == AdminPreviewMode.ELITE_PRO -> true
+                myDisguiseTier in listOf("PRO", "VIP_PRO", "ELITE_PRO") -> true
+                myDisguiseTier in listOf("FREE", "SUPPORT", "ADMIN") -> false
+                else -> userProfile?.isProSubscriberOnly() == true
             }
+            if (showMeAsPro) add(currentUserId) else remove(currentUserId)
+        }
+    }
+    val customNameColorsByUserId = remember(
+        directoryEntries,
+        realUserProfile?.customNameColorHex,
+        currentUserId
+    ) {
+        buildMap {
+            directoryEntries.forEach { entry ->
+                val hex = entry.customNameColorHex.trim()
+                if (hex.isNotBlank()) put(entry.userId, hex)
+            }
+            val myHex = realUserProfile?.customNameColorHex?.trim().orEmpty()
+            if (myHex.isNotBlank()) put(currentUserId, myHex) else remove(currentUserId)
         }
     }
     val activeSpotlightFramesByUserId = remember(
@@ -541,12 +701,31 @@ private fun AuthenticatedVoxStageApp(
     val currentRoute = backStackEntry?.destination?.route
     val showTopNav = currentRoute in listOf(
         ROUTE_CHATS,
+        ROUTE_WORK_HUB,
         ROUTE_REELS,
         ROUTE_DISCOVER_USERS,
         ROUTE_FRIENDS,
         ROUTE_DISCOVER,
         ROUTE_PROFILE
     )
+
+    // Sub-accounts are strictly locked to Company DM, Work Hub, Team Roster, and Basic Profile
+    LaunchedEffect(isSubAccount, currentRoute) {
+        if (isSubAccount && currentRoute in listOf(
+                ROUTE_REELS,
+                ROUTE_DISCOVER_USERS,
+                ROUTE_DISCOVER,
+                ROUTE_ROOM,
+                ROUTE_SAFETY,
+                ROUTE_USER_PROFILE
+            )
+        ) {
+            navController.navigate(ROUTE_CHATS) {
+                popUpTo(ROUTE_CHATS) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
 
     val openSafetyReportsCount = remember(safetyReportsState) {
         (safetyReportsState as? UiState.Success)?.data?.count { it.statusEnum() == ReportStatus.OPEN } ?: 0
@@ -569,8 +748,49 @@ private fun AuthenticatedVoxStageApp(
             unreadAlerts.size + if (myModerationFile?.hasUnacknowledgedWarning() == true) 1 else 0
     }
 
-    val isSuspendedNow = !staffCapabilities.isAdmin && (
-        userProfile?.globallyBanned == true ||
+    val deviceHash = remember(context) { DeviceBanManager.getDeviceHash(context) }
+    val bannedDevice by remember(deviceHash, currentUserId) {
+        mainViewModel.observeBannedDevice(deviceHash)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val spamWarningMessage by MessageSpamTracker.spamWarningDialogMessage.collectAsStateWithLifecycle()
+
+    LaunchedEffect(currentUserId, deviceHash) {
+        mainViewModel.registerDeviceId(deviceHash)
+    }
+
+    LaunchedEffect(realUserProfile?.globallyBanned, realStaffCapabilities.isAdmin, bannedDevice, deviceHash) {
+        val deviceBanRecord = bannedDevice
+        when {
+            !realStaffCapabilities.isAdmin && realUserProfile?.globallyBanned == true -> {
+                DeviceBanManager.markLocalDeviceBanned(
+                    context = context,
+                    reason = realUserProfile.suspensionReason.ifBlank { "Account globally banned" }
+                )
+                mainViewModel.syncSelfDeviceBanIfGloballyBanned(deviceHash)
+            }
+            !realStaffCapabilities.isAdmin && deviceBanRecord?.active == true -> {
+                DeviceBanManager.markLocalDeviceBanned(
+                    context = context,
+                    reason = deviceBanRecord.reason.ifBlank { "Device banned from VOX" }
+                )
+            }
+            deviceBanRecord != null && !deviceBanRecord.active && realUserProfile?.globallyBanned != true -> {
+                DeviceBanManager.clearLocalDeviceBan(context)
+            }
+        }
+    }
+
+    val isDeviceBannedNow = !realStaffCapabilities.isAdmin && (
+        bannedDevice?.active == true ||
+            (bannedDevice == null && DeviceBanManager.isLocallyDeviceBanned(context))
+        )
+    val effectiveDeviceBanReason = bannedDevice?.reason?.ifBlank {
+        DeviceBanManager.getLocalDeviceBanReason(context)
+    } ?: DeviceBanManager.getLocalDeviceBanReason(context)
+
+    val isSuspendedNow = !realStaffCapabilities.isAdmin && (
+        isDeviceBannedNow ||
+            userProfile?.globallyBanned == true ||
             userProfile?.currentlySuspended(nowClockMs) == true ||
             myModerationFile?.isCurrentlySuspended(nowClockMs) == true
         )
@@ -776,10 +996,14 @@ private fun AuthenticatedVoxStageApp(
 
     // Play the distinct two-tone radio alert whenever a close friend sends a Priority Break-In Chirp
     var lastAlertedPriorityChirpMs by remember(currentUserId) { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(directThreadsState, currentUserId) {
+    LaunchedEffect(directThreadsState, currentUserId, isDndActive) {
         val threads = (directThreadsState as? UiState.Success)?.data ?: return@LaunchedEffect
         val newest = threads
-            .filter { it.hasActivePriorityChirpFor(currentUserId) && it.lastPriorityChirpAtMillis > lastAlertedPriorityChirpMs }
+            .filter {
+                it.hasActivePriorityChirpFor(currentUserId) &&
+                    it.lastPriorityChirpAtMillis > lastAlertedPriorityChirpMs &&
+                    (!isDndActive || it.lastPriorityChirpPoints >= 2)
+            }
             .maxByOrNull { it.lastPriorityChirpAtMillis }
         if (newest != null) {
             lastAlertedPriorityChirpMs = newest.lastPriorityChirpAtMillis
@@ -793,11 +1017,12 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
-    // Keep Live PTT clip duration synchronized with Free (5s) vs Pro/Lifetime Pro/Staff (60s)
+    // Keep Live PTT clip duration synchronized with Free (5s) vs Pro/Lifetime Pro/Sub-Account/Staff (60s)
     LaunchedEffect(
         userProfile?.proMember,
         userProfile?.proExpiresAtMillis,
         userProfile?.proLifetime,
+        userProfile?.companySubAccount,
         staffCapabilities.tier
     ) {
         val maxSec = (userProfile ?: UserProfile()).pttMaxDurationSeconds(staffCapabilities.tier)
@@ -881,24 +1106,29 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
-    // Optional in-app Private Message Quick Reply Popup
+    // Optional in-app Private Message Quick Reply Popup (silenced while DND is ON)
     LaunchedEffect(Unit) {
         DirectMessageNotificationHelper.inAppPopupEvents.collect { thread ->
-            incomingQuickReplyThread = thread
-            quickReplyDraft = ""
+            if (!latestIsDndActive) {
+                incomingQuickReplyThread = thread
+                quickReplyDraft = ""
+            }
         }
     }
 
-    // Incoming Friend Attention Alert popup (paired with ring + vibrate)
+    // Incoming Friend Attention Alert popup (silenced while DND is ON)
     LaunchedEffect(Unit) {
         DirectMessageNotificationHelper.friendAlertEvents.collect { thread ->
-            incomingFriendAlertThread = thread
+            if (!latestIsDndActive) {
+                incomingFriendAlertThread = thread
+            }
         }
     }
 
     CompositionLocalProvider(
         LocalProUserIds provides proUserIds,
-        LocalSpotlightFrameByUserId provides activeSpotlightFramesByUserId
+        LocalSpotlightFrameByUserId provides activeSpotlightFramesByUserId,
+        LocalCustomNameColors provides customNameColorsByUserId
     ) {
     VoxStageTheme(
         darkTheme = nightModeEnabled,
@@ -911,15 +1141,17 @@ private fun AuthenticatedVoxStageApp(
                 containerColor = if (currentRoute == ROUTE_REELS) Color.Black else MaterialTheme.colorScheme.background,
                 bottomBar = {
                     if (showTopNav && !useRail) {
+                        val activeDestinations = if (isSubAccount) subAccountTopDestinations else topDestinations
                         NavigationBar(
                             containerColor = MaterialTheme.colorScheme.surface,
                             tonalElevation = 2.dp
                         ) {
-                            topDestinations.forEach { dest ->
+                            activeDestinations.forEach { dest ->
                                 val selected = currentRoute == dest.route ||
-                                    (dest.route == ROUTE_DISCOVER_USERS && currentRoute == ROUTE_FRIENDS)
+                                    (!isSubAccount && dest.route == ROUTE_DISCOVER_USERS && currentRoute == ROUTE_FRIENDS)
                                 val badgeCount = when (dest.route) {
                                     ROUTE_CHATS -> unreadChatsCount
+                                    ROUTE_WORK_HUB -> unackWorkOrdersCount
                                     ROUTE_DISCOVER_USERS -> incomingRequestsCount
                                     else -> 0
                                 }
@@ -983,12 +1215,14 @@ private fun AuthenticatedVoxStageApp(
                         )
                 ) {
                     if (showTopNav && useRail) {
+                        val activeDestinations = if (isSubAccount) subAccountTopDestinations else topDestinations
                         NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
-                            topDestinations.forEach { dest ->
+                            activeDestinations.forEach { dest ->
                                 val selected = currentRoute == dest.route ||
-                                    (dest.route == ROUTE_DISCOVER_USERS && currentRoute == ROUTE_FRIENDS)
+                                    (!isSubAccount && dest.route == ROUTE_DISCOVER_USERS && currentRoute == ROUTE_FRIENDS)
                                 val badgeCount = when (dest.route) {
                                     ROUTE_CHATS -> unreadChatsCount
+                                    ROUTE_WORK_HUB -> unackWorkOrdersCount
                                     ROUTE_DISCOVER_USERS -> incomingRequestsCount
                                     else -> 0
                                 }
@@ -1063,7 +1297,90 @@ private fun AuthenticatedVoxStageApp(
                                     onOpenRoomsTab = { navigateToTopTab(ROUTE_DISCOVER) },
                                     onOpenProfileTab = { navigateToTopTab(ROUTE_PROFILE) },
                                     safetyBadgeCount = safetyBadgeCount,
-                                    onOpenSafety = ::openSafetyCenter
+                                    onOpenSafety = ::openSafetyCenter,
+                                    canManageCompany = canManageCompany,
+                                    isCompanySupervisor = isCompanySupervisor,
+                                    pendingWorkOrdersCount = unackWorkOrdersCount,
+                                    onOpenCompanyConsole = {
+                                        navController.navigate(ROUTE_COMPANY_TEAM) { launchSingleTop = true }
+                                    },
+                                    onOpenWorkHub = { navigateToTopTab(ROUTE_WORK_HUB) },
+                                    onToggleDnd = mainViewModel::setDoNotDisturb
+                                )
+                            }
+
+                            composable(ROUTE_WORK_HUB) {
+                                val effectiveProfile = userProfile ?: UserProfile(
+                                    userId = currentUserId,
+                                    displayName = initialDisplayName.ifBlank { "Employee" }
+                                )
+                                EmployeeWorkHubScreen(
+                                    userProfile = effectiveProfile,
+                                    companyThread = companyThread,
+                                    incomingWorkOrders = incomingWorkOrders,
+                                    myRequests = myEmployeeRequests,
+                                    onToggleDnd = mainViewModel::setDoNotDisturb,
+                                    onOpenCompanyDm = {
+                                        val tid = effectiveProfile.companyThreadId
+                                        if (tid.isNotBlank()) {
+                                            navController.navigate("dm/$tid") { launchSingleTop = true }
+                                        }
+                                    },
+                                    onUpdateWorkOrderStatus = mainViewModel::updateWorkOrderStatus,
+                                    onSubmitRequest = { ownerId, threadId, supervisors, category, subject, details, urgent ->
+                                        mainViewModel.submitEmployeeRequest(
+                                            companyOwnerId = ownerId,
+                                            companyThreadId = threadId,
+                                            supervisorUids = supervisors,
+                                            category = category,
+                                            subject = subject,
+                                            details = details,
+                                            urgent = urgent
+                                        )
+                                    }
+                                )
+                            }
+
+                            composable(ROUTE_COMPANY_TEAM) {
+                                CompanyTeamConsoleScreen(
+                                    currentUserId = currentUserId,
+                                    userProfile = userProfile,
+                                    canCreateSubAccounts = canManageCompany,
+                                    companyThread = companyThread,
+                                    subAccounts = companySubAccounts,
+                                    teamWorkOrders = teamWorkOrders,
+                                    teamEmployeeRequests = teamEmployeeRequests,
+                                    directoryEntries = directoryEntries,
+                                    onBack = { navController.popBackStack() },
+                                    onOpenCompanyDm = { companyName ->
+                                        val existingId = companyThread?.id
+                                        if (!existingId.isNullOrBlank()) {
+                                            navController.navigate("dm/$existingId") { launchSingleTop = true }
+                                        } else {
+                                            mainViewModel.openOrCreateCompanyGroupDm(companyName) { threadId ->
+                                                navController.navigate("dm/$threadId") { launchSingleTop = true }
+                                            }
+                                        }
+                                    },
+                                    onCreateSubAccount = mainViewModel::createCompanySubAccount,
+                                    onRevokeSubAccount = mainViewModel::revokeCompanySubAccount,
+                                    onSetSupervisor = mainViewModel::setCompanySubAccountSupervisor,
+                                    onSendWorkOrder = { ownerId, threadId, supervisors, targetUid, targetName, orderType, priority, title, body ->
+                                        mainViewModel.sendWorkOrder(
+                                            companyOwnerId = ownerId,
+                                            companyThreadId = threadId,
+                                            supervisorUids = supervisors,
+                                            targetUserId = targetUid,
+                                            targetName = targetName,
+                                            orderType = orderType,
+                                            priority = priority,
+                                            title = title,
+                                            body = body
+                                        )
+                                    },
+                                    onReviewRequest = { requestId, status, note ->
+                                        mainViewModel.reviewEmployeeRequest(requestId, status, note)
+                                    }
                                 )
                             }
 
@@ -1181,7 +1498,15 @@ private fun AuthenticatedVoxStageApp(
                                             }
                                         )
                                     },
-                                    onOpenUserProfile = ::openUserProfile
+                                    onOpenUserProfile = ::openUserProfile,
+                                    userProfile = userProfile,
+                                    companyThread = companyThread,
+                                    onOpenCompanyDm = {
+                                        val tid = userProfile?.companyThreadId.orEmpty()
+                                        if (tid.isNotBlank()) {
+                                            navController.navigate("dm/$tid") { launchSingleTop = true }
+                                        }
+                                    }
                                 )
                             }
 
@@ -1255,6 +1580,7 @@ private fun AuthenticatedVoxStageApp(
                                     onToggleSupportRoleInvisible = mainViewModel::toggleSupportRoleInvisible,
                                     onSetUserStaffTier = mainViewModel::setUserStaffTier,
                                     onAdminEditUser = mainViewModel::adminEditUser,
+                                    onToggleUserMessagingDisabled = mainViewModel::setUserMessagingDisabled,
                                     onSuspendUser = mainViewModel::suspendUser,
                                     onSendDirectAlert = mainViewModel::sendDirectAlert,
                                     onAdminEditAlert = mainViewModel::adminEditAlert,
@@ -1317,123 +1643,165 @@ private fun AuthenticatedVoxStageApp(
                                             reason = reason,
                                             onGranted = onGranted
                                         )
-                                    }
+                                    },
+                                    realStaffCapabilities = realStaffCapabilities,
+                                    realUserProfile = realUserProfile,
+                                    adminPreviewMode = adminPreviewMode,
+                                    onSelectAdminPreviewMode = mainViewModel::setAdminPreviewMode,
+                                    onSaveAdminCustomIdentity = mainViewModel::setAdminCustomIdentity
                                 )
                             }
 
                             composable(ROUTE_PROFILE) {
-                                ProfileScreen(
-                                    currentUserId = currentUserId,
-                                    userProfile = userProfile,
-                                    userEmail = initialEmail,
-                                    staffCapabilities = staffCapabilities,
-                                    friendsCount = acceptedFriendsCount,
-                                    followersCount = myFollowers.size,
-                                    followingCount = myFollowing.size,
-                                    myPostsState = myPostsState,
-                                    mySubscriptions = mySubscriptions,
-                                    myTransactions = myTransactions,
-                                    allTransactionsForAdmin = allTransactions,
-                                    paidDmMembersForMe = paidDmMembersForMe,
-                                    isPublishingPost = isPublishingPost,
-                                    isUpdatingPhoto = isUpdatingPhoto,
-                                    isProcessingWallet = isProcessingWallet,
-                                    initialTabIndex = profileInitialTab,
-                                    onUpdateProfilePhoto = mainViewModel::updateProfilePhoto,
-                                    onCreatePost = mainViewModel::createProfilePost,
-                                    onBoostPost = mainViewModel::boostProfilePost,
-                                    onObservePostComments = mainViewModel::observePostComments,
-                                    onAddPostComment = mainViewModel::addPostComment,
-                                    onDeletePostComment = mainViewModel::deletePostComment,
-                                    onSharePostToFeed = mainViewModel::shareProfilePostToFeed,
-                                    onExternalSharePost = mainViewModel::recordExternalPostShare,
-                                    onOpenUserProfile = ::openUserProfile,
-                                    onToggleLikePost = mainViewModel::toggleLikePost,
-                                    onDeletePost = mainViewModel::deleteProfilePost,
-                                    onBuyPoints = { pointsToBuy ->
-                                        if (requireAge13ForPurchase()) {
-                                            val hostActivity = context as? Activity
-                                            if (hostActivity != null) {
-                                                playBillingManager.launchPointsPurchase(hostActivity, pointsToBuy)
-                                            } else {
-                                                scope.launch {
-                                                    snackbarHostState.showTopMessage("Unable to open Google Play checkout.")
-                                                }
+                                if (isSubAccount && userProfile != null) {
+                                    SubAccountBasicProfileScreen(
+                                        userProfile = userProfile,
+                                        onSaveDisplayName = { newName ->
+                                            mainViewModel.updateSubAccountDisplayName(newName)
+                                        },
+                                        onToggleDnd = mainViewModel::setDoNotDisturb,
+                                        onSignOut = {
+                                            scope.launch {
+                                                flushForegroundAppTime(keepRunning = false)
+                                                mainViewModel.setOnlinePresenceNow(false)
+                                                signOutFromVoxStage(
+                                                    credentialManager = credentialManager,
+                                                    scope = scope
+                                                )
                                             }
                                         }
-                                    },
-                                    onUpgradeToProPlay = {
-                                        if (requireAge13ForPurchase()) {
-                                            val hostActivity = context as? Activity
-                                            if (hostActivity != null) {
-                                                playBillingManager.launchSubscription(hostActivity, ProTier.PRO)
-                                            } else {
-                                                scope.launch {
-                                                    snackbarHostState.showTopMessage("Unable to open Google Play Pro checkout.")
+                                    )
+                                } else {
+                                    ProfileScreen(
+                                        currentUserId = currentUserId,
+                                        userProfile = userProfile,
+                                        userEmail = initialEmail,
+                                        staffCapabilities = staffCapabilities,
+                                        friendsCount = acceptedFriendsCount,
+                                        followersCount = myFollowers.size,
+                                        followingCount = myFollowing.size,
+                                        myPostsState = myPostsState,
+                                        mySubscriptions = mySubscriptions,
+                                        myTransactions = myTransactions,
+                                        allTransactionsForAdmin = allTransactions,
+                                        paidDmMembersForMe = paidDmMembersForMe,
+                                        isPublishingPost = isPublishingPost,
+                                        isUpdatingPhoto = isUpdatingPhoto,
+                                        isProcessingWallet = isProcessingWallet,
+                                        initialTabIndex = profileInitialTab,
+                                        onUpdateProfilePhoto = mainViewModel::updateProfilePhoto,
+                                        onCreatePost = mainViewModel::createProfilePost,
+                                        onBoostPost = mainViewModel::boostProfilePost,
+                                        onObservePostComments = mainViewModel::observePostComments,
+                                        onAddPostComment = mainViewModel::addPostComment,
+                                        onDeletePostComment = mainViewModel::deletePostComment,
+                                        onSharePostToFeed = mainViewModel::shareProfilePostToFeed,
+                                        onExternalSharePost = mainViewModel::recordExternalPostShare,
+                                        onOpenUserProfile = ::openUserProfile,
+                                        onToggleLikePost = mainViewModel::toggleLikePost,
+                                        onDeletePost = mainViewModel::deleteProfilePost,
+                                        onBuyPoints = { pointsToBuy ->
+                                            if (requireAge13ForPurchase()) {
+                                                val hostActivity = context as? Activity
+                                                if (hostActivity != null) {
+                                                    playBillingManager.launchPointsPurchase(hostActivity, pointsToBuy)
+                                                } else {
+                                                    scope.launch {
+                                                        snackbarHostState.showTopMessage("Unable to open Google Play checkout.")
+                                                    }
                                                 }
                                             }
-                                        }
-                                    },
-                                    onUpgradeToVipProPlay = {
-                                        if (requireAge13ForPurchase()) {
-                                            val hostActivity = context as? Activity
-                                            if (hostActivity != null) {
-                                                playBillingManager.launchSubscription(hostActivity, ProTier.VIP_PRO)
-                                            } else {
-                                                scope.launch {
-                                                    snackbarHostState.showTopMessage("Unable to open Google Play VIP Pro checkout.")
+                                        },
+                                        onUpgradeToProPlay = {
+                                            if (requireAge13ForPurchase()) {
+                                                val hostActivity = context as? Activity
+                                                if (hostActivity != null) {
+                                                    playBillingManager.launchSubscription(hostActivity, ProTier.PRO)
+                                                } else {
+                                                    scope.launch {
+                                                        snackbarHostState.showTopMessage("Unable to open Google Play Pro checkout.")
+                                                    }
                                                 }
                                             }
-                                        }
-                                    },
-                                    onUpgradeToEliteProPlay = {
-                                        if (requireAge13ForPurchase()) {
-                                            val hostActivity = context as? Activity
-                                            if (hostActivity != null) {
-                                                playBillingManager.launchSubscription(hostActivity, ProTier.ELITE_PRO)
-                                            } else {
-                                                scope.launch {
-                                                    snackbarHostState.showTopMessage("Unable to open Google Play Elite Pro checkout.")
+                                        },
+                                        onUpgradeToVipProPlay = {
+                                            if (requireAge13ForPurchase()) {
+                                                val hostActivity = context as? Activity
+                                                if (hostActivity != null) {
+                                                    playBillingManager.launchSubscription(hostActivity, ProTier.VIP_PRO)
+                                                } else {
+                                                    scope.launch {
+                                                        snackbarHostState.showTopMessage("Unable to open Google Play VIP Pro checkout.")
+                                                    }
                                                 }
                                             }
-                                        }
-                                    },
-                                    onActivateProWithPoints = {
-                                        if (requireAge13ForPurchase()) {
-                                            mainViewModel.activateProMembership(paidWithPoints = true)
-                                        }
-                                    },
-                                    onBoostMyProfile = mainViewModel::boostMyProfile,
-                                    onSelectOrBuyPttTheme = mainViewModel::purchaseOrSelectPttTheme,
-                                    onSelectOrBuyPttChirp = mainViewModel::purchaseOrSelectPttChirp,
-                                    onBuySpotlightFrame = mainViewModel::buySpotlightFrame,
-                                    profileViews = profileViews,
-                                    onUnlockProfileViewers = mainViewModel::unlockProfileViewers,
-                                    onSetPriorityChirpOptIn = mainViewModel::setPriorityChirpOptIn,
-                                    incomingReferral = incomingReferral,
-                                    invitedReferrals = invitedReferrals,
-                                    userEmailVerified = initialEmailVerified,
-                                    onRedeemReferralCode = mainViewModel::redeemReferralCode,
-                                    playBillingManager = playBillingManager,
-                                    onSetDmPolicy = mainViewModel::setDmPolicy,
-                                    onKickPaidDmMember = mainViewModel::kickPaidDmMember,
-                                    onRequestAgeVerification = { showAgeVerificationDialog = true },
-                                    onSaveProfile = mainViewModel::updateProfile,
-                                    onSaveBio = mainViewModel::updateBio,
-                                    onChangeAppearanceStatus = mainViewModel::setAppearanceStatus,
-                                    onSignOut = {
-                                        scope.launch {
-                                            flushForegroundAppTime(keepRunning = false)
-                                            mainViewModel.setOnlinePresenceNow(false)
-                                            signOutFromVoxStage(
-                                                credentialManager = credentialManager,
-                                                scope = scope
+                                        },
+                                        onUpgradeToEliteProPlay = {
+                                            if (requireAge13ForPurchase()) {
+                                                val hostActivity = context as? Activity
+                                                if (hostActivity != null) {
+                                                    playBillingManager.launchSubscription(hostActivity, ProTier.ELITE_PRO)
+                                                } else {
+                                                    scope.launch {
+                                                        snackbarHostState.showTopMessage("Unable to open Google Play Elite Pro checkout.")
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        onActivateProWithPoints = {
+                                            if (requireAge13ForPurchase()) {
+                                                mainViewModel.activateProMembership(paidWithPoints = true)
+                                            }
+                                        },
+                                        onBoostMyProfile = mainViewModel::boostMyProfile,
+                                        onSelectOrBuyPttTheme = mainViewModel::purchaseOrSelectPttTheme,
+                                        onSelectOrBuyPttChirp = mainViewModel::purchaseOrSelectPttChirp,
+                                        onBuySpotlightFrame = mainViewModel::buySpotlightFrame,
+                                        profileViews = profileViews,
+                                        onUnlockProfileViewers = mainViewModel::unlockProfileViewers,
+                                        onSetPriorityChirpOptIn = mainViewModel::setPriorityChirpOptIn,
+                                        incomingReferral = incomingReferral,
+                                        invitedReferrals = invitedReferrals,
+                                        userEmailVerified = initialEmailVerified,
+                                        onRedeemReferralCode = mainViewModel::redeemReferralCode,
+                                        playBillingManager = playBillingManager,
+                                        onSetDmPolicy = mainViewModel::setDmPolicy,
+                                        onKickPaidDmMember = mainViewModel::kickPaidDmMember,
+                                        onRequestAgeVerification = { showAgeVerificationDialog = true },
+                                        onSaveProfile = mainViewModel::updateProfile,
+                                        onSaveBio = mainViewModel::updateBio,
+                                        onChangeAppearanceStatus = mainViewModel::setAppearanceStatus,
+                                        onSignOut = {
+                                            scope.launch {
+                                                flushForegroundAppTime(keepRunning = false)
+                                                mainViewModel.setOnlinePresenceNow(false)
+                                                signOutFromVoxStage(
+                                                    credentialManager = credentialManager,
+                                                    scope = scope
+                                                )
+                                            }
+                                        },
+                                        safetyBadgeCount = safetyBadgeCount,
+                                        onOpenSafety = ::openSafetyCenter,
+                                        realStaffCapabilities = realStaffCapabilities,
+                                        realUserProfile = realUserProfile,
+                                        adminPreviewMode = adminPreviewMode,
+                                        onSelectAdminPreviewMode = mainViewModel::setAdminPreviewMode,
+                                        onSaveAdminCustomIdentity = mainViewModel::setAdminCustomIdentity,
+                                        canManageCompany = canManageCompany,
+                                        isCompanySupervisor = isCompanySupervisor,
+                                        onOpenCompanyConsole = {
+                                            navController.navigate(ROUTE_COMPANY_TEAM) { launchSingleTop = true }
+                                        },
+                                        onJoinCompanySubAccount = { subName, accessCode ->
+                                            mainViewModel.claimCompanySubAccount(
+                                                subNameInput = subName,
+                                                accessCodeInput = accessCode,
+                                                myEmail = initialEmail
                                             )
                                         }
-                                    },
-                                    safetyBadgeCount = safetyBadgeCount,
-                                    onOpenSafety = ::openSafetyCenter
-                                )
+                                    )
+                                }
                             }
 
                             composable(
@@ -1572,6 +1940,11 @@ private fun AuthenticatedVoxStageApp(
                                     },
                                     onOpenUserProfile = ::openUserProfile,
                                     onOpenBuyPoints = ::openProfileBuyPoints,
+                                    onToggleDnd = mainViewModel::setDoNotDisturb,
+                                    onOpenWorkHub = { navigateToTopTab(ROUTE_WORK_HUB) },
+                                    onOpenCompanyConsole = {
+                                        navController.navigate(ROUTE_COMPANY_TEAM) { launchSingleTop = true }
+                                    },
                                     onBack = { navController.popBackStack() }
                                 )
                             }
@@ -1656,17 +2029,72 @@ private fun AuthenticatedVoxStageApp(
                 )
             }
 
-            // Global real-time Admin / Support Alert Modal
-            unreadAlerts.firstOrNull()?.let { latestAlert ->
-                IncomingAlertModalDialog(
-                    alert = latestAlert,
-                    onAcknowledge = { mainViewModel.acknowledgeAlert(latestAlert.id) }
+            // Persistent Admin Sandbox / Custom Identity Quick Switcher Banner
+            if (realStaffCapabilities.isAdmin &&
+                (adminPreviewMode.isPreviewActive() || realUserProfile?.hasCustomIdentityDisguise() == true)
+            ) {
+                val customTierLabel = when (realUserProfile?.customMembershipTier?.uppercase().orEmpty()) {
+                    "FREE" -> "Free"
+                    "PRO" -> "VOX Pro"
+                    "VIP_PRO" -> "VIP Pro"
+                    "ELITE_PRO" -> "Elite Pro"
+                    "SUPPORT" -> "Support"
+                    "ADMIN" -> "Admin"
+                    else -> ""
+                }
+                AdminPreviewFloatingBanner(
+                    previewMode = adminPreviewMode,
+                    hasCustomDisguise = realUserProfile?.hasCustomIdentityDisguise() == true,
+                    customDisplayName = realUserProfile?.customDisplayName.orEmpty(),
+                    customMembershipLabel = customTierLabel,
+                    onSelectPreviewMode = mainViewModel::setAdminPreviewMode,
+                    onResetIdentityDisguise = {
+                        mainViewModel.setAdminCustomIdentity("", "", "")
+                    },
+                    modifier = Modifier.align(Alignment.TopCenter)
                 )
             }
 
+            // Global real-time Admin / Support Alert Modal
+            // Non-urgent alerts show once and NEVER repeat if unacknowledged; URGENT alerts repeat until acknowledged.
+            activePopupAlert?.let { latestAlert ->
+                IncomingAlertModalDialog(
+                    alert = latestAlert,
+                    onAcknowledge = {
+                        mainViewModel.acknowledgeAlert(latestAlert.id)
+                        activePopupAlert = null
+                    },
+                    onDismissLater = {
+                        activePopupAlert = null
+                    }
+                )
+            }
+
+            // Real-time Company Work Order / Note Alert Modal for Sub-Accounts (URGENT breaks through DND)
+            if (!isSuspendedNow && activePopupAlert == null) {
+                activeWorkOrderAlert?.let { order ->
+                    WorkOrderAlertModalDialog(
+                        order = order,
+                        onAcknowledge = {
+                            dismissedWorkOrderIds = dismissedWorkOrderIds + order.id
+                            mainViewModel.updateWorkOrderStatus(order.id, WorkOrderStatus.ACKNOWLEDGED)
+                        },
+                        onComplete = {
+                            dismissedWorkOrderIds = dismissedWorkOrderIds + order.id
+                            mainViewModel.updateWorkOrderStatus(order.id, WorkOrderStatus.COMPLETED)
+                        },
+                        onDismiss = {
+                            dismissedWorkOrderIds = dismissedWorkOrderIds + order.id
+                        }
+                    )
+                }
+            }
+
             // Global real-time Admin App-Wide Broadcast Message to All Users
-            if (unreadAlerts.isEmpty()) {
-                nextUnreadAppBroadcast?.let { broadcast ->
+            // Non-urgent broadcasts do not repeat if ignored; URGENT broadcasts require tapping Got It.
+            if (activePopupAlert == null) {
+                activePopupBroadcast?.let { broadcast ->
+                    val isUrgentBroadcast = broadcast.severityEnum() == AlertSeverity.URGENT
                     val severityColor = when (broadcast.severityEnum()) {
                         AlertSeverity.URGENT -> LiveCoral
                         AlertSeverity.WARNING -> ModAmber
@@ -1674,8 +2102,9 @@ private fun AuthenticatedVoxStageApp(
                     }
                     AlertDialog(
                         onDismissRequest = {
-                            DirectMessageNotificationPrefs.markBroadcastDismissed(context, currentUserId, broadcast.id)
-                            dismissedBroadcastIds = dismissedBroadcastIds + broadcast.id
+                            if (!isUrgentBroadcast) {
+                                activePopupBroadcast = null
+                            }
                         },
                         title = {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1728,6 +2157,7 @@ private fun AuthenticatedVoxStageApp(
                                 onClick = {
                                     DirectMessageNotificationPrefs.markBroadcastDismissed(context, currentUserId, broadcast.id)
                                     dismissedBroadcastIds = dismissedBroadcastIds + broadcast.id
+                                    activePopupBroadcast = null
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = severityColor,
@@ -1894,7 +2324,7 @@ private fun AuthenticatedVoxStageApp(
 
             // Mandatory 13+ Age Gate before using VOX (non-staff users without 13+ verification)
             val needsMandatoryAge13Gate = !isSuspendedNow &&
-                !staffCapabilities.isStaff &&
+                !realStaffCapabilities.isStaff &&
                 userProfile != null &&
                 !userProfile.isAge13Plus()
             if (needsMandatoryAge13Gate) {
@@ -1942,7 +2372,16 @@ private fun AuthenticatedVoxStageApp(
                 )
             }
 
-            // Automated Strike 3 (1h), Strike 4 (2h), Strike 5+ (Pending Support/Admin Review), or Staff Suspension Gate
+            // Automated Message Spam Strike 1 Warning Modal (>20 msgs in 30s)
+            val activeSpamWarning = spamWarningMessage
+            if (!isSuspendedNow && !activeSpamWarning.isNullOrBlank()) {
+                SpamWarningModalDialog(
+                    message = activeSpamWarning,
+                    onDismiss = { MessageSpamTracker.dismissSpamWarning() }
+                )
+            }
+
+            // Automated Device Ban, Strike 3 (1h), Strike 4 (2h), Strike 5+ (Pending Support/Admin Review), or Staff/Spam Suspension Gate
             if (isSuspendedNow) {
                 AccountSuspendedGateScreen(
                     moderationFile = myModerationFile,
@@ -1950,6 +2389,8 @@ private fun AuthenticatedVoxStageApp(
                     manualSuspensionReason = userProfile?.suspensionReason.orEmpty(),
                     globallyBanned = userProfile?.globallyBanned == true,
                     nowMillis = nowClockMs,
+                    deviceBanned = isDeviceBannedNow,
+                    deviceBanReason = effectiveDeviceBanReason,
                     onSignOut = {
                         scope.launch {
                             flushForegroundAppTime(keepRunning = false)

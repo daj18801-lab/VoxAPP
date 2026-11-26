@@ -2,6 +2,7 @@ package com.example.data
 
 import android.content.Context
 import com.example.R
+import com.example.security.MessageSpamTracker
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -1267,7 +1268,8 @@ class VoxStageRepository(
         actorName: String,
         roomId: String? = null,
         pointsBalance: Long? = null,
-        proLifetime: Boolean? = null
+        proLifetime: Boolean? = null,
+        disableMessaging: Boolean = false
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -1289,6 +1291,7 @@ class VoxStageRepository(
                 "disableEnterRoom" to disableEnterRoom,
                 "disableMic" to disableMic,
                 "disableVideo" to disableVideo,
+                "disableMessaging" to disableMessaging,
                 "suspendedUntilMillis" to suspendedUntilMillis.coerceAtLeast(0L),
                 "suspensionReason" to safeReason,
                 "updatedAt" to FieldValue.serverTimestamp()
@@ -1305,12 +1308,26 @@ class VoxStageRepository(
             db.collection("users").document(targetUserId).update(userUpdates).await()
 
             runCatching {
+                syncDeviceBanForTargetUser(
+                    targetUserId = targetUserId,
+                    targetName = safeName,
+                    active = globallyBanned,
+                    reason = safeReason.ifBlank {
+                        if (globallyBanned) "Globally banned by Administrator" else "Ban lifted by Administrator"
+                    },
+                    actorUid = uid,
+                    actorName = actorName
+                )
+            }
+
+            runCatching {
                 val dirRef = db.collection("userDirectory").document(targetUserId)
                 if (dirRef.get().await().exists()) {
                     val dirUpdates = mutableMapOf<String, Any>(
                         "displayName" to safeName,
                         "handle" to safeHandle,
                         "bio" to safeBio,
+                        "disableMessaging" to disableMessaging,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                     if (proLifetime != null) {
@@ -1366,6 +1383,340 @@ class VoxStageRepository(
             handleFirestoreError(e, OperationType.UPDATE, path)
             Result.failure(e)
         }
+    }
+
+    // --- DEVICE BAN, DISABLE MESSAGING, ADD-PEOPLE RATE LIMIT & SPAM ESCALATION ---
+
+    suspend fun recordUserDeviceId(deviceHash: String): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 8) return Result.success(Unit)
+        val path = "users/$uid"
+        return try {
+            val userRef = db.collection("users").document(uid)
+            val snap = userRef.get().await()
+            if (snap.exists() && snap.getString("lastDeviceId") != safeHash) {
+                userRef.update(
+                    mapOf(
+                        "lastDeviceId" to safeHash,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun observeBannedDevice(deviceHash: String): Flow<BannedDevice?> {
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 8) return flowOf(null)
+        return db.collection("bannedDevices").document(safeHash)
+            .snapshots()
+            .map { snapshot ->
+                if (!snapshot.exists()) null
+                else snapshot.toObject(BannedDevice::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            }
+            .catch { emit(null) }
+    }
+
+    suspend fun registerSelfDeviceBanIfGloballyBanned(
+        deviceHash: String,
+        displayName: String,
+        reason: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 8) return Result.success(Unit)
+        val path = "bannedDevices/$safeHash"
+        return try {
+            val ref = db.collection("bannedDevices").document(safeHash)
+            val existing = runCatching { ref.get().await() }.getOrNull()
+            if (existing?.exists() == true && existing.getBoolean("active") == true) {
+                return Result.success(Unit)
+            }
+            val safeName = displayName.trim().ifBlank { "Banned User" }.take(40)
+            val safeReason = reason.trim().ifBlank { "Account globally banned — device blocked from alternate logins." }.take(240)
+            ref.set(
+                mapOf(
+                    "deviceHash" to safeHash,
+                    "bannedUserId" to uid,
+                    "bannedUserName" to safeName,
+                    "reason" to safeReason,
+                    "bannedByUid" to uid,
+                    "bannedByName" to "System Device Ban",
+                    "active" to true,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun syncDeviceBanForTargetUser(
+        targetUserId: String,
+        targetName: String,
+        active: Boolean,
+        reason: String,
+        actorUid: String,
+        actorName: String
+    ) {
+        val userSnap = runCatching {
+            db.collection("users").document(targetUserId).get().await()
+        }.getOrNull() ?: return
+        val deviceHash = userSnap.getString("lastDeviceId")?.trim().orEmpty()
+        if (deviceHash.length < 8) return
+        val banRef = db.collection("bannedDevices").document(deviceHash)
+        val existingBan = runCatching { banRef.get().await() }.getOrNull()
+        val safeName = targetName.trim().ifBlank { "Member" }.take(40)
+        val safeActor = actorName.trim().ifBlank { "Admin" }.take(40)
+        val safeReason = reason.trim().take(240)
+
+        if (active) {
+            if (existingBan?.exists() == true) {
+                banRef.update(
+                    mapOf(
+                        "bannedUserId" to targetUserId,
+                        "bannedUserName" to safeName,
+                        "reason" to safeReason.ifBlank { "Device banned with user account" },
+                        "bannedByUid" to actorUid,
+                        "bannedByName" to safeActor,
+                        "active" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                banRef.set(
+                    mapOf(
+                        "deviceHash" to deviceHash,
+                        "bannedUserId" to targetUserId,
+                        "bannedUserName" to safeName,
+                        "reason" to safeReason.ifBlank { "Device banned with user account" },
+                        "bannedByUid" to actorUid,
+                        "bannedByName" to safeActor,
+                        "active" to true,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+        } else if (existingBan?.exists() == true && existingBan.getBoolean("active") == true) {
+            banRef.update(
+                mapOf(
+                    "active" to false,
+                    "reason" to safeReason.ifBlank { "Device ban lifted by Admin" },
+                    "bannedByUid" to actorUid,
+                    "bannedByName" to safeActor,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+    }
+
+    suspend fun setUserMessagingDisabled(
+        targetUserId: String,
+        disabled: Boolean
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (targetUserId.isBlank() || targetUserId == uid) {
+            return Result.failure(IllegalArgumentException("Select another user."))
+        }
+        val path = "users/$targetUserId"
+        return try {
+            db.collection("users").document(targetUserId).update(
+                mapOf(
+                    "disableMessaging" to disabled,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            runCatching {
+                val dirRef = db.collection("userDirectory").document(targetUserId)
+                if (dirRef.get().await().exists()) {
+                    dirRef.update(
+                        mapOf(
+                            "disableMessaging" to disabled,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun reserveAddPeopleSlots(
+        uid: String,
+        count: Int = 1,
+        bypassForAdmin: Boolean = false
+    ) {
+        if (bypassForAdmin || count <= 0) return
+        val nowMs = System.currentTimeMillis()
+        val windowMs = 10L * 60L * 1000L // 10 minutes
+        val userRef = db.collection("users").document(uid)
+        val snap = runCatching { userRef.get().await() }.getOrNull() ?: return
+        if (!snap.exists()) return
+        val raw = (snap.get("addPeopleTimestamps") as? List<*>)
+            ?.mapNotNull { (it as? Number)?.toLong() }
+            .orEmpty()
+        val recent = raw.filter { it > nowMs - windowMs && it <= nowMs + 60_000L }.sorted()
+        if (recent.size + count > 25) {
+            val oldest = recent.firstOrNull() ?: nowMs
+            val waitMs = (oldest + windowMs - nowMs).coerceAtLeast(1_000L)
+            val waitMins = ((waitMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+            throw IllegalStateException(
+                "Rate limit reached: You cannot add more than 25 people in 10 minutes. Please wait ${waitMins}m."
+            )
+        }
+        val updated = (recent + List(count) { nowMs }).takeLast(30)
+        runCatching {
+            userRef.update(
+                mapOf(
+                    "addPeopleTimestamps" to updated,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        }
+    }
+
+    private suspend fun enforceMessagingAllowedAndAntiSpam(
+        uid: String,
+        senderName: String,
+        senderTier: StaffTier
+    ) {
+        if (senderTier == StaffTier.ADMIN) return
+        val userRef = db.collection("users").document(uid)
+        val snap = runCatching { userRef.get().await() }.getOrNull()
+        if (snap != null && snap.exists()) {
+            if (snap.getBoolean("disableMessaging") == true) {
+                throw IllegalStateException("Your messaging has been disabled by Staff.")
+            }
+        }
+        val nowMs = System.currentTimeMillis()
+        if (!MessageSpamTracker.checkAndRecordMessageAttempt(uid, nowMs)) return
+
+        val existingViolations = (snap?.get("spamViolationTimestamps") as? List<*>)
+            ?.mapNotNull { (it as? Number)?.toLong() }
+            .orEmpty()
+            .filter { it > nowMs - MessageSpamTracker.ESCALATION_WINDOW_24H_MS && it <= nowMs + 60_000L }
+            .sorted()
+        val updatedViolations = (existingViolations + nowMs).takeLast(20)
+        val strikeNumber = updatedViolations.size
+        val existingSuspendedUntil = (snap?.get("suspendedUntilMillis") as? Number)?.toLong() ?: 0L
+        val safeName = senderName.trim().ifBlank { "Member" }.take(40)
+
+        when (strikeNumber) {
+            1 -> {
+                runCatching {
+                    userRef.update(
+                        mapOf(
+                            "spamViolationTimestamps" to updatedViolations,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                val warnMsg = "Spam Warning (Strike 1 of 4): You sent more than 20 messages in 30 seconds. Slow down — a 2nd offense will suspend your account for 1 hour."
+                MessageSpamTracker.postSpamWarning(warnMsg)
+                throw IllegalStateException(warnMsg)
+            }
+            2 -> {
+                val untilMs = maxOf(nowMs + 1L * 60L * 60L * 1000L, existingSuspendedUntil + 1_000L)
+                val reason = "Automated 1-hour suspension: 2nd message spam violation (>20 messages in 30 seconds)."
+                runCatching {
+                    userRef.update(
+                        mapOf(
+                            "spamViolationTimestamps" to updatedViolations,
+                            "suspendedUntilMillis" to untilMs,
+                            "suspensionReason" to reason.take(200),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                throw IllegalStateException(reason)
+            }
+            3 -> {
+                val untilMs = maxOf(nowMs + 4L * 60L * 60L * 1000L, existingSuspendedUntil + 1_000L)
+                val reason = "Automated 4-hour suspension: 3rd message spam violation (>20 messages in 30 seconds). A report has been sent to Staff."
+                runCatching {
+                    userRef.update(
+                        mapOf(
+                            "spamViolationTimestamps" to updatedViolations,
+                            "suspendedUntilMillis" to untilMs,
+                            "suspensionReason" to reason.take(200),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                runCatching {
+                    submitAutoModSpamReport(
+                        uid = uid,
+                        userName = safeName,
+                        details = "Automated Staff Report (3rd Strike): $safeName sent more than 20 messages in 30 seconds for a 3rd time within 24 hours. Applied 4-hour suspension."
+                    )
+                }
+                throw IllegalStateException(reason)
+            }
+            else -> {
+                val untilMs = maxOf(nowMs + 24L * 60L * 60L * 1000L, existingSuspendedUntil + 1_000L)
+                val reason = "Automated 24-hour suspension: 4th message spam violation within 24 hours. Reported to Staff for action."
+                runCatching {
+                    userRef.update(
+                        mapOf(
+                            "spamViolationTimestamps" to updatedViolations,
+                            "suspendedUntilMillis" to untilMs,
+                            "suspensionReason" to reason.take(200),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                runCatching {
+                    submitAutoModSpamReport(
+                        uid = uid,
+                        userName = safeName,
+                        details = "Automated Staff Report (4th Strike — Action Required): $safeName exceeded 20 messages in 30 seconds 4+ times within 24 hours. Applied 24-hour suspension. Staff/Admin can disable messaging."
+                    )
+                }
+                throw IllegalStateException(reason)
+            }
+        }
+    }
+
+    private suspend fun submitAutoModSpamReport(
+        uid: String,
+        userName: String,
+        details: String
+    ) {
+        db.collection("safetyReports").document().set(
+            mapOf(
+                "roomId" to "AUTOMOD_SPAM",
+                "roomTitle" to "Message Spam Auto-Mod",
+                "roomHostId" to "SYSTEM_AUTOMOD",
+                "reporterId" to uid,
+                "reporterName" to "AutoMod",
+                "targetUserId" to uid,
+                "targetName" to userName.take(40),
+                "category" to ReportCategory.SPAM_SCAM.name,
+                "details" to details.take(500),
+                "status" to ReportStatus.OPEN.name,
+                "resolutionNote" to "",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+        ).await()
     }
 
     suspend fun suspendUserForMinutes(
@@ -1620,6 +1971,25 @@ class VoxStageRepository(
             require(maxSpeakers in 2L..12L) { "Max speakers must be between 2 and 12." }
             if (pinLocked) {
                 require(cleanPin.length == 4) { "Room PIN must be exactly 4 digits." }
+            }
+
+            // Restrict non-Admin users to only 1 active public or private room at a time
+            if (hostTier != StaffTier.ADMIN) {
+                val existingRooms = db.collection("rooms")
+                    .whereEqualTo("hostId", uid)
+                    .get()
+                    .await()
+                val existingLive = existingRooms.documents.firstOrNull {
+                    it.getString("status") == RoomStatus.LIVE.name
+                }
+                if (existingLive != null) {
+                    val existingTitle = existingLive.getString("title").orEmpty().ifBlank { "your active room" }
+                    return Result.failure(
+                        IllegalStateException(
+                            "You can only have 1 active public or private room at a time. Close \"$existingTitle\" before creating a new room."
+                        )
+                    )
+                }
             }
 
             val docRef = db.collection("rooms").document()
@@ -1904,6 +2274,35 @@ class VoxStageRepository(
                 .collection("participants").document(uid)
             val existingSnap = participantRef.get().await()
 
+            // Enforce Private Chat Room user limits by host membership tier:
+            // Free = 25, VOX Pro = 50, VIP Pro = 75, Elite Pro = 100
+            if (!existingSnap.exists() &&
+                room.visibilityEnum() == RoomVisibility.PRIVATE &&
+                !actuallyInvisible &&
+                !staffCapabilities.isAdmin &&
+                room.hostId != uid
+            ) {
+                val hostDir = runCatching {
+                    db.collection("userDirectory").document(room.hostId).get().await()
+                        .toObject(DirectoryEntry::class.java)
+                }.getOrNull()
+                val hostTier = hostDir?.effectiveProTier() ?: ProTier.FREE
+                val maxPrivateUsers = hostTier.maxPrivateRoomUsers
+                if (room.participantCount >= maxPrivateUsers) {
+                    val nextUpgradeHint = when (hostTier) {
+                        ProTier.FREE -> "Host can upgrade to VOX Pro (50), VIP Pro (75), or Elite Pro (100)."
+                        ProTier.PRO -> "Host can upgrade to VIP Pro (75) or Elite Pro (100)."
+                        ProTier.VIP_PRO -> "Host can upgrade to Elite Pro (100)."
+                        ProTier.ELITE_PRO -> "Private room maximum (100 users) reached."
+                    }
+                    return Result.failure(
+                        IllegalStateException(
+                            "This private room is full ($maxPrivateUsers/$maxPrivateUsers users for ${hostTier.label}). $nextUpgradeHint"
+                        )
+                    )
+                }
+            }
+
             val assignedRole = when {
                 room.hostId == uid -> ParticipantRole.HOST
                 actuallyInvisible -> ParticipantRole.LISTENER
@@ -1916,10 +2315,10 @@ class VoxStageRepository(
                 val payload = mutableMapOf<String, Any>(
                     "userId" to uid,
                     "roomId" to room.id,
-                    "displayName" to profile.displayName.trim().ifBlank { "Guest" }.take(40),
+                    "displayName" to profile.effectiveDisplayName().trim().ifBlank { "Guest" }.take(40),
                     "avatarColorHex" to profile.avatarColorHex,
                     "role" to assignedRole.name,
-                    "staffTier" to staffCapabilities.tier.name,
+                    "staffTier" to profile.displayedStaffTier(staffCapabilities.tier).name,
                     "invisible" to actuallyInvisible,
                     "micActive" to false,
                     "camActive" to false,
@@ -2586,6 +2985,11 @@ class VoxStageRepository(
             val uid = requireUserId()
             val cleanText = text.trim().take(500)
             require(cleanText.isNotEmpty()) { "Message cannot be empty." }
+            enforceMessagingAllowedAndAntiSpam(
+                uid = uid,
+                senderName = senderName,
+                senderTier = senderTier
+            )
             val docRef = db.collection("rooms").document(roomId)
                 .collection("messages").document()
             path = docRef.path
@@ -3032,6 +3436,12 @@ class VoxStageRepository(
                 return Result.failure(IllegalStateException("A friend request is already pending."))
             }
 
+            reserveAddPeopleSlots(
+                uid = uid,
+                count = 1,
+                bypassForAdmin = myTier == StaffTier.ADMIN
+            )
+
             ref.set(
                 mapOf(
                     "userIds" to listOf(uid, target.userId),
@@ -3221,6 +3631,11 @@ class VoxStageRepository(
             require(!currentThread.participantIds.contains(addedUser.userId)) {
                 "${addedUser.displayName} is already in this chat."
             }
+            reserveAddPeopleSlots(
+                uid = uid,
+                count = 1,
+                bypassForAdmin = myTier == StaffTier.ADMIN
+            )
             val myName = myProfile.displayName.trim().ifBlank { "Member" }.take(40)
             val myColor = if (Regex("^#[0-9A-Fa-f]{6}$").matches(myProfile.avatarColorHex)) myProfile.avatarColorHex else "#0088FF"
             val addedName = addedUser.displayName.trim().ifBlank { "Member" }.take(40)
@@ -3617,6 +4032,13 @@ class VoxStageRepository(
             require(!thread.isBannedInGroup(uid)) { "You are banned from this group DM by the Group Admin." }
             require(!thread.isBouncedInGroup(uid)) { "You are bounced from this group DM (${thread.remainingGroupBounceLabel(uid)})." }
             require(!thread.isMutedInGroup(uid)) { "You are muted in this group DM." }
+            if (messageType == DirectMessage.TYPE_TEXT) {
+                enforceMessagingAllowedAndAntiSpam(
+                    uid = uid,
+                    senderName = senderName,
+                    senderTier = senderTier
+                )
+            }
             if (cleanAudio.isNotEmpty() && thread.requiresAdminPttSelection()) {
                 require(thread.isPttAllowedInGroup(uid, isAppAdmin = senderTier == StaffTier.ADMIN)) {
                     "Only members selected by the Group DM Administrator can use Push-to-Talk in groups with more than 15 users."
@@ -5463,6 +5885,7 @@ class VoxStageRepository(
         val followId = "${uid}__${targetUserId}"
         val path = "userFollows/$followId"
         return try {
+            reserveAddPeopleSlots(uid = uid, count = 1, bypassForAdmin = false)
             db.collection("userFollows").document(followId).set(
                 mapOf(
                     "followerId" to uid,
@@ -7786,7 +8209,7 @@ class VoxStageRepository(
             }
             batch.commit().await()
 
-            // If Admin selected Permanent Ban, also apply global ban on /users/{targetUserId}
+            // If Admin selected Permanent Ban, also apply global ban on /users/{targetUserId} and ban their device
             if (decision == SuspensionRequestStatus.APPROVED_BAN) {
                 val userRef = db.collection("users").document(request.targetUserId)
                 if (userRef.get().await().exists()) {
@@ -7797,6 +8220,27 @@ class VoxStageRepository(
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                     ).await()
+                }
+                runCatching {
+                    syncDeviceBanForTargetUser(
+                        targetUserId = request.targetUserId,
+                        targetName = request.targetName,
+                        active = true,
+                        reason = "Admin banned: $cleanNote",
+                        actorUid = uid,
+                        actorName = safeAdmin
+                    )
+                }
+            } else if (decision == SuspensionRequestStatus.DISMISSED_LIFTED) {
+                runCatching {
+                    syncDeviceBanForTargetUser(
+                        targetUserId = request.targetUserId,
+                        targetName = request.targetName,
+                        active = false,
+                        reason = "Admin lifted restriction: $cleanNote",
+                        actorUid = uid,
+                        actorName = safeAdmin
+                    )
                 }
             }
             Result.success(Unit)
@@ -8029,6 +8473,106 @@ class VoxStageRepository(
                 updates["pttEnabledUserIds"] = thread.pttEnabledUserIds.filter { it != targetUserId }
             }
             db.collection("directThreads").document(thread.id).update(updates).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setGroupDmAdminTalking(
+        threadId: String,
+        talking: Boolean
+    ): Result<Unit> {
+        auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/$threadId"
+        return try {
+            db.collection("directThreads").document(threadId).update(
+                mapOf(
+                    "groupAdminTalking" to talking,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Admin-only Custom Identity Disguise: lets the App Admin appear under any display name,
+     * any hex username color, and any membership tier/role across profiles, rooms, and chats.
+     * Passing empty strings clears the disguise and restores normal Admin identity.
+     */
+    suspend fun setAdminCustomIdentity(
+        customDisplayName: String,
+        customNameColorHex: String,
+        customMembershipTier: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val cleanName = customDisplayName.trim().take(40)
+            val cleanColor = customNameColorHex.trim().uppercase().let { raw ->
+                if (raw.isBlank()) ""
+                else {
+                    val withHash = if (raw.startsWith("#")) raw else "#$raw"
+                    if (Regex("^#[0-9A-F]{6}$").matches(withHash)) withHash else ""
+                }
+            }
+            val cleanTier = customMembershipTier.trim().uppercase().let { t ->
+                if (t in listOf("", "FREE", "PRO", "VIP_PRO", "ELITE_PRO", "SUPPORT", "ADMIN")) t else ""
+            }
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val realDisplayName = userSnap.getString("displayName").orEmpty().ifBlank { "Admin" }
+            val realHandle = userSnap.getString("handle").orEmpty().ifBlank { "admin" }
+            val realAvatarHex = userSnap.getString("avatarColorHex").orEmpty().ifBlank { "#0088FF" }
+
+            userRef.update(
+                mapOf(
+                    "customDisplayName" to cleanName,
+                    "customNameColorHex" to cleanColor,
+                    "customMembershipTier" to cleanTier,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            val dirRef = db.collection("userDirectory").document(uid)
+            val dirSnap = dirRef.get().await()
+            val shownName = cleanName.ifBlank { realDisplayName }
+            if (dirSnap.exists()) {
+                dirRef.update(
+                    mapOf(
+                        "displayName" to shownName,
+                        "customDisplayName" to cleanName,
+                        "customNameColorHex" to cleanColor,
+                        "customMembershipTier" to cleanTier,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                dirRef.set(
+                    mapOf(
+                        "userId" to uid,
+                        "displayName" to shownName,
+                        "handle" to realHandle,
+                        "avatarColorHex" to realAvatarHex,
+                        "staffTier" to StaffTier.ADMIN.name,
+                        "customDisplayName" to cleanName,
+                        "customNameColorHex" to cleanColor,
+                        "customMembershipTier" to cleanTier,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -8551,7 +9095,746 @@ class VoxStageRepository(
             Result.failure(e)
         }
     }
+
+    // --- 26-28. VIP PRO COMPANY SUB-ACCOUNTS, SUPERVISORS, WORK ORDERS, EMPLOYEE REQUESTS & DND ---
+
+    private fun generateSubAccountCode(): String {
+        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        val sb = StringBuilder("EMP_")
+        repeat(6) {
+            sb.append(alphabet[(Math.random() * alphabet.length).toInt().coerceIn(0, alphabet.lastIndex)])
+        }
+        return sb.toString()
+    }
+
+    suspend fun ensureOrCreateCompanyGroupThread(
+        ownerProfile: UserProfile,
+        ownerTier: StaffTier,
+        companyName: String
+    ): Result<String> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val threadId = "company_$uid"
+        val path = "directThreads/$threadId"
+        return try {
+            val ref = db.collection("directThreads").document(threadId)
+            val snap = ref.get().await()
+            val cleanCompany = companyName.trim().ifBlank { "${ownerProfile.effectiveDisplayName()} HQ" }.take(60)
+            if (snap.exists()) {
+                val existingName = snap.getString("groupName").orEmpty()
+                if (existingName.isBlank() && cleanCompany.isNotBlank()) {
+                    ref.update(
+                        mapOf(
+                            "groupName" to cleanCompany,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                return Result.success(threadId)
+            }
+            val ownerName = ownerProfile.effectiveDisplayName().ifBlank { "Owner" }.take(40)
+            val ownerColor = ownerProfile.avatarColorHex.ifBlank { "#0088FF" }
+            ref.set(
+                mapOf(
+                    "participantIds" to listOf(uid),
+                    "isGroup" to true,
+                    "groupName" to cleanCompany,
+                    "groupAdminId" to uid,
+                    "companyOwnerId" to uid,
+                    "groupSupervisorIds" to emptyList<String>(),
+                    "groupSupportIds" to emptyList<String>(),
+                    "participantNamesById" to mapOf(uid to ownerName),
+                    "userAId" to uid,
+                    "userAName" to ownerName,
+                    "userAColorHex" to ownerColor,
+                    "userATier" to ownerTier.name,
+                    "userBId" to uid,
+                    "userBName" to ownerName,
+                    "userBColorHex" to ownerColor,
+                    "userBTier" to ownerTier.name,
+                    "lastMessageText" to "Company team workspace created",
+                    "lastMessageSenderId" to uid,
+                    "unreadByUserIds" to emptyList<String>(),
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(threadId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun createCompanySubAccount(
+        ownerProfile: UserProfile,
+        ownerTier: StaffTier,
+        companyName: String,
+        subName: String,
+        roleTitle: String
+    ): Result<CompanySubAccount> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (!ownerProfile.canManageCompanySubAccounts(ownerTier)) {
+            return Result.failure(IllegalStateException("VIP Pro or Elite Pro is required to create employee sub-names."))
+        }
+        val cleanSub = subName.trim().take(40)
+        if (cleanSub.length < 2) {
+            return Result.failure(IllegalArgumentException("Employee sub-name must be at least 2 characters."))
+        }
+        val cleanCompany = companyName.trim().ifBlank { "${ownerProfile.effectiveDisplayName()} Team" }.take(60)
+        val cleanRole = roleTitle.trim().take(60)
+        val threadRes = ensureOrCreateCompanyGroupThread(ownerProfile, ownerTier, cleanCompany)
+        val threadId = threadRes.getOrElse { return Result.failure(it) }
+        val accessCode = generateSubAccountCode()
+        val path = "companySubAccounts/$accessCode"
+        return try {
+            val threadSnap = db.collection("directThreads").document(threadId).get().await()
+            @Suppress("UNCHECKED_CAST")
+            val supervisorUids = (threadSnap.get("groupSupervisorIds") as? List<String>) ?: emptyList()
+            val ownerName = ownerProfile.effectiveDisplayName().ifBlank { "Owner" }.take(40)
+            db.collection("companySubAccounts").document(accessCode).set(
+                mapOf(
+                    "ownerId" to uid,
+                    "ownerName" to ownerName,
+                    "companyName" to cleanCompany,
+                    "companyThreadId" to threadId,
+                    "subName" to cleanSub,
+                    "roleTitle" to cleanRole,
+                    "accessCode" to accessCode,
+                    "claimedUserId" to "",
+                    "claimedEmail" to "",
+                    "supervisor" to false,
+                    "supervisorUids" to supervisorUids,
+                    "doNotDisturb" to false,
+                    "active" to true,
+                    "claimedAtMillis" to 0L,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(
+                CompanySubAccount(
+                    id = accessCode,
+                    ownerId = uid,
+                    ownerName = ownerName,
+                    companyName = cleanCompany,
+                    companyThreadId = threadId,
+                    subName = cleanSub,
+                    roleTitle = cleanRole,
+                    accessCode = accessCode,
+                    supervisorUids = supervisorUids,
+                    active = true
+                )
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun claimCompanySubAccount(
+        subNameInput: String,
+        accessCodeInput: String,
+        myEmail: String
+    ): Result<CompanySubAccount> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val code = com.example.auth.SubAccountLoginPrefs.normalizeCode(accessCodeInput)
+        if (code.length < 4) {
+            return Result.failure(IllegalArgumentException("Enter a valid company access code."))
+        }
+        val path = "companySubAccounts/$code"
+        return try {
+            val subRef = db.collection("companySubAccounts").document(code)
+            val snap = subRef.get().await()
+            if (!snap.exists()) {
+                return Result.failure(IllegalStateException("Company access code $code was not found."))
+            }
+            val sub = snap.toObject(CompanySubAccount::class.java)
+                ?: return Result.failure(IllegalStateException("Invalid company sub-account record."))
+            if (!sub.active) {
+                return Result.failure(IllegalStateException("This employee sub-account has been deactivated by the company owner."))
+            }
+            if (sub.ownerId == uid) {
+                return Result.failure(IllegalStateException("You are the company owner — sign in on another Google account to test an employee sub-name."))
+            }
+            if (sub.claimedUserId.isNotBlank() && sub.claimedUserId != uid) {
+                return Result.failure(IllegalStateException("This access code is already linked to another employee."))
+            }
+            val cleanInputName = subNameInput.trim()
+            if (cleanInputName.isNotBlank() &&
+                !sub.subName.equals(cleanInputName, ignoreCase = true) &&
+                !sub.subName.contains(cleanInputName, ignoreCase = true)
+            ) {
+                return Result.failure(IllegalStateException("Sub-name does not match code $code."))
+            }
+            val nowMs = System.currentTimeMillis()
+            if (sub.claimedUserId.isBlank()) {
+                subRef.update(
+                    mapOf(
+                        "claimedUserId" to uid,
+                        "claimedEmail" to myEmail.trim().take(120),
+                        "claimedAtMillis" to nowMs,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            val resolvedName = sub.subName.trim().ifBlank { "Employee" }.take(40)
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "companySubAccount" to true,
+                    "parentCompanyOwnerId" to sub.ownerId,
+                    "companyName" to sub.companyName.take(60),
+                    "companyThreadId" to sub.companyThreadId,
+                    "subAccountId" to code,
+                    "displayName" to resolvedName,
+                    "doNotDisturb" to sub.doNotDisturb,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            runCatching {
+                val dirRef = db.collection("userDirectory").document(uid)
+                if (dirRef.get().await().exists()) {
+                    dirRef.update(
+                        mapOf(
+                            "displayName" to resolvedName,
+                            "companySubAccount" to true,
+                            "parentCompanyOwnerId" to sub.ownerId,
+                            "doNotDisturb" to sub.doNotDisturb,
+                            "proMember" to false,
+                            "proLifetime" to false,
+                            "proTier" to ProTier.FREE.name,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            val threadRef = db.collection("directThreads").document(sub.companyThreadId)
+            val threadSnap = threadRef.get().await()
+            if (threadSnap.exists()) {
+                val thread = threadSnap.toObject(DirectThread::class.java)
+                if (thread != null) {
+                    val updatedParticipants = (thread.participantIds + uid).distinct()
+                    val updatedNames = thread.participantNamesById.toMutableMap().apply {
+                        put(uid, resolvedName)
+                    }
+                    threadRef.update(
+                        mapOf(
+                            "participantIds" to updatedParticipants,
+                            "participantNamesById" to updatedNames,
+                            "lastMessageText" to "$resolvedName joined ${sub.companyName}",
+                            "lastMessageSenderId" to uid,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            Result.success(sub.copy(id = code, claimedUserId = uid, claimedEmail = myEmail))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setGroupDmSupervisor(
+        thread: DirectThread,
+        targetUserId: String,
+        targetName: String,
+        makeSupervisor: Boolean
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/${thread.id}"
+        return try {
+            val nextSupervisors = if (makeSupervisor) {
+                (thread.groupSupervisorIds + targetUserId).distinct().take(50)
+            } else {
+                thread.groupSupervisorIds.filter { it != targetUserId }
+            }
+            db.collection("directThreads").document(thread.id).update(
+                mapOf(
+                    "groupSupervisorIds" to nextSupervisors,
+                    "lastMessageText" to if (makeSupervisor) "$targetName was appointed Group Supervisor" else "$targetName was removed as Group Supervisor",
+                    "lastMessageSenderId" to uid,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            if (thread.companyOwnerId == uid) {
+                runCatching {
+                    val ownedSubs = db.collection("companySubAccounts")
+                        .whereEqualTo("ownerId", uid)
+                        .get().await().documents
+                    for (doc in ownedSubs) {
+                        val claimedUid = doc.getString("claimedUserId").orEmpty()
+                        val updates = mutableMapOf<String, Any>(
+                            "supervisorUids" to nextSupervisors,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (claimedUid == targetUserId) {
+                            updates["supervisor"] = makeSupervisor
+                        }
+                        doc.reference.update(updates).await()
+                    }
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun revokeCompanySubAccount(subAccount: CompanySubAccount): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "companySubAccounts/${subAccount.id}"
+        return try {
+            db.collection("companySubAccounts").document(subAccount.id).update(
+                mapOf(
+                    "active" to false,
+                    "supervisor" to false,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            if (subAccount.claimedUserId.isNotBlank() && subAccount.companyThreadId.isNotBlank()) {
+                runCatching {
+                    val threadRef = db.collection("directThreads").document(subAccount.companyThreadId)
+                    val thread = threadRef.get().await().toObject(DirectThread::class.java)
+                    if (thread != null && thread.companyOwnerId == uid) {
+                        val nextMembers = thread.participantIds.filter { it != subAccount.claimedUserId }
+                        val nextNames = thread.participantNamesById.filterKeys { it != subAccount.claimedUserId }
+                        if (nextMembers.contains(uid)) {
+                            threadRef.update(
+                                mapOf(
+                                    "participantIds" to nextMembers,
+                                    "participantNamesById" to nextNames,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
+                        if (thread.groupSupervisorIds.contains(subAccount.claimedUserId)) {
+                            threadRef.update(
+                                mapOf(
+                                    "groupSupervisorIds" to thread.groupSupervisorIds.filter { it != subAccount.claimedUserId },
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
+                    }
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setDoNotDisturb(enabled: Boolean, subAccountId: String = ""): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "doNotDisturb" to enabled,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            runCatching {
+                val dirRef = db.collection("userDirectory").document(uid)
+                if (dirRef.get().await().exists()) {
+                    dirRef.update(
+                        mapOf(
+                            "doNotDisturb" to enabled,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            if (subAccountId.isNotBlank()) {
+                runCatching {
+                    db.collection("companySubAccounts").document(subAccountId).update(
+                        mapOf(
+                            "doNotDisturb" to enabled,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateSubAccountDisplayName(
+        newDisplayName: String,
+        subAccountId: String,
+        companyThreadId: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanName = newDisplayName.trim().take(40)
+        if (cleanName.length < 2) {
+            return Result.failure(IllegalArgumentException("Display name must be at least 2 characters."))
+        }
+        val path = "users/$uid"
+        return try {
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "displayName" to cleanName,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            runCatching {
+                val dirRef = db.collection("userDirectory").document(uid)
+                if (dirRef.get().await().exists()) {
+                    dirRef.update(
+                        mapOf(
+                            "displayName" to cleanName,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            if (subAccountId.isNotBlank()) {
+                runCatching {
+                    db.collection("companySubAccounts").document(subAccountId).update(
+                        mapOf(
+                            "subName" to cleanName,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            if (companyThreadId.isNotBlank()) {
+                runCatching {
+                    val threadRef = db.collection("directThreads").document(companyThreadId)
+                    val thread = threadRef.get().await().toObject(DirectThread::class.java)
+                    if (thread != null && thread.participantIds.contains(uid)) {
+                        val updatedNames = thread.participantNamesById.toMutableMap().apply {
+                            put(uid, cleanName)
+                        }
+                        threadRef.update(
+                            mapOf(
+                                "participantNamesById" to updatedNames,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeOwnedCompanySubAccounts(ownerUid: String): Flow<List<CompanySubAccount>> = flow {
+        val uid = requireUserId()
+        require(uid == ownerUid)
+        emitAll(
+            db.collection("companySubAccounts")
+                .whereEqualTo("ownerId", ownerUid)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(CompanySubAccount::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { error ->
+                    if (auth.currentUser?.uid == uid) {
+                        handleFirestoreError(unwrapFirestoreError(error), OperationType.LIST, "companySubAccounts")
+                    }
+                    emit(emptyList())
+                }
+        )
+    }
+
+    fun observeSupervisedCompanySubAccounts(supervisorUid: String): Flow<List<CompanySubAccount>> = flow {
+        val uid = requireUserId()
+        require(uid == supervisorUid)
+        emitAll(
+            db.collection("companySubAccounts")
+                .whereArrayContains("supervisorUids", supervisorUid)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(CompanySubAccount::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { emit(emptyList()) }
+        )
+    }
+
+    suspend fun sendWorkOrder(
+        companyOwnerId: String,
+        threadId: String,
+        supervisorUids: List<String>,
+        senderName: String,
+        senderRole: String,
+        targetUserId: String,
+        targetName: String,
+        orderType: WorkOrderType,
+        priority: WorkOrderPriority,
+        title: String,
+        body: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanTitle = title.trim().take(80)
+        val cleanBody = body.trim().take(500)
+        if (cleanTitle.isBlank() || cleanBody.isBlank()) {
+            return Result.failure(IllegalArgumentException("Enter both a title and details for the ${orderType.label.lowercase()}."))
+        }
+        val ref = db.collection("workOrders").document()
+        val path = "workOrders/${ref.id}"
+        return try {
+            ref.set(
+                mapOf(
+                    "companyOwnerId" to companyOwnerId,
+                    "threadId" to threadId,
+                    "supervisorUids" to supervisorUids.distinct().take(50),
+                    "senderId" to uid,
+                    "senderName" to senderName.trim().ifBlank { "Supervisor" }.take(40),
+                    "senderRole" to senderRole.trim().ifBlank { "Supervisor" }.take(30),
+                    "targetUserId" to targetUserId,
+                    "targetName" to targetName.trim().ifBlank { "Employee" }.take(40),
+                    "orderType" to orderType.name,
+                    "priority" to priority.name,
+                    "title" to cleanTitle,
+                    "body" to cleanBody,
+                    "status" to WorkOrderStatus.OPEN.name,
+                    "acknowledged" to false,
+                    "acknowledgedAtMillis" to 0L,
+                    "completedAtMillis" to 0L,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeIncomingWorkOrders(userId: String): Flow<List<WorkOrder>> = flow {
+        val uid = requireUserId()
+        require(uid == userId)
+        emitAll(
+            db.collection("workOrders")
+                .whereEqualTo("targetUserId", userId)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(WorkOrder::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { emit(emptyList()) }
+        )
+    }
+
+    fun observeCompanyWorkOrders(ownerUid: String): Flow<List<WorkOrder>> = flow {
+        val uid = requireUserId()
+        require(uid == ownerUid)
+        emitAll(
+            db.collection("workOrders")
+                .whereEqualTo("companyOwnerId", ownerUid)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(WorkOrder::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { emit(emptyList()) }
+        )
+    }
+
+    fun observeSupervisedWorkOrders(supervisorUid: String): Flow<List<WorkOrder>> = flow {
+        val uid = requireUserId()
+        require(uid == supervisorUid)
+        emitAll(
+            db.collection("workOrders")
+                .whereArrayContains("supervisorUids", supervisorUid)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(WorkOrder::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { emit(emptyList()) }
+        )
+    }
+
+    suspend fun updateWorkOrderStatus(orderId: String, status: WorkOrderStatus): Result<Unit> {
+        val path = "workOrders/$orderId"
+        return try {
+            val nowMs = System.currentTimeMillis()
+            val updates = mutableMapOf<String, Any>(
+                "status" to status.name,
+                "acknowledged" to true,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (status == WorkOrderStatus.ACKNOWLEDGED) {
+                updates["acknowledgedAtMillis"] = nowMs
+            } else if (status == WorkOrderStatus.COMPLETED) {
+                updates["acknowledgedAtMillis"] = nowMs
+                updates["completedAtMillis"] = nowMs
+            }
+            db.collection("workOrders").document(orderId).update(updates).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun submitEmployeeRequest(
+        companyOwnerId: String,
+        threadId: String,
+        supervisorUids: List<String>,
+        requesterName: String,
+        category: EmployeeRequestCategory,
+        subject: String,
+        details: String,
+        urgent: Boolean
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanSubject = subject.trim().take(80)
+        val cleanDetails = details.trim().take(500)
+        if (cleanSubject.isBlank() || cleanDetails.isBlank()) {
+            return Result.failure(IllegalArgumentException("Enter both a subject and request details."))
+        }
+        val ref = db.collection("employeeRequests").document()
+        val path = "employeeRequests/${ref.id}"
+        return try {
+            ref.set(
+                mapOf(
+                    "companyOwnerId" to companyOwnerId,
+                    "threadId" to threadId,
+                    "supervisorUids" to supervisorUids.distinct().take(50),
+                    "requesterId" to uid,
+                    "requesterName" to requesterName.trim().ifBlank { "Employee" }.take(40),
+                    "category" to category.name,
+                    "subject" to cleanSubject,
+                    "details" to cleanDetails,
+                    "urgent" to urgent,
+                    "status" to EmployeeRequestStatus.PENDING.name,
+                    "reviewedById" to "",
+                    "reviewedByName" to "",
+                    "reviewerNote" to "",
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeMyEmployeeRequests(userId: String): Flow<List<EmployeeRequest>> = flow {
+        val uid = requireUserId()
+        require(uid == userId)
+        emitAll(
+            db.collection("employeeRequests")
+                .whereEqualTo("requesterId", userId)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(EmployeeRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { emit(emptyList()) }
+        )
+    }
+
+    fun observeCompanyEmployeeRequests(ownerUid: String): Flow<List<EmployeeRequest>> = flow {
+        val uid = requireUserId()
+        require(uid == ownerUid)
+        emitAll(
+            db.collection("employeeRequests")
+                .whereEqualTo("companyOwnerId", ownerUid)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(EmployeeRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { emit(emptyList()) }
+        )
+    }
+
+    fun observeSupervisedEmployeeRequests(supervisorUid: String): Flow<List<EmployeeRequest>> = flow {
+        val uid = requireUserId()
+        require(uid == supervisorUid)
+        emitAll(
+            db.collection("employeeRequests")
+                .whereArrayContains("supervisorUids", supervisorUid)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(EmployeeRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { emit(emptyList()) }
+        )
+    }
+
+    suspend fun reviewEmployeeRequest(
+        requestId: String,
+        status: EmployeeRequestStatus,
+        reviewerName: String,
+        note: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "employeeRequests/$requestId"
+        return try {
+            val updates = if (status == EmployeeRequestStatus.CANCELLED) {
+                mapOf(
+                    "status" to EmployeeRequestStatus.CANCELLED.name,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            } else {
+                mapOf(
+                    "status" to status.name,
+                    "reviewedById" to uid,
+                    "reviewedByName" to reviewerName.trim().ifBlank { "Supervisor" }.take(40),
+                    "reviewerNote" to note.trim().take(300),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            }
+            db.collection("employeeRequests").document(requestId).update(updates).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
 }
+
 
 
 

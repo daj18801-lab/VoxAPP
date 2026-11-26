@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -89,6 +90,7 @@ import com.example.R
 import com.example.data.ChatRoom
 import com.example.data.RoomCategory
 import com.example.data.RoomCoverKey
+import com.example.data.RoomStatus
 import com.example.data.RoomVisibility
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
@@ -154,6 +156,12 @@ fun LobbyScreen(
             userProfile?.currentlySuspended() != true &&
             userProfile?.disableCreateRoom != true
         )
+    val myLiveRoom = remember(myRoomsState, currentUserId) {
+        (myRoomsState as? UiState.Success)?.data?.firstOrNull {
+            it.hostId == currentUserId && it.statusEnum() == RoomStatus.LIVE
+        }
+    }
+    val hasActiveRoomLimit = !staffCapabilities.isAdmin && myLiveRoom != null
     val invisibleActive = staffCapabilities.effectiveCanEnterInvisible && (userProfile?.invisibleModePreferred == true)
 
     val activeState = if (showOnlyMyRooms) myRoomsState else publicRoomsState
@@ -528,6 +536,7 @@ fun LobbyScreen(
         ) {
             CreateRoomSheetContent(
                 isSubmitting = isCreatingRoom,
+                existingLiveRoomTitle = if (hasActiveRoomLimit) myLiveRoom?.displayTitle() else null,
                 onCancel = { showCreateSheet = false },
                 onSubmit = { title, topic, category, coverKey, visibility, videoEnabled, autoModEnabled, autoModBlockMode, linksBlocked, slowModeSeconds, maxSpeakers, pinLocked, roomPinCode ->
                     onCreateRoom(
@@ -888,6 +897,7 @@ private fun EmptyRoomsCard(
 @Composable
 private fun CreateRoomSheetContent(
     isSubmitting: Boolean,
+    existingLiveRoomTitle: String? = null,
     onCancel: () -> Unit,
     onSubmit: (
         title: String,
@@ -937,6 +947,23 @@ private fun CreateRoomSheetContent(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        if (!existingLiveRoomTitle.isNullOrBlank()) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = LiveCoral.copy(alpha = 0.14f),
+                border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.5f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("create_room_active_limit_banner")
+            ) {
+                Text(
+                    text = "1-Room Limit: You already have an active room live (\"$existingLiveRoomTitle\"). Close your active public or private room before creating another.",
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = LiveCoral,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
 
         OutlinedTextField(
             value = title,
@@ -1006,8 +1033,35 @@ private fun CreateRoomSheetContent(
                 FilterChip(
                     selected = visibility == vis,
                     onClick = { visibility = vis },
-                    label = { Text(vis.label) }
+                    label = { Text(vis.label) },
+                    modifier = Modifier.testTag("create_room_visibility_${vis.name.lowercase()}")
                 )
+            }
+        }
+
+        if (visibility == RoomVisibility.PRIVATE) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("private_room_tier_caps_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Private Room Capacity by Membership",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Free: 25 users · VOX Pro: 50 users · VIP Pro: 75 users · Elite Pro: 100 users",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
 
@@ -1144,7 +1198,7 @@ private fun CreateRoomSheetContent(
                         )
                     }
                 },
-                enabled = !isSubmitting,
+                enabled = !isSubmitting && existingLiveRoomTitle.isNullOrBlank(),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = LiveCoral,
                     contentColor = Color.White

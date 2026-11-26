@@ -417,17 +417,32 @@ class RoomViewModel(
         }
         _isCamActive.value = active
         viewModelScope.launch {
-            liveKitManager.setCameraEnabled(active)
+            if (active && !liveKitManager.isConnected.value) {
+                val connectRes = liveKitManager.connectToRoom(
+                    roomName = roomId,
+                    participantIdentity = currentUserId,
+                    participantName = profile?.effectiveDisplayName()?.ifBlank { "Member" } ?: "Member"
+                )
+                if (connectRes.isFailure) {
+                    _isCamActive.value = false
+                    _events.tryEmit("Could not connect video stream: ${connectRes.exceptionOrNull()?.message ?: "network error"}")
+                    syncMediaStateNow(if (_isMicActive.value) liveVoiceAmplitude.value.toDouble() else 0.0)
+                    return@launch
+                }
+            }
+            val ok = liveKitManager.setCameraEnabled(active)
+            if (active && !ok && liveKitManager.localVideoTrack.value == null) {
+                _isCamActive.value = false
+                _events.tryEmit("Camera failed to start — please check camera permission and try again.")
+            }
+            syncMediaStateNow(if (_isMicActive.value) liveVoiceAmplitude.value.toDouble() else 0.0)
         }
-        syncMediaStateNow(if (_isMicActive.value) liveVoiceAmplitude.value.toDouble() else 0.0)
     }
 
     fun flipCamera() {
         val nextFront = !_useFrontCamera.value
         _useFrontCamera.value = nextFront
-        val videoTrack = liveKitManager.room.localParticipant
-            .getTrackPublication(Track.Source.CAMERA)?.track as? LocalVideoTrack
-        videoTrack?.switchCamera(position = if (nextFront) CameraPosition.FRONT else CameraPosition.BACK)
+        liveKitManager.flipCamera(nextFront)
     }
 
     fun toggleRaiseHand() {
@@ -885,7 +900,8 @@ class RoomViewModel(
         suspensionReason: String,
         actorName: String,
         pointsBalance: Long? = null,
-        proLifetime: Boolean? = null
+        proLifetime: Boolean? = null,
+        disableMessaging: Boolean = false
     ) {
         viewModelScope.launch {
             repository.adminEditUserProfileAndRestrictions(
@@ -903,7 +919,8 @@ class RoomViewModel(
                 actorName = actorName,
                 roomId = roomId,
                 pointsBalance = pointsBalance,
-                proLifetime = proLifetime
+                proLifetime = proLifetime,
+                disableMessaging = disableMessaging
             ).onSuccess {
                 _events.tryEmit("Updated user $displayName")
             }.onFailure { err ->

@@ -12,6 +12,7 @@ import androidx.core.content.ContextCompat
 import com.example.data.PttChirpStyle
 import com.example.data.PttThemeStyle
 import com.example.notifications.DirectMessageNotificationPrefs
+import com.example.widget.VoxPttWidgetProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +41,11 @@ import kotlinx.coroutines.launch
 object LivePttSessionManager {
 
     private const val TAG = "LivePttSession"
+    private const val WIDGET_PREFS = "vox_ptt_widget_session"
+    private const val KEY_LAST_THREAD_ID = "last_thread_id"
+    private const val KEY_LAST_PEER_NAME = "last_peer_name"
+    private const val KEY_LAST_USER_ID = "last_user_id"
+    private const val KEY_LAST_DISPLAY_NAME = "last_display_name"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -48,6 +54,14 @@ object LivePttSessionManager {
     private var speakerCollectorJob: Job? = null
     private var connectedCollectorJob: Job? = null
     private var transmitLimitJob: Job? = null
+
+    /** Thread ID currently in an active Private Voice/Video Call so PTT doesn't hijack the LiveKit identity. */
+    private val _suppressedForCallThreadId = MutableStateFlow<String?>(null)
+    val suppressedForCallThreadId: StateFlow<String?> = _suppressedForCallThreadId.asStateFlow()
+
+    /** Optional hook notified when PTT transmission toggles (used by Group DM Admin priority talk-over). */
+    @Volatile
+    var onTransmittingStateChanged: ((threadId: String, transmitting: Boolean) -> Unit)? = null
 
     private val _activeThreadId = MutableStateFlow<String?>(null)
     val activeThreadId: StateFlow<String?> = _activeThreadId.asStateFlow()
@@ -97,6 +111,101 @@ object LivePttSessionManager {
     fun setPttCustomization(theme: PttThemeStyle, chirp: PttChirpStyle) {
         _activePttTheme.value = theme
         _activePttChirp.value = chirp
+    }
+
+    /**
+     * Suppresses background Live PTT on [threadId] while a Private Voice/Video Call is active
+     * so LiveKit never kicks the user's video call participant for duplicate identity.
+     */
+    fun suppressForPrivateCall(context: Context, threadId: String) {
+        if (threadId.isBlank()) return
+        _suppressedForCallThreadId.value = threadId
+        if (_activeThreadId.value == threadId) {
+            val appContext = context.applicationContext
+            disconnectInternal(appContext, stopService = false)
+        }
+    }
+
+    fun clearPrivateCallSuppression(threadId: String) {
+        if (_suppressedForCallThreadId.value == threadId) {
+            _suppressedForCallThreadId.value = null
+        }
+    }
+
+    private fun saveLastSession(
+        context: Context,
+        threadId: String,
+        peerName: String,
+        myUserId: String,
+        myDisplayName: String
+    ) {
+        if (threadId.isBlank() || myUserId.isBlank()) return
+        runCatching {
+            context.applicationContext
+                .getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_THREAD_ID, threadId)
+                .putString(KEY_LAST_PEER_NAME, peerName)
+                .putString(KEY_LAST_USER_ID, myUserId)
+                .putString(KEY_LAST_DISPLAY_NAME, myDisplayName)
+                .apply()
+        }
+    }
+
+    fun getSavedLastPeerName(context: Context): String = runCatching {
+        context.applicationContext
+            .getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_PEER_NAME, "")
+            .orEmpty()
+    }.getOrDefault("")
+
+    /**
+     * Called by the Home Screen PTT Widget on tap:
+     * - If currently transmitting -> stops transmitting and dims widget.
+     * - If idle -> starts transmitting (reconnecting the saved PTT channel in background if needed) and lights up widget.
+     * Returns true if handled in background, or false if the user needs to open VOX first.
+     */
+    fun toggleFromWidget(context: Context): Boolean {
+        val appContext = context.applicationContext
+        val hasMic = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMic) return false
+
+        if (_isTransmitting.value) {
+            triggerPttHaptic(appContext)
+            setTransmitting(appContext, false)
+            return true
+        }
+
+        val activeTid = _activeThreadId.value
+        val activePeer = _activePeerName.value
+        if (!activeTid.isNullOrBlank()) {
+            triggerPttHaptic(appContext)
+            setTransmitting(appContext, true, threadId = activeTid, peerName = activePeer)
+            return true
+        }
+
+        val prefs = appContext.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+        val savedTid = prefs.getString(KEY_LAST_THREAD_ID, "").orEmpty()
+        val savedPeer = prefs.getString(KEY_LAST_PEER_NAME, "").orEmpty().ifBlank { "Private Chat" }
+        val savedUid = prefs.getString(KEY_LAST_USER_ID, "").orEmpty()
+        val savedName = prefs.getString(KEY_LAST_DISPLAY_NAME, "").orEmpty().ifBlank { "Member" }
+        if (savedTid.isBlank() || savedUid.isBlank()) return false
+
+        cachedMyUserId = savedUid
+        cachedMyDisplayName = savedName
+        triggerPttHaptic(appContext)
+        setTransmitting(
+            context = appContext,
+            transmitting = true,
+            threadId = savedTid,
+            peerName = savedPeer,
+            myUserId = savedUid,
+            myDisplayName = savedName
+        )
+        return true
     }
 
     /**
@@ -238,12 +347,17 @@ object LivePttSessionManager {
         myDisplayName: String
     ) {
         if (threadId.isBlank() || myUserId.isBlank()) return
+        if (_suppressedForCallThreadId.value == threadId) {
+            Log.d(TAG, "PTT connect suppressed for $threadId while private voice/video call is active")
+            return
+        }
         val appContext = context.applicationContext
         cachedMyUserId = myUserId
         cachedMyDisplayName = myDisplayName.ifBlank { "Member" }
 
         val cleanPeer = peerName.ifBlank { "Private Chat" }
         _activePeerName.value = cleanPeer
+        saveLastSession(appContext, threadId, cleanPeer, myUserId, cachedMyDisplayName)
 
         if (_activeThreadId.value == threadId && (_isConnected.value || _isConnecting.value)) {
             PrivateCallForegroundService.startPtt(
@@ -253,6 +367,7 @@ object LivePttSessionManager {
                 isTransmitting = _isTransmitting.value,
                 showFloatingOverlay = true
             )
+            VoxPttWidgetProvider.requestUpdate(appContext)
             return
         }
 
@@ -331,12 +446,14 @@ object LivePttSessionManager {
                     isTransmitting = false,
                     showFloatingOverlay = true
                 )
+                VoxPttWidgetProvider.requestUpdate(appContext)
                 true
             },
             onFailure = { err ->
                 Log.w(TAG, "Live PTT LiveKit connection failed for $threadId", err)
                 _isConnected.value = false
                 _isTransmitting.value = false
+                VoxPttWidgetProvider.requestUpdate(appContext)
                 false
             }
         )
@@ -384,6 +501,7 @@ object LivePttSessionManager {
                 }
                 _isTransmitting.value = true
                 _transmittingElapsedSec.value = 0
+                onTransmittingStateChanged?.invoke(targetThreadId, true)
                 liveKitManager?.setMicEnabled(true)
                 PrivateCallForegroundService.startPtt(
                     context = appContext,
@@ -392,6 +510,7 @@ object LivePttSessionManager {
                     isTransmitting = true,
                     showFloatingOverlay = true
                 )
+                VoxPttWidgetProvider.requestUpdate(appContext)
                 transmitLimitJob?.cancel()
                 val limitSec = _maxPttSeconds.value.coerceIn(5, 60)
                 transmitLimitJob = scope.launch {
@@ -403,6 +522,7 @@ object LivePttSessionManager {
                     if (isActive && _isTransmitting.value) {
                         _isTransmitting.value = false
                         _transmittingElapsedSec.value = 0
+                        onTransmittingStateChanged?.invoke(targetThreadId, false)
                         liveKitManager?.setMicEnabled(false)
                         PttChirpSoundEngine.playKeyUp(_activePttChirp.value)
                         if (_isConnected.value) {
@@ -414,6 +534,7 @@ object LivePttSessionManager {
                                 showFloatingOverlay = true
                             )
                         }
+                        VoxPttWidgetProvider.requestUpdate(appContext)
                         val msg = if (limitSec <= 5) {
                             "Free PTT 5-second limit reached. Upgrade to Pro (\$9.99/mo) for 1-minute PTT clips!"
                         } else {
@@ -429,6 +550,9 @@ object LivePttSessionManager {
                 transmitLimitJob = null
                 _isTransmitting.value = false
                 _transmittingElapsedSec.value = 0
+                if (wasTx) {
+                    onTransmittingStateChanged?.invoke(targetThreadId, false)
+                }
                 liveKitManager?.setMicEnabled(false)
                 if (wasTx) {
                     PttChirpSoundEngine.playKeyUp(_activePttChirp.value)
@@ -443,6 +567,7 @@ object LivePttSessionManager {
                         showFloatingOverlay = true
                     )
                 }
+                VoxPttWidgetProvider.requestUpdate(appContext)
             }
         }
     }
@@ -468,12 +593,16 @@ object LivePttSessionManager {
         val manager = liveKitManager
         liveKitManager = null
         runCatching { manager?.disconnect() }
+        val wasTx = _isTransmitting.value
+        val prevThread = _activeThreadId.value
         _isTransmitting.value = false
         _transmittingElapsedSec.value = 0
+        if (wasTx && !prevThread.isNullOrBlank()) {
+            onTransmittingStateChanged?.invoke(prevThread, false)
+        }
         _isConnected.value = false
         _isConnecting.value = false
         _remoteSpeakingName.value = null
-        val prevThread = _activeThreadId.value
         _activeThreadId.value = null
         _activePeerName.value = ""
         if (stopService && PrivateCallForegroundService.isPttMode) {
@@ -481,5 +610,6 @@ object LivePttSessionManager {
         } else if (stopService && PrivateCallForegroundService.activeThreadId == prevThread) {
             PrivateCallForegroundService.stop(appContext)
         }
+        VoxPttWidgetProvider.requestUpdate(appContext)
     }
 }

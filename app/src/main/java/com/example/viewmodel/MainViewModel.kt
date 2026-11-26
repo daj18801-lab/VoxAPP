@@ -4,16 +4,22 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AdminNotification
+import com.example.data.AdminPreviewMode
 import com.example.data.AlertSeverity
 import com.example.data.AppBroadcast
 import com.example.data.AppConfig
 import com.example.data.AppPerkType
+import com.example.data.BannedDevice
 import com.example.data.ChatRoom
+import com.example.data.CompanySubAccount
 import com.example.data.CreatorSubscription
 import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
 import com.example.data.DmAccessPass
 import com.example.data.DmPolicy
+import com.example.data.EmployeeRequest
+import com.example.data.EmployeeRequestCategory
+import com.example.data.EmployeeRequestStatus
 import com.example.data.Friendship
 import com.example.data.PerkGrant
 import com.example.data.PointTransaction
@@ -54,6 +60,10 @@ import com.example.data.UserModerationFile
 import com.example.data.UserProfile
 import com.example.data.UserSex
 import com.example.data.VoxStageRepository
+import com.example.data.WorkOrder
+import com.example.data.WorkOrderPriority
+import com.example.data.WorkOrderStatus
+import com.example.data.WorkOrderType
 import com.example.data.unwrapFirestoreError
 import com.example.media.LivePttSessionManager
 import com.example.media.PreparedReelVideo
@@ -67,6 +77,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -121,7 +132,10 @@ class MainViewModel(
     private val _snackbarEvents = MutableSharedFlow<String>(extraBufferCapacity = 12)
     val snackbarEvents: SharedFlow<String> = _snackbarEvents.asSharedFlow()
 
-    val staffCapabilities: StateFlow<StaffCapabilities> =
+    private val _adminPreviewMode = MutableStateFlow(AdminPreviewMode.ADMIN)
+    val adminPreviewMode: StateFlow<AdminPreviewMode> = _adminPreviewMode.asStateFlow()
+
+    val realStaffCapabilities: StateFlow<StaffCapabilities> =
         repository.observeMyStaffCapabilities(currentUserId, initialEmail, initialEmailVerified)
             .stateIn(
                 scope = viewModelScope,
@@ -133,15 +147,34 @@ class MainViewModel(
                 }
             )
 
-    private val isAdminFlow = staffCapabilities
+    val staffCapabilities: StateFlow<StaffCapabilities> =
+        combine(realStaffCapabilities, _adminPreviewMode) { real, mode ->
+            if (!real.isAdmin || mode == AdminPreviewMode.ADMIN) {
+                real
+            } else if (mode == AdminPreviewMode.SUPPORT) {
+                StaffCapabilities(StaffTier.SUPPORT, canEnterInvisible = true)
+            } else {
+                StaffCapabilities(StaffTier.USER, canEnterInvisible = false)
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = if (isBootstrappedAdmin) {
+                StaffCapabilities(StaffTier.ADMIN, true)
+            } else {
+                StaffCapabilities(StaffTier.USER, false)
+            }
+        )
+
+    private val isAdminFlow = realStaffCapabilities
         .map { it.isAdmin }
         .distinctUntilChanged()
 
-    private val isStaffFlow = staffCapabilities
+    private val isStaffFlow = realStaffCapabilities
         .map { it.isStaff }
         .distinctUntilChanged()
 
-    val userProfileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
+    val realUserProfileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
         .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
         .catch { error ->
             val root = unwrapFirestoreError(error)
@@ -153,6 +186,88 @@ class MainViewModel(
             started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
             initialValue = UiState.Loading
         )
+
+    val userProfileState: StateFlow<UiState<UserProfile?>> =
+        combine(realUserProfileState, realStaffCapabilities, _adminPreviewMode) { state, realCaps, mode ->
+            if (state !is UiState.Success || state.data == null || !realCaps.isAdmin || !mode.isPreviewActive()) {
+                state
+            } else {
+                val base = state.data
+                val futureExpiry = System.currentTimeMillis() + 30L * 24L * 60L * 60L * 1000L
+                val previewProfile = when (mode) {
+                    AdminPreviewMode.ADMIN -> base
+                    AdminPreviewMode.SUPPORT, AdminPreviewMode.FREE -> base.copy(
+                        proMember = false,
+                        proLifetime = false,
+                        proTier = ProTier.FREE.name,
+                        proExpiresAtMillis = 0L
+                    )
+                    AdminPreviewMode.VOX_PRO -> base.copy(
+                        proMember = true,
+                        proLifetime = false,
+                        proTier = ProTier.PRO.name,
+                        proExpiresAtMillis = futureExpiry
+                    )
+                    AdminPreviewMode.VIP_PRO -> base.copy(
+                        proMember = true,
+                        proLifetime = false,
+                        proTier = ProTier.VIP_PRO.name,
+                        proExpiresAtMillis = futureExpiry
+                    )
+                    AdminPreviewMode.ELITE_PRO -> base.copy(
+                        proMember = true,
+                        proLifetime = false,
+                        proTier = ProTier.ELITE_PRO.name,
+                        proExpiresAtMillis = futureExpiry
+                    )
+                }
+                UiState.Success(previewProfile)
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = UiState.Loading
+        )
+
+    fun setAdminPreviewMode(mode: AdminPreviewMode) {
+        if (!realStaffCapabilities.value.isAdmin) {
+            _adminPreviewMode.value = AdminPreviewMode.ADMIN
+            return
+        }
+        _adminPreviewMode.value = mode
+        val msg = when (mode) {
+            AdminPreviewMode.ADMIN -> "Returned to real Admin account view."
+            AdminPreviewMode.SUPPORT -> "Switched to Support Staff test mode — moderation tools now simulate Support Staff."
+            else -> "Previewing VOX as ${mode.label}."
+        }
+        _snackbarEvents.tryEmit(msg)
+    }
+
+    fun setAdminCustomIdentity(
+        customDisplayName: String,
+        customNameColorHex: String,
+        customMembershipTier: String
+    ) {
+        if (!realStaffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only App Admins can customize display identity.")
+            return
+        }
+        viewModelScope.launch {
+            repository.setAdminCustomIdentity(
+                customDisplayName = customDisplayName,
+                customNameColorHex = customNameColorHex,
+                customMembershipTier = customMembershipTier
+            ).onSuccess {
+                val cleared = customDisplayName.isBlank() && customNameColorHex.isBlank() && customMembershipTier.isBlank()
+                _snackbarEvents.tryEmit(
+                    if (cleared) "Restored your normal Admin username, color, and badge."
+                    else "Custom Admin identity applied across VOX!"
+                )
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update custom identity")
+            }
+        }
+    }
 
     val appConfigState: StateFlow<AppConfig> = repository.observeAppConfig()
         .catch { emit(AppConfig()) }
@@ -717,16 +832,18 @@ class MainViewModel(
     }
 
     private fun currentActorName(): String =
-        (userProfileState.value as? UiState.Success)?.data?.displayName?.ifBlank { "Administrator" }
+        (userProfileState.value as? UiState.Success)?.data?.effectiveDisplayName()?.ifBlank { "Administrator" }
             ?: "Administrator"
 
-    private fun effectiveMyProfile(): UserProfile =
-        (userProfileState.value as? UiState.Success)?.data ?: UserProfile(
+    private fun effectiveMyProfile(): UserProfile {
+        val p = (userProfileState.value as? UiState.Success)?.data ?: UserProfile(
             userId = currentUserId,
             displayName = currentActorName(),
             handle = initialEmail.substringBefore("@").ifBlank { "member" },
             avatarColorHex = "#0088FF"
         )
+        return p.copy(displayName = p.effectiveDisplayName())
+    }
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
@@ -1519,6 +1636,48 @@ class MainViewModel(
         }
     }
 
+    fun registerDeviceId(deviceHash: String) {
+        if (deviceHash.isBlank()) return
+        viewModelScope.launch {
+            repository.recordUserDeviceId(deviceHash)
+        }
+    }
+
+    fun observeBannedDevice(deviceHash: String): Flow<BannedDevice?> =
+        repository.observeBannedDevice(deviceHash)
+
+    fun syncSelfDeviceBanIfGloballyBanned(deviceHash: String) {
+        if (deviceHash.isBlank()) return
+        val profile = (realUserProfileState.value as? UiState.Success)?.data ?: return
+        if (!profile.globallyBanned) return
+        viewModelScope.launch {
+            repository.registerSelfDeviceBanIfGloballyBanned(
+                deviceHash = deviceHash,
+                displayName = profile.displayName,
+                reason = profile.suspensionReason
+            )
+        }
+    }
+
+    fun setUserMessagingDisabled(targetUserId: String, targetName: String, disabled: Boolean) {
+        if (!staffCapabilities.value.isStaff) {
+            _snackbarEvents.tryEmit("Only Support Staff or App Admins can disable or enable messaging.")
+            return
+        }
+        viewModelScope.launch {
+            repository.setUserMessagingDisabled(targetUserId = targetUserId, disabled = disabled)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (disabled) "Messaging disabled for $targetName"
+                        else "Messaging re-enabled for $targetName"
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update messaging setting")
+                }
+        }
+    }
+
     fun adminEditUser(
         targetUserId: String,
         displayName: String,
@@ -1532,7 +1691,8 @@ class MainViewModel(
         suspendedUntilMillis: Long,
         suspensionReason: String,
         pointsBalance: Long? = null,
-        proLifetime: Boolean? = null
+        proLifetime: Boolean? = null,
+        disableMessaging: Boolean = false
     ) {
         viewModelScope.launch {
             repository.adminEditUserProfileAndRestrictions(
@@ -1549,7 +1709,8 @@ class MainViewModel(
                 suspensionReason = suspensionReason,
                 actorName = currentActorName(),
                 pointsBalance = pointsBalance,
-                proLifetime = proLifetime
+                proLifetime = proLifetime,
+                disableMessaging = disableMessaging
             ).onSuccess {
                 _snackbarEvents.tryEmit("Saved changes for $displayName")
             }.onFailure { err ->
@@ -2517,6 +2678,320 @@ class MainViewModel(
                 onGranted()
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not grant perk")
+            }
+        }
+    }
+
+    // --- VIP PRO COMPANY SUB-ACCOUNTS, SUPERVISORS, WORK ORDERS, REQUESTS & DND ---
+
+    val companySubAccountsState: StateFlow<List<CompanySubAccount>> =
+        combine(
+            repository.observeOwnedCompanySubAccounts(currentUserId).catch { emit(emptyList()) },
+            repository.observeSupervisedCompanySubAccounts(currentUserId).catch { emit(emptyList()) }
+        ) { owned, supervised ->
+            (owned + supervised)
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt?.toDate()?.time ?: 0L }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val incomingWorkOrdersState: StateFlow<List<WorkOrder>> =
+        repository.observeIncomingWorkOrders(currentUserId)
+            .catch { err ->
+                Log.w(TAG, "Error observing incoming work orders", unwrapFirestoreError(err))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val teamWorkOrdersState: StateFlow<List<WorkOrder>> =
+        combine(
+            repository.observeCompanyWorkOrders(currentUserId).catch { emit(emptyList()) },
+            repository.observeSupervisedWorkOrders(currentUserId).catch { emit(emptyList()) }
+        ) { owned, supervised ->
+            (owned + supervised)
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt?.toDate()?.time ?: 0L }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val myEmployeeRequestsState: StateFlow<List<EmployeeRequest>> =
+        repository.observeMyEmployeeRequests(currentUserId)
+            .catch { err ->
+                Log.w(TAG, "Error observing my employee requests", unwrapFirestoreError(err))
+                emit(emptyList())
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = emptyList()
+            )
+
+    val teamEmployeeRequestsState: StateFlow<List<EmployeeRequest>> =
+        combine(
+            repository.observeCompanyEmployeeRequests(currentUserId).catch { emit(emptyList()) },
+            repository.observeSupervisedEmployeeRequests(currentUserId).catch { emit(emptyList()) }
+        ) { owned, supervised ->
+            (owned + supervised)
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt?.toDate()?.time ?: 0L }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    fun openOrCreateCompanyGroupDm(
+        companyName: String,
+        onReady: (String) -> Unit
+    ) {
+        val me = effectiveMyProfile()
+        val caps = staffCapabilities.value
+        if (!me.canManageCompanySubAccounts(caps.tier)) {
+            _snackbarEvents.tryEmit("VIP Pro or Elite Pro membership is required to create a Company Workspace.")
+            return
+        }
+        viewModelScope.launch {
+            repository.ensureOrCreateCompanyGroupThread(
+                ownerProfile = me,
+                ownerTier = caps.tier,
+                companyName = companyName.ifBlank { "${me.effectiveDisplayName()} Team" }
+            ).onSuccess { threadId ->
+                onReady(threadId)
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not open Company Group DM")
+            }
+        }
+    }
+
+    fun createCompanySubAccount(
+        companyName: String,
+        subName: String,
+        roleTitle: String,
+        onCreated: (CompanySubAccount) -> Unit = {}
+    ) {
+        val me = effectiveMyProfile()
+        val caps = staffCapabilities.value
+        if (!me.canManageCompanySubAccounts(caps.tier)) {
+            _snackbarEvents.tryEmit("VIP Pro or Elite Pro membership is required to create sub-names.")
+            return
+        }
+        viewModelScope.launch {
+            repository.createCompanySubAccount(
+                ownerProfile = me,
+                ownerTier = caps.tier,
+                companyName = companyName,
+                subName = subName,
+                roleTitle = roleTitle
+            ).onSuccess { created ->
+                _snackbarEvents.tryEmit("Created sub-name \"${created.subName}\" · Access Code: ${created.accessCode}")
+                onCreated(created)
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not create sub-name")
+            }
+        }
+    }
+
+    fun claimCompanySubAccount(
+        subNameInput: String,
+        accessCodeInput: String,
+        myEmail: String = initialEmail,
+        onSuccess: (CompanySubAccount) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            repository.claimCompanySubAccount(
+                subNameInput = subNameInput,
+                accessCodeInput = accessCodeInput,
+                myEmail = myEmail
+            ).onSuccess { claimed ->
+                _snackbarEvents.tryEmit("Signed into ${claimed.companyName} as ${claimed.subName}!")
+                onSuccess(claimed)
+            }.onFailure { err ->
+                val msg = err.message ?: "Could not link company sub-account"
+                _snackbarEvents.tryEmit(msg)
+                onError(msg)
+            }
+        }
+    }
+
+    fun revokeCompanySubAccount(subAccount: CompanySubAccount) {
+        viewModelScope.launch {
+            repository.revokeCompanySubAccount(subAccount)
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Revoked sub-account \"${subAccount.subName}\".")
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not revoke sub-account")
+                }
+        }
+    }
+
+    fun setCompanySubAccountSupervisor(
+        thread: DirectThread,
+        targetUserId: String,
+        targetName: String,
+        makeSupervisor: Boolean
+    ) {
+        viewModelScope.launch {
+            repository.setGroupDmSupervisor(thread, targetUserId, targetName, makeSupervisor)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (makeSupervisor) "$targetName appointed as Supervisor (Group Admin)."
+                        else "Removed $targetName as Supervisor."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update supervisor")
+                }
+        }
+    }
+
+    fun setDoNotDisturb(enabled: Boolean) {
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.setDoNotDisturb(enabled, me.subAccountId)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (enabled) "Do Not Disturb ON — Urgent work alerts will still come through."
+                        else "Do Not Disturb OFF — All alerts restored."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Do Not Disturb")
+                }
+        }
+    }
+
+    fun updateSubAccountDisplayName(newName: String, onSaved: () -> Unit = {}) {
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.updateSubAccountDisplayName(
+                newDisplayName = newName,
+                subAccountId = me.subAccountId,
+                companyThreadId = me.companyThreadId
+            )
+                .onSuccess {
+                    _snackbarEvents.tryEmit("Display name updated to \"${newName.trim()}\".")
+                    onSaved()
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update display name")
+                }
+        }
+    }
+
+    fun sendWorkOrder(
+        companyOwnerId: String,
+        companyThreadId: String,
+        supervisorUids: List<String>,
+        targetUserId: String,
+        targetName: String,
+        orderType: WorkOrderType,
+        priority: WorkOrderPriority,
+        title: String,
+        body: String,
+        onSent: () -> Unit = {}
+    ) {
+        val me = effectiveMyProfile()
+        val senderRole = if (companyOwnerId == currentUserId) "OWNER" else "SUPERVISOR"
+        viewModelScope.launch {
+            repository.sendWorkOrder(
+                companyOwnerId = companyOwnerId,
+                threadId = companyThreadId,
+                supervisorUids = supervisorUids,
+                senderName = me.effectiveDisplayName(),
+                senderRole = senderRole,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                orderType = orderType,
+                priority = priority,
+                title = title,
+                body = body
+            ).onSuccess {
+                val label = if (priority == WorkOrderPriority.URGENT) "URGENT ${orderType.label}" else orderType.label
+                _snackbarEvents.tryEmit("$label sent to $targetName.")
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send work order")
+            }
+        }
+    }
+
+    fun updateWorkOrderStatus(orderId: String, status: WorkOrderStatus) {
+        viewModelScope.launch {
+            repository.updateWorkOrderStatus(orderId, status)
+                .onSuccess {
+                    val msg = when (status) {
+                        WorkOrderStatus.ACKNOWLEDGED -> "Work order acknowledged."
+                        WorkOrderStatus.COMPLETED -> "Work order marked completed!"
+                        WorkOrderStatus.OPEN -> "Work order updated."
+                    }
+                    _snackbarEvents.tryEmit(msg)
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update work order")
+                }
+        }
+    }
+
+    fun submitEmployeeRequest(
+        companyOwnerId: String,
+        companyThreadId: String,
+        supervisorUids: List<String>,
+        category: EmployeeRequestCategory,
+        subject: String,
+        details: String,
+        urgent: Boolean,
+        onSubmitted: () -> Unit = {}
+    ) {
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.submitEmployeeRequest(
+                companyOwnerId = companyOwnerId,
+                threadId = companyThreadId,
+                supervisorUids = supervisorUids,
+                requesterName = me.effectiveDisplayName(),
+                category = category,
+                subject = subject,
+                details = details,
+                urgent = urgent
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Request submitted to your Company Owner & Supervisors.")
+                onSubmitted()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not submit request")
+            }
+        }
+    }
+
+    fun reviewEmployeeRequest(
+        requestId: String,
+        status: EmployeeRequestStatus,
+        note: String,
+        onReviewed: () -> Unit = {}
+    ) {
+        val me = effectiveMyProfile()
+        viewModelScope.launch {
+            repository.reviewEmployeeRequest(
+                requestId = requestId,
+                status = status,
+                reviewerName = me.effectiveDisplayName(),
+                note = note
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Request marked as ${status.label}.")
+                onReviewed()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update request")
             }
         }
     }

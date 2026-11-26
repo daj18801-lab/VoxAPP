@@ -56,6 +56,19 @@
         <receiver
             android:name=".notifications.DirectMessageQuickReplyReceiver"
             android:exported="false" />
+
+        <receiver
+            android:name=".widget.VoxPttWidgetProvider"
+            android:exported="true"
+            android:label="@string/ptt_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.example.widget.ACTION_TOGGLE_PTT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/vox_ptt_widget_info" />
+        </receiver>
     </application>
 
 </manifest>

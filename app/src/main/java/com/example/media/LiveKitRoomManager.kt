@@ -157,6 +157,19 @@ class LiveKitRoomManager(
         eventJob = scope.launch {
             room.events.collect { event ->
                 when (event) {
+                    is RoomEvent.TrackPublished -> {
+                        val localTrack = event.publication.track as? LocalVideoTrack
+                        if (localTrack != null && event.participant == room.localParticipant) {
+                            _localVideoTrack.value = localTrack
+                        }
+                    }
+                    is RoomEvent.TrackUnpublished -> {
+                        if (event.participant == room.localParticipant &&
+                            event.publication.source == Track.Source.CAMERA
+                        ) {
+                            _localVideoTrack.value = null
+                        }
+                    }
                     is RoomEvent.TrackSubscribed -> {
                         if (forceLoudspeaker) {
                             enforceLoudspeakerRoute()
@@ -212,13 +225,43 @@ class LiveKitRoomManager(
         }
     }
 
-    suspend fun setCameraEnabled(enabled: Boolean) {
-        runCatching {
+    suspend fun setCameraEnabled(enabled: Boolean): Boolean {
+        return runCatching {
             room.localParticipant.setCameraEnabled(enabled)
-            val pub = room.localParticipant.getTrackPublication(Track.Source.CAMERA)
-            _localVideoTrack.value = if (enabled) pub?.track as? LocalVideoTrack else null
+            if (!enabled) {
+                _localVideoTrack.value = null
+                return@runCatching true
+            }
+            var track = resolveLocalCameraTrack()
+            if (track == null) {
+                delay(150L)
+                track = resolveLocalCameraTrack()
+            }
+            _localVideoTrack.value = track
+            track != null
         }.onFailure {
-            Log.w(TAG, "Failed to toggle camera: ${it.message}")
+            Log.w(TAG, "Failed to toggle camera: ${it.message}", it)
+            if (!enabled) _localVideoTrack.value = null
+        }.getOrDefault(false)
+    }
+
+    private fun resolveLocalCameraTrack(): LocalVideoTrack? {
+        val fromSource = room.localParticipant.getTrackPublication(Track.Source.CAMERA)?.track as? LocalVideoTrack
+        if (fromSource != null) return fromSource
+        return room.localParticipant.videoTrackPublications
+            .firstOrNull { it.second is LocalVideoTrack }
+            ?.second as? LocalVideoTrack
+    }
+
+    fun flipCamera(useFront: Boolean) {
+        runCatching {
+            val videoTrack = resolveLocalCameraTrack() ?: _localVideoTrack.value ?: return
+            videoTrack.switchCamera(
+                position = if (useFront) io.livekit.android.room.track.CameraPosition.FRONT
+                else io.livekit.android.room.track.CameraPosition.BACK
+            )
+        }.onFailure {
+            Log.w(TAG, "Failed to flip camera: ${it.message}")
         }
     }
 

@@ -51,4 +51,9 @@
     <string name="hint_quick_reply">Type a quick reply…</string>
     <string name="action_open_chat">Open Chat</string>
     <string name="action_end_call">End Call</string>
+    <string name="ptt_widget_label">VOX PTT</string>
+    <string name="ptt_widget_description">Tap once to transmit Push-to-Talk in the background (lights up ON AIR); tap again to stop.</string>
+    <string name="ptt_widget_toggle_desc">Toggle VOX Push-to-Talk transmission</string>
+    <string name="ptt_widget_idle_label">VOX PTT</string>
+    <string name="ptt_widget_ready_label">Tap to Talk</string>
 </resources>

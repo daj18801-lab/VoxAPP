@@ -6,10 +6,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.DirectMessage
 import com.example.data.DirectThread
+import com.example.data.EmployeeRequestCategory
 import com.example.data.ReportCategory
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.VoxStageRepository
+import com.example.data.WorkOrderPriority
+import com.example.data.WorkOrderType
 import com.example.data.unwrapFirestoreError
 import com.example.media.LiveKitRoomManager
 import com.example.media.LivePttSessionManager
@@ -324,17 +327,29 @@ class DirectChatViewModel(
 
     fun toggleCallMic(myName: String) {
         if (_isConnectingCall.value) return
+        val thread = (threadState.value as? UiState.Success)?.data
         val wantActive = !_isMicActive.value
+        val isGroupAdminHere = thread?.isGroupAdmin(currentUserId) == true
+        if (wantActive && thread != null && thread.isBlockedByGroupAdminTalking(currentUserId)) {
+            _snackbarEvents.tryEmit("Group DM Admin has priority mic — please wait until they finish speaking.")
+            return
+        }
         viewModelScope.launch {
-            if (wantActive && LivePttSessionManager.activeThreadId.value == threadId) {
-                LivePttSessionManager.disconnect(appContext)
+            if (wantActive) {
+                LivePttSessionManager.suppressForPrivateCall(appContext, threadId)
             }
             if (wantActive && !ensureCallConnected(myName)) return@launch
             _isMicActive.value = wantActive
             liveKitManager.setMicEnabled(wantActive)
+            if (isGroupAdminHere) {
+                repository.setGroupDmAdminTalking(threadId, wantActive)
+            }
             if (wantActive) {
                 PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
-                _snackbarEvents.tryEmit("Private voice mic is LIVE (continues in background)")
+                _snackbarEvents.tryEmit(
+                    if (isGroupAdminHere) "Group DM Admin Priority Mic LIVE — you can talk over anyone"
+                    else "Private voice mic is LIVE (continues in background)"
+                )
             }
         }
     }
@@ -373,13 +388,42 @@ class DirectChatViewModel(
 
     fun setPttLiveMic(myName: String, speaking: Boolean) {
         if (_isConnectingCall.value) return
+        val thread = (threadState.value as? UiState.Success)?.data
+        val isGroupAdminHere = thread?.isGroupAdmin(currentUserId) == true
+        if (speaking && thread != null && thread.isBlockedByGroupAdminTalking(currentUserId)) {
+            _snackbarEvents.tryEmit("Group DM Admin has priority mic right now.")
+            return
+        }
         viewModelScope.launch {
+            if (speaking) {
+                LivePttSessionManager.suppressForPrivateCall(appContext, threadId)
+            }
             if (speaking && !ensureCallConnected(myName)) return@launch
             _isMicActive.value = speaking
             liveKitManager.setMicEnabled(speaking)
+            if (isGroupAdminHere) {
+                repository.setGroupDmAdminTalking(threadId, speaking)
+            }
             if (speaking) {
                 PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
             }
+        }
+    }
+
+    fun setGroupAdminTalking(talking: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        if (!thread.isGroup || !thread.isGroupAdmin(currentUserId)) return
+        viewModelScope.launch {
+            repository.setGroupDmAdminTalking(threadId, talking)
+        }
+    }
+
+    fun forceMuteForGroupAdminOverride() {
+        if (!_isMicActive.value) return
+        _isMicActive.value = false
+        viewModelScope.launch {
+            liveKitManager.setMicEnabled(false)
+            _snackbarEvents.tryEmit("Muted — Group DM Admin took priority microphone.")
         }
     }
 
@@ -387,11 +431,21 @@ class DirectChatViewModel(
         if (_isConnectingCall.value) return
         val wantActive = !_isCamActive.value
         viewModelScope.launch {
+            if (wantActive) {
+                // Disconnect & suppress background PTT on the same LiveKit room so it never kicks this video call
+                LivePttSessionManager.suppressForPrivateCall(appContext, threadId)
+            }
             if (wantActive && !ensureCallConnected(myName)) return@launch
             _isCamActive.value = wantActive
-            liveKitManager.setCameraEnabled(wantActive)
+            val ok = liveKitManager.setCameraEnabled(wantActive)
             if (wantActive) {
-                _snackbarEvents.tryEmit("Private video camera is LIVE")
+                if (!ok && liveKitManager.localVideoTrack.value == null) {
+                    _isCamActive.value = false
+                    _snackbarEvents.tryEmit("Camera failed to start — please check camera permission and retry.")
+                } else {
+                    PrivateCallForegroundService.start(appContext, threadId, currentPeerTitle())
+                    _snackbarEvents.tryEmit("Private video camera is LIVE")
+                }
             }
         }
     }
@@ -399,19 +453,23 @@ class DirectChatViewModel(
     fun flipCamera() {
         val nextFront = !_useFrontCamera.value
         _useFrontCamera.value = nextFront
-        val videoTrack = liveKitManager.room.localParticipant
-            .getTrackPublication(Track.Source.CAMERA)?.track as? LocalVideoTrack
-        videoTrack?.switchCamera(position = if (nextFront) CameraPosition.FRONT else CameraPosition.BACK)
+        liveKitManager.flipCamera(nextFront)
     }
 
     fun endCall() {
+        val thread = (threadState.value as? UiState.Success)?.data
+        val isGroupAdminHere = thread?.isGroupAdmin(currentUserId) == true
         viewModelScope.launch {
+            if (isGroupAdminHere && thread?.groupAdminTalking == true) {
+                repository.setGroupDmAdminTalking(threadId, false)
+            }
             liveKitManager.setMicEnabled(false)
             liveKitManager.setCameraEnabled(false)
             liveKitManager.disconnect()
             _isMicActive.value = false
             _isCamActive.value = false
             _isInCall.value = false
+            LivePttSessionManager.clearPrivateCallSuppression(threadId)
             PrivateCallForegroundService.stop(appContext)
             _snackbarEvents.tryEmit("Private call ended")
         }
@@ -596,8 +654,90 @@ class DirectChatViewModel(
         }
     }
 
+    fun setGroupSupervisor(targetUserId: String, targetName: String, makeSupervisor: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setGroupDmSupervisor(thread, targetUserId, targetName, makeSupervisor)
+                .onSuccess {
+                    _snackbarEvents.tryEmit(
+                        if (makeSupervisor) "$targetName is now a Supervisor (Admin) in this company group DM."
+                        else "Removed $targetName as Supervisor."
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Supervisor role")
+                }
+        }
+    }
+
+    fun sendWorkOrderFromChat(
+        senderName: String,
+        senderRole: String,
+        targetUserId: String,
+        targetName: String,
+        orderType: WorkOrderType,
+        priority: WorkOrderPriority,
+        title: String,
+        body: String,
+        onSent: () -> Unit = {}
+    ) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        val ownerId = thread.companyOwnerId.ifBlank { thread.effectiveGroupAdminId() }
+        viewModelScope.launch {
+            repository.sendWorkOrder(
+                companyOwnerId = ownerId,
+                threadId = thread.id,
+                supervisorUids = thread.groupSupervisorIds,
+                senderName = senderName,
+                senderRole = senderRole,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                orderType = orderType,
+                priority = priority,
+                title = title,
+                body = body
+            ).onSuccess {
+                val label = if (priority == WorkOrderPriority.URGENT) "URGENT ${orderType.label}" else orderType.label
+                _snackbarEvents.tryEmit("$label sent to $targetName.")
+                onSent()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not send work order")
+            }
+        }
+    }
+
+    fun submitEmployeeRequestFromChat(
+        requesterName: String,
+        category: EmployeeRequestCategory,
+        subject: String,
+        details: String,
+        urgent: Boolean,
+        onSubmitted: () -> Unit = {}
+    ) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        val ownerId = thread.companyOwnerId.ifBlank { thread.effectiveGroupAdminId() }
+        viewModelScope.launch {
+            repository.submitEmployeeRequest(
+                companyOwnerId = ownerId,
+                threadId = thread.id,
+                supervisorUids = thread.groupSupervisorIds,
+                requesterName = requesterName,
+                category = category,
+                subject = subject,
+                details = details,
+                urgent = urgent
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Request submitted to your Company Owner & Supervisors.")
+                onSubmitted()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not submit request")
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
+        LivePttSessionManager.clearPrivateCallSuppression(threadId)
         if (!PrivateCallForegroundService.isPttMode && PrivateCallForegroundService.activeThreadId == threadId) {
             PrivateCallForegroundService.stop(appContext)
         }

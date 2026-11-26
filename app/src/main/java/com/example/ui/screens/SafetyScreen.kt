@@ -77,6 +77,7 @@ import com.example.data.AdminNotification
 import com.example.data.AlertSeverity
 import com.example.data.AppBroadcast
 import com.example.data.AppConfig
+import com.example.data.AdminPreviewMode
 import com.example.data.AppPerkType
 import com.example.data.ChatRoom
 import com.example.data.CreatorSubscription
@@ -101,6 +102,7 @@ import com.example.data.UserModerationFile
 import com.example.data.UserProfile
 import com.example.ui.components.AdminNotificationsCard
 import com.example.ui.components.AdminReviewSuspensionRequestDialog
+import com.example.ui.components.AdminSandboxControlCard
 import com.example.ui.components.AppPerkGrantsSection
 import com.example.ui.components.GrantAppPerkDialog
 import com.example.ui.components.IssueRefundDialog
@@ -156,8 +158,10 @@ fun SafetyScreen(
         suspendedUntilMillis: Long,
         suspensionReason: String,
         pointsBalance: Long?,
-        proLifetime: Boolean?
+        proLifetime: Boolean?,
+        disableMessaging: Boolean
     ) -> Unit,
+    onToggleUserMessagingDisabled: (targetUserId: String, targetName: String, disabled: Boolean) -> Unit = { _, _, _ -> },
     onSuspendUser: (targetUserId: String, targetName: String, minutes: Long, reason: String) -> Unit,
     onSendDirectAlert: (targetUserId: String, targetName: String, title: String, message: String, severity: AlertSeverity) -> Unit,
     onAdminEditAlert: (alertId: String, title: String, message: String, severity: AlertSeverity, reopenForUser: Boolean) -> Unit,
@@ -229,7 +233,12 @@ fun SafetyScreen(
         pointsAmount: Long,
         reason: String,
         onGranted: () -> Unit
-    ) -> Unit = { _, _, _, _, _, _, _ -> }
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
+    realStaffCapabilities: StaffCapabilities = staffCapabilities,
+    realUserProfile: UserProfile? = userProfile,
+    adminPreviewMode: AdminPreviewMode = AdminPreviewMode.ADMIN,
+    onSelectAdminPreviewMode: (AdminPreviewMode) -> Unit = {},
+    onSaveAdminCustomIdentity: (String, String, String) -> Unit = { _, _, _ -> }
 ) {
     val reports = (reportsState as? UiState.Success)?.data.orEmpty()
     val openCount = reports.count { it.statusEnum() == ReportStatus.OPEN }
@@ -338,6 +347,17 @@ fun SafetyScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                }
+            }
+
+            if (realStaffCapabilities.isAdmin) {
+                item(key = "admin_sandbox_control") {
+                    AdminSandboxControlCard(
+                        realProfile = realUserProfile,
+                        previewMode = adminPreviewMode,
+                        onSelectPreviewMode = onSelectAdminPreviewMode,
+                        onSaveCustomIdentity = onSaveAdminCustomIdentity
+                    )
                 }
             }
 
@@ -792,6 +812,13 @@ fun SafetyScreen(
                                 onAlert = { userReceivingAlert = user },
                                 onSendToRoom = { userBeingTransferred = user },
                                 onSendToSupport = { userBeingSentToSupport = user },
+                                onToggleMessagingDisabled = {
+                                    onToggleUserMessagingDisabled(
+                                        user.userId,
+                                        user.displayName,
+                                        !user.disableMessaging
+                                    )
+                                },
                                 onSetStaffTier = { nextTier ->
                                     onSetUserStaffTier(
                                         user.userId,
@@ -1151,6 +1178,14 @@ fun SafetyScreen(
                         )
                     }
                 }
+                item(key = "staff_messaging_controls_section") {
+                    StaffMessagingControlsCard(
+                        directoryEntries = directoryEntries,
+                        allUsers = allUsers,
+                        currentUserId = currentUserId,
+                        onToggleMessaging = onToggleUserMessagingDisabled
+                    )
+                }
                 item(key = "staff_moderation_files_section") {
                     UserModerationFilesCard(
                         moderationFiles = moderationFiles,
@@ -1314,9 +1349,24 @@ fun SafetyScreen(
                         }
                     } else {
                         items(reports, key = { it.id }) { report ->
+                            val targetDir = directoryByUid[report.targetUserId]
+                            val targetUserProfile = allUsers.firstOrNull { it.userId == report.targetUserId }
+                            val targetMessagingDisabled = targetUserProfile?.disableMessaging
+                                ?: targetDir?.disableMessaging
+                                ?: false
+                            val targetIsAdmin = (staffTierByUid[report.targetUserId] ?: targetDir?.tierEnum()) == StaffTier.ADMIN
                             SafetyReportCard(
                                 report = report,
                                 isHostOrAdmin = report.roomHostId == currentUserId || staffCapabilities.isAdmin,
+                                canToggleMessaging = staffCapabilities.isStaff && !targetIsAdmin && report.targetUserId != currentUserId,
+                                targetMessagingDisabled = targetMessagingDisabled,
+                                onToggleMessaging = {
+                                    onToggleUserMessagingDisabled(
+                                        report.targetUserId,
+                                        report.targetName,
+                                        !targetMessagingDisabled
+                                    )
+                                },
                                 onResolve = {
                                     onResolveReport(report.id, ReportStatus.RESOLVED, "Reviewed and action taken")
                                 },
@@ -1496,7 +1546,7 @@ fun SafetyScreen(
     userBeingEdited?.let { target ->
         EditUserAdminDialog(
             profile = target,
-            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason, pointsBalance, proLifetime ->
+            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason, pointsBalance, proLifetime, disableMessaging ->
                 onAdminEditUser(
                     target.userId,
                     displayName,
@@ -1510,7 +1560,8 @@ fun SafetyScreen(
                     suspendedUntilMillis,
                     suspensionReason,
                     pointsBalance,
-                    proLifetime
+                    proLifetime,
+                    disableMessaging
                 )
             },
             onDismiss = { userBeingEdited = null }
@@ -1800,6 +1851,7 @@ private fun AdminUserDirectoryCard(
     onAlert: () -> Unit,
     onSendToRoom: () -> Unit,
     onSendToSupport: () -> Unit,
+    onToggleMessagingDisabled: () -> Unit = {},
     onSetStaffTier: (StaffTier) -> Unit
 ) {
     val badges = buildList {
@@ -1809,6 +1861,7 @@ private fun AdminUserDirectoryCard(
         if (profile.disableEnterRoom) add("NO ROOM ENTER" to LiveCoral)
         if (profile.disableMic) add("NO MIC" to ModAmber)
         if (profile.disableVideo) add("NO VIDEO" to ModAmber)
+        if (profile.disableMessaging) add("NO MSG" to LiveCoral)
     }
 
     Card(
@@ -1931,6 +1984,24 @@ private fun AdminUserDirectoryCard(
                             Icon(Icons.Rounded.Timer, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Suspend", style = MaterialTheme.typography.labelSmall)
+                        }
+                        OutlinedButton(
+                            onClick = onToggleMessagingDisabled,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("admin_toggle_msg_${profile.userId}")
+                        ) {
+                            Icon(
+                                Icons.Rounded.Block,
+                                contentDescription = null,
+                                tint = if (profile.disableMessaging) SafetyEmerald else LiveCoral,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (profile.disableMessaging) "Enable Msg" else "Disable Msg",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (profile.disableMessaging) SafetyEmerald else LiveCoral
+                            )
                         }
                     }
                     OutlinedButton(onClick = onAlert, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)) {
@@ -2067,9 +2138,132 @@ private fun SafetyMetricCard(
 }
 
 @Composable
+private fun StaffMessagingControlsCard(
+    directoryEntries: List<DirectoryEntry>,
+    allUsers: List<UserProfile>,
+    currentUserId: String,
+    onToggleMessaging: (targetUserId: String, targetName: String, disabled: Boolean) -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    val profileByUid = remember(allUsers) { allUsers.associateBy { it.userId } }
+    val candidates = remember(directoryEntries, allUsers, currentUserId, searchQuery) {
+        val base = directoryEntries
+            .filter { it.userId != currentUserId && it.tierEnum() != StaffTier.ADMIN }
+            .sortedWith(
+                compareByDescending<DirectoryEntry> {
+                    profileByUid[it.userId]?.disableMessaging ?: it.disableMessaging
+                }.thenBy { it.displayName.lowercase() }
+            )
+        val q = searchQuery.trim()
+        if (q.isEmpty()) base.take(8)
+        else base.filter {
+            it.displayName.contains(q, ignoreCase = true) ||
+                it.handle.contains(q, ignoreCase = true)
+        }.take(10)
+    }
+
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("staff_messaging_controls_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Block,
+                    contentDescription = "Staff messaging controls",
+                    tint = LiveCoral,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Staff Messaging Controls",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Support Staff & Admins can disable or re-enable a user's messaging across rooms and DMs.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it.take(40) },
+                placeholder = { Text("Search user by name or @handle…") },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("staff_messaging_search_input")
+            )
+
+            if (candidates.isEmpty()) {
+                Text(
+                    text = "No matching members found.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                candidates.forEach { entry ->
+                    val isDisabled = profileByUid[entry.userId]?.disableMessaging ?: entry.disableMessaging
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = entry.displayName,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "@${entry.handle} · ${if (isDisabled) "Messaging DISABLED" else "Messaging Active"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isDisabled) LiveCoral else SafetyEmerald
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                onToggleMessaging(entry.userId, entry.displayName, !isDisabled)
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("staff_toggle_messaging_${entry.userId}")
+                        ) {
+                            Text(
+                                text = if (isDisabled) "Enable Msg" else "Disable Msg",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isDisabled) SafetyEmerald else LiveCoral
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SafetyReportCard(
     report: SafetyReport,
     isHostOrAdmin: Boolean,
+    canToggleMessaging: Boolean = false,
+    targetMessagingDisabled: Boolean = false,
+    onToggleMessaging: () -> Unit = {},
     onResolve: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2134,6 +2328,31 @@ private fun SafetyReportCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = SafetyEmerald
                 )
+            }
+
+            if (canToggleMessaging) {
+                OutlinedButton(
+                    onClick = onToggleMessaging,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("report_toggle_messaging_${report.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Block,
+                        contentDescription = null,
+                        tint = if (targetMessagingDisabled) SafetyEmerald else LiveCoral,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (targetMessagingDisabled) {
+                            "Re-enable Messaging for ${report.targetName}"
+                        } else {
+                            "Disable Messaging for ${report.targetName}"
+                        },
+                        color = if (targetMessagingDisabled) SafetyEmerald else LiveCoral
+                    )
+                }
             }
 
             if (status == ReportStatus.OPEN) {

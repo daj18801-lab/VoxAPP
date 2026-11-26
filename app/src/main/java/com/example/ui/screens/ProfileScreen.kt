@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockPerson
 import androidx.compose.material.icons.rounded.Mic
@@ -97,6 +98,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.CreatorSubscription
 import com.example.data.DmAccessPass
+import android.widget.Toast
+import com.example.data.AdminPreviewMode
 import com.example.data.DmPolicy
 import com.example.data.PointTransaction
 import com.example.data.PointTransactionType
@@ -118,6 +121,7 @@ import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
 import androidx.compose.ui.text.style.TextOverflow
+import com.example.ui.components.AdminSandboxControlCard
 import com.example.ui.components.DailyLoginStreakCard
 import com.example.ui.components.FullScreenPhotoDialog
 import com.example.ui.components.InviteFriendReferralCard
@@ -135,6 +139,7 @@ import com.example.ui.components.encodeImageUriToBase64Jpeg
 import com.example.ui.components.parseHexColor
 import com.example.ui.components.rememberBase64ImageBitmap
 import com.example.ui.components.usernameColor
+import com.example.widget.VoxPttWidgetHelper
 import com.example.ui.theme.AvatarAccentHexPalette
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
@@ -213,12 +218,22 @@ fun ProfileScreen(
     onChangeAppearanceStatus: (PresenceStatus) -> Unit = {},
     onSignOut: () -> Unit,
     safetyBadgeCount: Int = 0,
-    onOpenSafety: () -> Unit = {}
+    onOpenSafety: () -> Unit = {},
+    realStaffCapabilities: StaffCapabilities = staffCapabilities,
+    realUserProfile: UserProfile? = userProfile,
+    adminPreviewMode: AdminPreviewMode = AdminPreviewMode.ADMIN,
+    onSelectAdminPreviewMode: (AdminPreviewMode) -> Unit = {},
+    onSaveAdminCustomIdentity: (String, String, String) -> Unit = { _, _, _ -> },
+    canManageCompany: Boolean = false,
+    isCompanySupervisor: Boolean = false,
+    onOpenCompanyConsole: () -> Unit = {},
+    onJoinCompanySubAccount: (subName: String, accessCode: String) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var selectedTab by remember(initialTabIndex) { mutableIntStateOf(initialTabIndex) } // 0 = My Posts, 1 = Settings & Points
+    var showJoinCompanyDialog by remember { mutableStateOf(false) }
     var showFullAvatar by remember { mutableStateOf(false) }
     var showEditBioDialog by remember { mutableStateOf(false) }
     var bioDialogDraft by remember { mutableStateOf("") }
@@ -1241,6 +1256,91 @@ fun ProfileScreen(
                     )
                 }
 
+                item(key = "company_workspace_card") {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primaryContainer),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Groups,
+                                        contentDescription = "Company Sub-Accounts",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Company Employee Sub-Accounts",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = if (canManageCompany || isCompanySupervisor) {
+                                            "Create sub-names, appoint supervisors, send work orders/notes, and review employee requests."
+                                        } else {
+                                            "VIP Pro unlocks Company Sub-Accounts with 60s PTT, Supervisors & Work Orders. Employees can link a sub-name code below."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (canManageCompany || isCompanySupervisor) {
+                                    Button(
+                                        onClick = onOpenCompanyConsole,
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .testTag("profile_open_company_console_button")
+                                    ) {
+                                        Text(
+                                            text = if (canManageCompany) "Manage Company Team" else "Supervisor Console",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                } else {
+                                    OutlinedButton(
+                                        onClick = { showJoinCompanyDialog = true },
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .testTag("profile_join_company_sub_account_button")
+                                    ) {
+                                        Text(
+                                            text = "Join Company Sub-Account",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 item(key = "points_wallet_card") {
                     PointsWalletSettingsCard(
                         currentUserId = currentUserId,
@@ -1707,6 +1807,26 @@ fun ProfileScreen(
                                 )
                             }
 
+                            OutlinedButton(
+                                onClick = {
+                                    val msg = VoxPttWidgetHelper.requestPinPttWidget(context)
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                },
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("profile_add_ptt_widget_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Mic,
+                                    contentDescription = "Add Home Screen PTT Widget",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Add Home Screen PTT Widget")
+                            }
+
                             Box(modifier = Modifier.testTag("toggle_priority_chirp_opt_in")) {
                                 ToggleSettingRow(
                                     title = "Close Friends Priority Break-In Chirps",
@@ -1715,6 +1835,15 @@ fun ProfileScreen(
                                     onCheckedChange = { enable ->
                                         onSetPriorityChirpOptIn(enable)
                                     }
+                                )
+                            }
+
+                            if (realStaffCapabilities.isAdmin) {
+                                AdminSandboxControlCard(
+                                    realProfile = realUserProfile,
+                                    previewMode = adminPreviewMode,
+                                    onSelectPreviewMode = onSelectAdminPreviewMode,
+                                    onSaveCustomIdentity = onSaveAdminCustomIdentity
                                 )
                             }
 
@@ -1892,6 +2021,16 @@ fun ProfileScreen(
             }
         )
     }
+
+    if (showJoinCompanyDialog) {
+        JoinCompanySubAccountDialog(
+            onDismiss = { showJoinCompanyDialog = false },
+            onClaim = { subName, accessCode ->
+                showJoinCompanyDialog = false
+                onJoinCompanySubAccount(subName, accessCode)
+            }
+        )
+    }
 }
 
 @Composable
@@ -1999,7 +2138,7 @@ private fun ProMembershipCard(
                         color = proBlue
                     )
                     Text(
-                        text = "Current: ${activeTier.label} · Group DM up to ${activeTier.maxGroupDmMembers} users",
+                        text = "Current: ${activeTier.label} · Group DM up to ${activeTier.maxGroupDmMembers} · Private Room up to ${activeTier.maxPrivateRoomUsers} users",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.testTag("active_membership_tier_label")
@@ -2088,8 +2227,8 @@ private fun ProMembershipCard(
                     }
                     Text(
                         text = "• Group DMs up to 15 users (Free max 7)\n" +
-                            "• 1-minute Push-to-Talk clips (Free gets 5s)\n" +
-                            "• Upload Reels (30s), Who Viewed My Profile, Blue badge & unlimited Discovery photos",
+                            "• Private Chat Rooms up to 50 users (Free max 25)\n" +
+                            "• 1-minute Push-to-Talk clips (Free gets 5s), Reels, Who Viewed My Profile & Blue badge",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2166,8 +2305,8 @@ private fun ProMembershipCard(
                     }
                     Text(
                         text = "• Group DMs up to 25 users (required above 15 users)\n" +
-                            "• Admin Push-to-Talk speaker selection for groups over 15 users\n" +
-                            "• Includes all VOX Pro perks (1-min PTT, Reels, Blue badge)",
+                            "• Private Chat Rooms up to 75 users\n" +
+                            "• Admin Push-to-Talk speaker selection & all VOX Pro perks",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2223,8 +2362,8 @@ private fun ProMembershipCard(
                     }
                     Text(
                         text = "• Group DMs up to 50 users (maximum capacity; required above 25)\n" +
-                            "• Admin Push-to-Talk speaker selection & Group Support Staff controls\n" +
-                            "• Includes all VOX Pro & VIP Pro perks",
+                            "• Private Chat Rooms up to 100 users\n" +
+                            "• Admin Push-to-Talk speaker selection, Group Support Staff & all VOX/VIP Pro perks",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

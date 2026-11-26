@@ -408,8 +408,58 @@ fun StrikeWarningModalDialog(
     )
 }
 
+@Composable
+fun SpamWarningModalDialog(
+    message: String,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.Warning,
+                contentDescription = "Spam rate limit warning",
+                tint = ModAmber,
+                modifier = Modifier.size(30.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "Message Rate Limit Warning",
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "Limit: max 20 messages per 30 seconds.\n• 2nd offense: 1-hour suspension\n• 3rd offense: 4-hour suspension + Staff report\n• 4th offense within 24h: 24-hour suspension + Staff review",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ModAmber,
+                    contentColor = Color(0xFF1F1600)
+                ),
+                modifier = Modifier.testTag("spam_warning_ack_button")
+            ) {
+                Text("I Understand")
+            }
+        },
+        modifier = Modifier.testTag("spam_warning_dialog")
+    )
+}
+
 /**
- * Full-screen Account Suspension gate for Strike 3 (1h), Strike 4 (2h), Strike 5+ (Pending Support/Admin Review),
+ * Full-screen Account Suspension gate for Device Bans, Strike 3 (1h), Strike 4 (2h), Strike 5+ (Pending Support/Admin Review),
  * or direct staff timed suspension / global ban.
  */
 @Composable
@@ -419,7 +469,9 @@ fun AccountSuspendedGateScreen(
     manualSuspensionReason: String,
     globallyBanned: Boolean,
     nowMillis: Long,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    deviceBanned: Boolean = false,
+    deviceBanReason: String = ""
 ) {
     val isPendingAdminReview = moderationFile?.pendingAdminReview == true
     val isPendingInvestigation = moderationFile?.suspendedUntilInvestigationResolved == true
@@ -427,7 +479,8 @@ fun AccountSuspendedGateScreen(
     val manualTimedActive = manualSuspendedUntilMillis > nowMillis
 
     val headline = when {
-        globallyBanned -> "Account Banned"
+        deviceBanned && !globallyBanned -> "Device Banned"
+        globallyBanned -> "Account & Device Banned"
         isPendingAdminReview -> "Suspended Pending Admin Review"
         isPendingInvestigation -> "Suspended Pending Investigation"
         moderationFile != null && modTimedActive && moderationFile.reportCount == 3 -> "1-Hour Account Suspension"
@@ -436,7 +489,13 @@ fun AccountSuspendedGateScreen(
     }
 
     val detailText = when {
-        globallyBanned -> "Your VOX account has been globally banned by an Administrator."
+        deviceBanned && !globallyBanned -> buildString {
+            append("This device has been banned from VOX. Logging in with another email on this device is not allowed.")
+            if (deviceBanReason.isNotBlank()) {
+                append("\n\nReason: $deviceBanReason")
+            }
+        }
+        globallyBanned -> "Your VOX account and device have been permanently banned by an Administrator. Alternate emails cannot sign in on this device."
         isPendingAdminReview -> moderationFile?.suspensionReason?.ifBlank {
             "Support staff submitted a suspension request for your account. Your account is suspended until further review by an App Administrator."
         } ?: "Your account is suspended until further review by an App Administrator."
@@ -453,7 +512,7 @@ fun AccountSuspendedGateScreen(
     }
 
     val remainingLabel = when {
-        globallyBanned -> "Permanent restriction"
+        deviceBanned || globallyBanned -> "Permanent device & account restriction"
         isPendingAdminReview -> "Awaiting App Admin review"
         isPendingInvestigation -> "Awaiting Support or Admin resolution"
         modTimedActive -> moderationFile?.remainingSuspensionLabel(nowMillis).orEmpty()

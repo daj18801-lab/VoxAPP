@@ -15,7 +15,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Assignment
 import androidx.compose.material.icons.rounded.AdminPanelSettings
+import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.SupportAgent
@@ -41,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.DirectThread
+import com.example.data.DirectoryEntry
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
@@ -52,6 +55,8 @@ fun GroupDmAdminControlsSheet(
     thread: DirectThread,
     currentUserId: String,
     isGroupAdminOrAppAdmin: Boolean,
+    directoryByUid: Map<String, DirectoryEntry> = emptyMap(),
+    canManageWorkOrders: Boolean = false,
     onDismiss: () -> Unit,
     onToggleMute: (userId: String, displayName: String, mute: Boolean) -> Unit,
     onBounce24h: (userId: String, displayName: String) -> Unit,
@@ -59,6 +64,8 @@ fun GroupDmAdminControlsSheet(
     onBanUser: (userId: String, displayName: String) -> Unit,
     onUnbanUser: (userId: String, displayName: String) -> Unit,
     onToggleSupportStaff: (userId: String, displayName: String, promote: Boolean) -> Unit = { _, _, _ -> },
+    onToggleSupervisor: (userId: String, displayName: String, makeSupervisor: Boolean) -> Unit = { _, _, _ -> },
+    onSendWorkOrderClick: (userId: String, displayName: String) -> Unit = { _, _ -> },
     onTogglePttAllowed: (userId: String, displayName: String, allowed: Boolean) -> Unit = { _, _, _ -> }
 ) {
     val nowMs = rememberPresenceClockMillis()
@@ -172,6 +179,8 @@ fun GroupDmAdminControlsSheet(
                     val isBounced = thread.isBouncedInGroup(memberUid, nowMs)
                     val isBanned = thread.isBannedInGroup(memberUid)
                     val isSupport = thread.isGroupSupport(memberUid)
+                    val isSupervisor = thread.isGroupSupervisor(memberUid)
+                    val isDnd = directoryByUid[memberUid]?.doNotDisturb == true
                     val isPttSpeaker = thread.pttAllowedUserIds.contains(memberUid)
 
                     Surface(
@@ -196,6 +205,12 @@ fun GroupDmAdminControlsSheet(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                if (isSupervisor) {
+                                    GroupModStatusPill("SUPERVISOR", ModAmber)
+                                }
+                                if (isDnd) {
+                                    GroupModStatusPill("DND", LiveCoral)
+                                }
                                 if (isSupport) {
                                     GroupModStatusPill("SUPPORT", SafetyEmerald)
                                 }
@@ -339,6 +354,73 @@ fun GroupDmAdminControlsSheet(
                                             Spacer(Modifier.width(4.dp))
                                             Text(
                                                 text = if (isPttSpeaker) "PTT Allowed" else "Allow PTT",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (isGroupAdminOrAppAdmin || canManageWorkOrders) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (isGroupAdminOrAppAdmin) {
+                                        OutlinedButton(
+                                            onClick = { onToggleSupervisor(memberUid, name, !isSupervisor) },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                            border = BorderStroke(
+                                                1.dp,
+                                                if (isSupervisor) ModAmber else MaterialTheme.colorScheme.outline
+                                            ),
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                containerColor = if (isSupervisor) ModAmber.copy(alpha = 0.14f) else Color.Transparent,
+                                                contentColor = if (isSupervisor) ModAmber else MaterialTheme.colorScheme.onSurface
+                                            ),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("group_dm_supervisor_$memberUid"),
+                                            shape = RoundedCornerShape(10.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Badge,
+                                                contentDescription = if (isSupervisor) "Remove Supervisor" else "Appoint Supervisor",
+                                                tint = ModAmber,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(
+                                                text = if (isSupervisor) "Remove Supervisor" else "Make Supervisor",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    if (canManageWorkOrders) {
+                                        OutlinedButton(
+                                            onClick = { onSendWorkOrderClick(memberUid, name) },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                                                contentColor = MaterialTheme.colorScheme.primary
+                                            ),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("group_dm_work_order_$memberUid"),
+                                            shape = RoundedCornerShape(10.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Rounded.Assignment,
+                                                contentDescription = "Send Work Order or Note to $name",
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(
+                                                text = "Work Order",
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )

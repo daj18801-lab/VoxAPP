@@ -23,15 +23,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Assignment
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Business
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MarkChatUnread
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -47,6 +51,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -120,8 +125,16 @@ fun ChatsHomeScreen(
     onOpenRoomsTab: () -> Unit,
     onOpenProfileTab: () -> Unit,
     safetyBadgeCount: Int = 0,
-    onOpenSafety: () -> Unit = {}
+    onOpenSafety: () -> Unit = {},
+    canManageCompany: Boolean = false,
+    isCompanySupervisor: Boolean = false,
+    pendingWorkOrdersCount: Int = 0,
+    onOpenCompanyConsole: () -> Unit = {},
+    onOpenWorkHub: () -> Unit = {},
+    onToggleDnd: (Boolean) -> Unit = {}
 ) {
+    val isSubAccount = userProfile?.companySubAccount == true
+    val isDndOn = userProfile?.doNotDisturb == true
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Unread, 2 = Friends
@@ -143,12 +156,21 @@ fun ChatsHomeScreen(
         friendships.count { it.isIncomingFor(currentUserId) }
     }
 
-    val allThreads = (directThreadsState as? UiState.Success)?.data.orEmpty()
+    val rawThreads = (directThreadsState as? UiState.Success)?.data.orEmpty()
+    val allThreads = remember(rawThreads, isSubAccount, userProfile?.companyThreadId) {
+        if (isSubAccount) {
+            val targetId = userProfile?.companyThreadId.orEmpty()
+            rawThreads.filter { targetId.isNotBlank() && it.id == targetId }
+        } else {
+            rawThreads
+        }
+    }
     val unreadCount = remember(allThreads, currentUserId) {
         allThreads.count { it.isUnreadFor(currentUserId) }
     }
 
-    val filteredThreads = remember(allThreads, searchQuery, selectedFilter, acceptedFriendIds, currentUserId) {
+    val filteredThreads = remember(allThreads, searchQuery, selectedFilter, acceptedFriendIds, currentUserId, isSubAccount) {
+        if (isSubAccount) return@remember allThreads
         val q = searchQuery.trim()
         allThreads.filter { thread ->
             val otherUid = thread.otherUserId(currentUserId)
@@ -241,89 +263,128 @@ fun ChatsHomeScreen(
                                 }
                             }
 
-                            Surface(
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.primaryContainer,
-                                modifier = Modifier.size(44.dp)
-                            ) {
-                                IconButton(
-                                    onClick = {
-                                        searchOpen = !searchOpen
-                                        if (!searchOpen) searchQuery = ""
-                                    },
-                                    modifier = Modifier.testTag("chats_search_toggle")
-                                ) {
-                                    Icon(
-                                        imageVector = if (searchOpen) Icons.Rounded.Close else Icons.Rounded.Search,
-                                        contentDescription = "Search chats",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        // Center: Bold "Chat" title + Staff tier badge
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = "Chat",
-                                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            StaffTierBadge(tier = staffCapabilities.tier)
-                        }
-
-                        // Right: Add Friends + Live Rooms quick jump
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Box {
+                            if (!isSubAccount) {
                                 Surface(
                                     shape = CircleShape,
                                     color = MaterialTheme.colorScheme.primaryContainer,
                                     modifier = Modifier.size(44.dp)
                                 ) {
                                     IconButton(
-                                        onClick = onOpenFriendsTab,
-                                        modifier = Modifier.testTag("chats_add_friend_button")
+                                        onClick = {
+                                            searchOpen = !searchOpen
+                                            if (!searchOpen) searchQuery = ""
+                                        },
+                                        modifier = Modifier.testTag("chats_search_toggle")
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Rounded.PersonAdd,
-                                            contentDescription = "Friends and requests",
+                                            imageVector = if (searchOpen) Icons.Rounded.Close else Icons.Rounded.Search,
+                                            contentDescription = "Search chats",
                                             tint = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.size(20.dp)
                                         )
                                     }
                                 }
-                                if (incomingRequestCount > 0) {
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .size(18.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.primary),
-                                        contentAlignment = Alignment.Center
+                            }
+                        }
+
+                        // Center: Bold "Chat" (or Company Name) title + Staff tier badge
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = if (isSubAccount) {
+                                    userProfile?.companyName?.ifBlank { "Company DM" } ?: "Company DM"
+                                } else {
+                                    "Chat"
+                                },
+                                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (!isSubAccount) {
+                                StaffTierBadge(tier = staffCapabilities.tier)
+                            }
+                        }
+
+                        // Right: Add Friends + Safety Shield (or DND quick toggle for sub-accounts)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (isSubAccount) {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = if (isDndOn) LiveCoral.copy(alpha = 0.16f) else MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .clickable { onToggleDnd(!isDndOn) }
+                                        .testTag("sub_account_chats_dnd_toggle")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
+                                        Icon(
+                                            imageVector = if (isDndOn) Icons.Rounded.NotificationsOff else Icons.Rounded.NotificationsActive,
+                                            contentDescription = if (isDndOn) "Do Not Disturb On" else "Do Not Disturb Off",
+                                            tint = if (isDndOn) LiveCoral else MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
                                         Text(
-                                            text = "$incomingRequestCount",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = Color.White
+                                            text = if (isDndOn) "DND ON" else "DND",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = if (isDndOn) LiveCoral else MaterialTheme.colorScheme.primary
                                         )
                                     }
                                 }
+                            } else {
+                                Box {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(44.dp)
+                                    ) {
+                                        IconButton(
+                                            onClick = onOpenFriendsTab,
+                                            modifier = Modifier.testTag("chats_add_friend_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.PersonAdd,
+                                                contentDescription = "Friends and requests",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                    if (incomingRequestCount > 0) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .size(18.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "$incomingRequestCount",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color.White
+                                            )
+                                        }
+                                    }
+                                }
+                                TopBarSafetyShieldButton(
+                                    badgeCount = safetyBadgeCount,
+                                    onClick = onOpenSafety
+                                )
                             }
-                            TopBarSafetyShieldButton(
-                                badgeCount = safetyBadgeCount,
-                                onClick = onOpenSafety
-                            )
                         }
                     }
 
-                    if (searchOpen) {
+                    if (!isSubAccount && searchOpen) {
                         OutlinedTextField(
                             value = searchQuery,
                             onValueChange = { searchQuery = it.take(40) },
@@ -355,8 +416,138 @@ fun ChatsHomeScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 96.dp)
             ) {
-                // Snapchat-style Quick Friends Story/Message Carousel
-                item(key = "quick_friends_strip") {
+                if (isSubAccount) {
+                    item(key = "sub_account_company_banner") {
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Business,
+                                        contentDescription = "Company workspace",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Company Sub-Account · 60s PTT Enabled",
+                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = if (isDndOn) {
+                                                "Do Not Disturb is ON — URGENT work alerts still come through."
+                                            } else {
+                                                "Scoped to your Company Group DM, Work Orders, and Team Roster."
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (isDndOn) LiveCoral else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Button(
+                                        onClick = onOpenWorkHub,
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .testTag("sub_account_open_work_hub_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Rounded.Assignment,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (pendingWorkOrdersCount > 0) "Work Orders ($pendingWorkOrdersCount)" else "Work Orders & Requests",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (canManageCompany || isCompanySupervisor) {
+                    item(key = "company_console_entry_card") {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable(onClick = onOpenCompanyConsole)
+                                .testTag("chats_company_console_card")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Business,
+                                        contentDescription = "Company Team Console",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (canManageCompany) "Company Team & Sub-Accounts" else "Supervisor Work Orders & Requests",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = if (canManageCompany) {
+                                            "Create employee sub-names, appoint supervisors, and dispatch work orders."
+                                        } else {
+                                            "Send work orders to team members and review employee requests."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = onOpenCompanyConsole,
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Open")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Snapchat-style Quick Friends Story/Message Carousel (hidden for sub-accounts)
+                if (!isSubAccount) {
+                    item(key = "quick_friends_strip") {
                     Surface(
                         color = MaterialTheme.colorScheme.surface,
                         modifier = Modifier.fillMaxWidth()
@@ -454,6 +645,7 @@ fun ChatsHomeScreen(
                         }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
                 }
 
                 when (directThreadsState) {
@@ -586,43 +778,45 @@ fun ChatsHomeScreen(
             }
         }
 
-        // Snapchat-style Bottom-Center Quick Create (+) Button
-        FloatingActionButton(
-            onClick = { showQuickCreateSheet = true },
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = Color.White,
-            shape = CircleShape,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 16.dp)
-                .size(62.dp)
-                .border(3.dp, MaterialTheme.colorScheme.surface, CircleShape)
-                .testTag("chats_quick_create_button")
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Add,
-                contentDescription = "Quick post, snap, or picture to profile",
-                modifier = Modifier.size(30.dp)
-            )
-        }
+        if (!isSubAccount) {
+            // Snapchat-style Bottom-Center Quick Create (+) Button
+            FloatingActionButton(
+                onClick = { showQuickCreateSheet = true },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = Color.White,
+                shape = CircleShape,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp)
+                    .size(62.dp)
+                    .border(3.dp, MaterialTheme.colorScheme.surface, CircleShape)
+                    .testTag("chats_quick_create_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = "Quick post, snap, or picture to profile",
+                    modifier = Modifier.size(30.dp)
+                )
+            }
 
-        // Snapchat-style Floating New Chat FAB
-        FloatingActionButton(
-            onClick = { showNewChatSheet = true },
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.primary,
-            shape = CircleShape,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 18.dp, bottom = 18.dp)
-                .size(54.dp)
-                .testTag("fab_new_private_chat")
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.ChatBubble,
-                contentDescription = "Start new private chat",
-                modifier = Modifier.size(23.dp)
-            )
+            // Snapchat-style Floating New Chat FAB
+            FloatingActionButton(
+                onClick = { showNewChatSheet = true },
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.primary,
+                shape = CircleShape,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 18.dp, bottom = 18.dp)
+                    .size(54.dp)
+                    .testTag("fab_new_private_chat")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.ChatBubble,
+                    contentDescription = "Start new private chat",
+                    modifier = Modifier.size(23.dp)
+                )
+            }
         }
     }
 

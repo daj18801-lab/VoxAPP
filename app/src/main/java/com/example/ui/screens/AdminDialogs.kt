@@ -366,7 +366,8 @@ fun EditUserAdminDialog(
         suspendedUntilMillis: Long,
         suspensionReason: String,
         pointsBalance: Long,
-        proLifetime: Boolean
+        proLifetime: Boolean,
+        disableMessaging: Boolean
     ) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -380,6 +381,7 @@ fun EditUserAdminDialog(
     var disableEnterRoom by remember(profile.userId) { mutableStateOf(profile.disableEnterRoom) }
     var disableMic by remember(profile.userId) { mutableStateOf(profile.disableMic) }
     var disableVideo by remember(profile.userId) { mutableStateOf(profile.disableVideo) }
+    var disableMessaging by remember(profile.userId) { mutableStateOf(profile.disableMessaging) }
     var suspendedUntilMillis by remember(profile.userId) { mutableLongStateOf(profile.suspendedUntilMillis) }
     var suspensionReason by remember(profile.userId) { mutableStateOf(profile.suspensionReason) }
 
@@ -515,6 +517,14 @@ fun EditUserAdminDialog(
                     checked = disableVideo,
                     onCheckedChange = { disableVideo = it }
                 )
+                Column(modifier = Modifier.testTag("admin_disable_messaging_switch")) {
+                    ToggleSettingRow(
+                        title = "Disable Messaging",
+                        subtitle = "Block user from sending messages in rooms and DMs",
+                        checked = disableMessaging,
+                        onCheckedChange = { disableMessaging = it }
+                    )
+                }
 
                 if (isCurrentlySuspended) {
                     Surface(
@@ -568,7 +578,8 @@ fun EditUserAdminDialog(
                             suspendedUntilMillis,
                             suspensionReason.trim(),
                             parsedPoints,
-                            proLifetime
+                            proLifetime,
+                            disableMessaging
                         )
                         onDismiss()
                     }
@@ -590,9 +601,11 @@ fun EditUserAdminDialog(
 @Composable
 fun IncomingAlertModalDialog(
     alert: UserAlert,
-    onAcknowledge: () -> Unit
+    onAcknowledge: () -> Unit,
+    onDismissLater: (() -> Unit)? = null
 ) {
     val severity = alert.severityEnum()
+    val isUrgent = severity == AlertSeverity.URGENT
     val senderTier = alert.senderTierEnum()
     val accentColor = when (severity) {
         AlertSeverity.URGENT -> LiveCoral
@@ -601,7 +614,11 @@ fun IncomingAlertModalDialog(
     }
 
     AlertDialog(
-        onDismissRequest = onAcknowledge,
+        onDismissRequest = {
+            if (!isUrgent) {
+                onDismissLater?.invoke() ?: onAcknowledge()
+            }
+        },
         icon = {
             Icon(
                 imageVector = Icons.Rounded.NotificationsActive,
@@ -661,19 +678,36 @@ fun IncomingAlertModalDialog(
                         modifier = Modifier.padding(12.dp)
                     )
                 }
+                if (!isUrgent) {
+                    Text(
+                        text = "Non-urgent alert — won't repeat if dismissed.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = onAcknowledge,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (severity == AlertSeverity.URGENT) LiveCoral else SafetyEmerald,
-                    contentColor = if (severity == AlertSeverity.URGENT) Color.White else Color(0xFF00261A)
+                    containerColor = if (isUrgent) LiveCoral else SafetyEmerald,
+                    contentColor = if (isUrgent) Color.White else Color(0xFF00261A)
                 ),
                 modifier = Modifier.testTag("acknowledge_alert_button")
             ) {
                 Text("Acknowledge")
             }
-        }
+        },
+        dismissButton = if (!isUrgent && onDismissLater != null) {
+            {
+                TextButton(
+                    onClick = onDismissLater,
+                    modifier = Modifier.testTag("dismiss_non_urgent_alert_button")
+                ) {
+                    Text("Dismiss")
+                }
+            }
+        } else null
     )
 }

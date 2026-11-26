@@ -61,6 +61,7 @@ object DirectMessageNotificationPrefs {
     private const val KEY_LAST_FRIEND_ALERT_PREFIX = "dm_last_alert_"
     private const val KEY_LAST_SENT_ALERT_PREFIX = "dm_last_sent_alert_"
     private const val KEY_DISMISSED_BROADCASTS_PREFIX = "dismissed_app_broadcasts_"
+    private const val KEY_DISMISSED_NON_URGENT_ALERTS_PREFIX = "dismissed_non_urgent_alerts_"
 
     const val FRIEND_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 
@@ -153,6 +154,22 @@ object DirectMessageNotificationPrefs {
             .apply()
     }
 
+    fun getDismissedNonUrgentAlertKeys(context: Context, uid: String): Set<String> {
+        if (uid.isBlank()) return emptySet()
+        return prefs(context)
+            .getStringSet("${KEY_DISMISSED_NON_URGENT_ALERTS_PREFIX}$uid", emptySet())
+            ?.toSet()
+            ?: emptySet()
+    }
+
+    fun markNonUrgentAlertDismissed(context: Context, uid: String, alertKey: String) {
+        if (uid.isBlank() || alertKey.isBlank()) return
+        val updated = getDismissedNonUrgentAlertKeys(context, uid) + alertKey
+        prefs(context).edit()
+            .putStringSet("${KEY_DISMISSED_NON_URGENT_ALERTS_PREFIX}$uid", updated)
+            .apply()
+    }
+
     fun getLastNotifiedKey(context: Context, uid: String, threadId: String): String =
         prefs(context).getString("${KEY_LAST_NOTIFIED_PREFIX}${uid}_$threadId", "").orEmpty()
 
@@ -161,8 +178,11 @@ object DirectMessageNotificationPrefs {
     }
 
     fun buildMessageKey(thread: DirectThread): String {
-        val ts = thread.updatedAt?.toDate()?.time ?: 0L
-        return "${ts}|${thread.lastMessageSenderId}|${thread.lastMessageText.hashCode()}"
+        // Use sender + last message content + sender's latest message day instead of thread.updatedAt
+        // so unrelated metadata updates (PTT toggles, read receipts, pins, reactions) never re-trigger
+        // a popup alert for an unread message the user already saw.
+        val senderDay = thread.lastMessageDayByUserId[thread.lastMessageSenderId].orEmpty()
+        return "${thread.lastMessageSenderId}|${thread.lastMessageText.hashCode()}|$senderDay"
     }
 }
 

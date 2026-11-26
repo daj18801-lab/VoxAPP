@@ -20,6 +20,10 @@
         "disableEnterRoom": { "type": "boolean", "description": "Admin-controlled restriction disabling room entry." },
         "disableMic": { "type": "boolean", "description": "Admin-controlled restriction disabling microphone broadcast." },
         "disableVideo": { "type": "boolean", "description": "Admin-controlled restriction disabling camera video broadcast." },
+        "disableMessaging": { "type": "boolean", "description": "Staff/Admin-controlled restriction disabling room chat and DM messaging." },
+        "lastDeviceId": { "type": "string", "description": "Hashed app-scoped device identifier used to enforce device-level bans across alternate emails." },
+        "addPeopleTimestamps": { "type": "array", "description": "Sliding 10-minute epoch ms timestamps enforcing max 25 people added per 10 minutes." },
+        "spamViolationTimestamps": { "type": "array", "description": "Sliding 24-hour epoch ms timestamps tracking automated message spam violations (>20 msgs in 30s)." },
         "suspendedUntilMillis": { "type": "integer", "description": "Epoch milliseconds until which the user is suspended by Admin or Support (0 = not suspended)." },
         "suspensionReason": { "type": "string", "description": "Optional reason shown to suspended user (0-200 chars)." },
         "pointsBalance": { "type": "integer", "description": "Available spendable in-app points balance (1 point = $1; includes purchased points, creator earned points, streak rollovers, and referral bonuses)." },
@@ -57,6 +61,15 @@
         "blockedUserIds": { "type": "array", "description": "Bounded list of up to 100 blocked UIDs." },
         "pictureUploadTimestamps": { "type": "array", "description": "Sliding-window epoch ms timestamps (max 10) enforcing max 10 picture uploads per 10 minutes." },
         "discoveryPhotoTimestamps": { "type": "array", "description": "Sliding-window epoch ms timestamps (max 2) enforcing max 2 Discovery photo posts per 7-day week for free members." },
+        "customDisplayName": { "type": "string", "description": "Admin-only optional custom display name disguise (0-40 chars)." },
+        "customNameColorHex": { "type": "string", "description": "Admin-only optional custom username hex color (#RRGGBB)." },
+        "customMembershipTier": { "type": "string", "enum": ["", "FREE", "PRO", "VIP_PRO", "ELITE_PRO", "SUPPORT", "ADMIN"], "description": "Admin-only optional displayed membership/role disguise." },
+        "companySubAccount": { "type": "boolean", "description": "True when this account is a VIP Pro company employee sub-account (no perks except PTT & 60s clips, locked to company DM)." },
+        "parentCompanyOwnerId": { "type": "string", "description": "UID of the VIP Pro company owner for a company sub-account." },
+        "companyName": { "type": "string", "description": "Company workspace display name for a company sub-account." },
+        "companyThreadId": { "type": "string", "description": "Private Group DM thread ID that a company sub-account is restricted to." },
+        "subAccountId": { "type": "string", "description": "Document ID in companySubAccounts claimed by this employee." },
+        "doNotDisturb": { "type": "boolean", "description": "Do Not Disturb toggle silencing non-urgent alerts while allowing urgent alerts to break through." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
       },
@@ -296,7 +309,13 @@
         "appearanceStatus": { "type": "string", "enum": ["ONLINE", "IDLE", "OFFLINE"], "description": "User-selected visible status (Admins/Support see true online status)." },
         "totalTimeSpentSec": { "type": "integer", "description": "Cumulative seconds spent on the app." },
         "acceptedFriendIds": { "type": "array", "description": "Bounded list of accepted friend UIDs (max 200) used to compute Friends-of-Friends suggestions." },
+        "customDisplayName": { "type": "string", "description": "Admin-only optional custom display name disguise." },
+        "customNameColorHex": { "type": "string", "description": "Admin-only optional custom username hex color (#RRGGBB)." },
+        "customMembershipTier": { "type": "string", "enum": ["", "FREE", "PRO", "VIP_PRO", "ELITE_PRO", "SUPPORT", "ADMIN"], "description": "Admin-only optional displayed membership/role disguise." },
         "lastActiveAt": { "type": "string", "format": "date-time" },
+        "companySubAccount": { "type": "boolean", "description": "True when this user is a company employee sub-account." },
+        "parentCompanyOwnerId": { "type": "string", "description": "Owner UID for a company employee sub-account." },
+        "doNotDisturb": { "type": "boolean", "description": "Do Not Disturb status visible to team supervisors." },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "displayName", "handle", "avatarColorHex", "staffTier", "updatedAt"]
@@ -335,8 +354,11 @@
         "participantIds": { "type": "array", "description": "2 to 50 participant UIDs (Free max 7, Pro max 15, VIP Pro max 25, Elite Pro max 50)." },
         "isGroup": { "type": "boolean", "description": "True when 3+ users or created as a group chat." },
         "groupName": { "type": "string", "description": "Optional display name for a group private chat." },
-        "groupAdminId": { "type": "string", "description": "UID of the Group DM creator/administrator who can mute, bounce, ban, appoint Group Support Staff, and assign PTT speakers (>15 users)." },
+        "groupAdminId": { "type": "string", "description": "UID of the Group DM creator/administrator who can mute, bounce, ban, appoint Group Support Staff, assign PTT speakers (>15 users), and talk over anyone." },
+        "groupAdminTalking": { "type": "boolean", "description": "True while the Group DM Administrator holds priority talk-over mic access." },
         "groupSupportIds": { "type": "array", "description": "UIDs appointed by the Group DM Administrator as Group DM Support Staff (can mute and 24h bounce regular members)." },
+        "companyOwnerId": { "type": "string", "description": "UID of the VIP Pro company owner when this Group DM is a Company Workspace thread." },
+        "groupSupervisorIds": { "type": "array", "description": "UIDs appointed by the Company Owner as Group DM Supervisors (admins who can moderate and send work orders/notes)." },
         "pttAllowedUserIds": { "type": "array", "description": "UIDs authorized by the Group DM Administrator to use Push-to-Talk when the group has more than 15 members." },
         "participantNamesById": { "type": "object", "description": "Map of UID to display name for group chat participants." },
         "kickedUserIds": { "type": "array", "description": "UIDs kicked from sending messages in this thread." },
@@ -898,6 +920,91 @@
         "targetUserId", "targetName", "referenceId", "countValue",
         "read", "createdAt", "updatedAt"
       ]
+    },
+    "CompanySubAccount": {
+      "title": "CompanySubAccount",
+      "description": "VIP Pro company employee sub-name credential bound to the owner's private Company Group DM.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string" },
+        "ownerName": { "type": "string" },
+        "companyName": { "type": "string" },
+        "companyThreadId": { "type": "string" },
+        "subName": { "type": "string" },
+        "roleTitle": { "type": "string" },
+        "accessCode": { "type": "string" },
+        "claimedUserId": { "type": "string" },
+        "claimedEmail": { "type": "string" },
+        "supervisor": { "type": "boolean" },
+        "supervisorUids": { "type": "array" },
+        "doNotDisturb": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "claimedAtMillis": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerId", "ownerName", "companyName", "companyThreadId", "subName",
+        "roleTitle", "accessCode", "claimedUserId", "claimedEmail", "supervisor",
+        "supervisorUids", "doNotDisturb", "active", "claimedAtMillis", "createdAt", "updatedAt"
+      ]
+    },
+    "WorkOrder": {
+      "title": "WorkOrder",
+      "description": "Work task or note sent by a Company Owner or Supervisor to an employee sub-account with Normal or Urgent priority.",
+      "type": "object",
+      "properties": {
+        "companyOwnerId": { "type": "string" },
+        "threadId": { "type": "string" },
+        "supervisorUids": { "type": "array" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderRole": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "orderType": { "type": "string", "enum": ["WORK_ORDER", "NOTE"] },
+        "priority": { "type": "string", "enum": ["NORMAL", "URGENT"] },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "ACKNOWLEDGED", "COMPLETED"] },
+        "acknowledged": { "type": "boolean" },
+        "acknowledgedAtMillis": { "type": "integer" },
+        "completedAtMillis": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "companyOwnerId", "threadId", "supervisorUids", "senderId", "senderName", "senderRole",
+        "targetUserId", "targetName", "orderType", "priority", "title", "body", "status",
+        "acknowledged", "acknowledgedAtMillis", "completedAtMillis", "createdAt", "updatedAt"
+      ]
+    },
+    "EmployeeRequest": {
+      "title": "EmployeeRequest",
+      "description": "Request submitted by an employee sub-account to Company Owner and Supervisors.",
+      "type": "object",
+      "properties": {
+        "companyOwnerId": { "type": "string" },
+        "threadId": { "type": "string" },
+        "supervisorUids": { "type": "array" },
+        "requesterId": { "type": "string" },
+        "requesterName": { "type": "string" },
+        "category": { "type": "string", "enum": ["SCHEDULE", "SUPPLIES", "DISPATCH", "OTHER"] },
+        "subject": { "type": "string" },
+        "details": { "type": "string" },
+        "urgent": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "DENIED", "COMPLETED", "CANCELLED"] },
+        "reviewedById": { "type": "string" },
+        "reviewedByName": { "type": "string" },
+        "reviewerNote": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "companyOwnerId", "threadId", "supervisorUids", "requesterId", "requesterName",
+        "category", "subject", "details", "urgent", "status",
+        "reviewedById", "reviewedByName", "reviewerNote", "createdAt", "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -1040,6 +1147,37 @@
     "/adminNotifications/{notifId}": {
       "schema": { "$ref": "#/entities/AdminNotification" },
       "description": "Admin-only record-keeping and threshold notifications from Support Staff actions."
+    },
+    "/bannedDevices/{deviceHash}": {
+      "schema": {
+        "title": "BannedDevice",
+        "type": "object",
+        "properties": {
+          "deviceHash": { "type": "string" },
+          "bannedUserId": { "type": "string" },
+          "bannedUserName": { "type": "string" },
+          "reason": { "type": "string" },
+          "bannedByUid": { "type": "string" },
+          "bannedByName": { "type": "string" },
+          "active": { "type": "boolean" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["deviceHash", "bannedUserId", "bannedUserName", "reason", "bannedByUid", "bannedByName", "active", "createdAt", "updatedAt"]
+      },
+      "description": "Device-level ban records preventing banned users from logging in on the same device with another email."
+    },
+    "/companySubAccounts/{subId}": {
+      "schema": { "$ref": "#/entities/CompanySubAccount" },
+      "description": "Company employee sub-name slots created by VIP Pro/Elite Pro owners and claimed by employees."
+    },
+    "/workOrders/{orderId}": {
+      "schema": { "$ref": "#/entities/WorkOrder" },
+      "description": "Work orders and notes dispatched by Company Owners or Supervisors to employee sub-accounts."
+    },
+    "/employeeRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/EmployeeRequest" },
+      "description": "Employee requests submitted by sub-accounts for Owner/Supervisor approval."
     }
   }
 }

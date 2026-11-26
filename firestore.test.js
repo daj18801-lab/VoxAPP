@@ -5842,6 +5842,713 @@ test("45. Group DM Support Staff, Tiered Caps (7/15/25/50), and >15-Member PTT S
   );
 });
 
+test("46. Private room tier caps (25/50/75/100), Group DM Admin talk-over, and Admin custom identity fields", async () => {
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, { email: ADMIN_EMAIL, email_verified: true }).firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const exp30d = Date.now() + 30 * 24 * 60 * 60 * 1000;
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("users").doc(ADMIN_UID).set(validProfilePayload(ADMIN_UID, { displayName: "Owner Admin" }));
+    await db.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID, { displayName: "Alice Host", proMember: false, proTier: "FREE" }));
+    await db.collection("users").doc(BOB_UID).set(validProfilePayload(BOB_UID, { displayName: "Bob Guest" }));
+  });
+
+  // 1) Private chat room user limits by host membership tier:
+  // Free = 25, Pro = 50, VIP Pro = 75, Elite Pro = 100
+  const privRoomId = "priv_room_cap_test";
+  const makePrivRoom = async (participantCount) => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("rooms").doc(privRoomId).set(
+        validRoomPayload(ALICE_UID, { visibility: "PRIVATE", participantCount })
+      );
+      await ctx.firestore().collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).delete();
+    });
+  };
+
+  // Free host: 24 -> Bob allowed; 25 -> Bob denied
+  await makePrivRoom(24);
+  await assertSucceeds(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+  await makePrivRoom(25);
+  await assertFails(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+
+  // Pro host: 49 -> Bob allowed; 50 -> Bob denied
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc(ALICE_UID).update({ proMember: true, proTier: "PRO", proExpiresAtMillis: exp30d });
+  });
+  await makePrivRoom(49);
+  await assertSucceeds(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+  await makePrivRoom(50);
+  await assertFails(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+
+  // VIP Pro host: 74 -> Bob allowed; 75 -> Bob denied
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc(ALICE_UID).update({ proMember: true, proTier: "VIP_PRO", proExpiresAtMillis: exp30d });
+  });
+  await makePrivRoom(74);
+  await assertSucceeds(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+  await makePrivRoom(75);
+  await assertFails(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+
+  // Elite Pro host: 99 -> Bob allowed; 100 -> Bob denied
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc(ALICE_UID).update({ proMember: true, proTier: "ELITE_PRO", proExpiresAtMillis: exp30d });
+  });
+  await makePrivRoom(99);
+  await assertSucceeds(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+  await makePrivRoom(100);
+  await assertFails(bobDb.collection("rooms").doc(privRoomId).collection("participants").doc(BOB_UID).set(validParticipantPayload(BOB_UID, privRoomId)));
+
+  // 2) Group DM Admin priority talk-over (`groupAdminTalking`)
+  const grpId = "grp_talkover_46";
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const ts = pastDate(9000);
+    await ctx.firestore().collection("directThreads").doc(grpId).set({
+      participantIds: [ALICE_UID, BOB_UID, "charlie_46"],
+      isGroup: true,
+      groupName: "Talk Over Squad",
+      groupAdminId: ALICE_UID,
+      groupAdminTalking: false,
+      userAId: ALICE_UID,
+      userAName: "Alice",
+      userAColorHex: "#6C63FF",
+      userATier: "USER",
+      userBId: BOB_UID,
+      userBName: "Bob",
+      userBColorHex: "#00C4B4",
+      userBTier: "USER",
+      lastMessageText: "Ready",
+      lastMessageSenderId: ALICE_UID,
+      unreadByUserIds: [],
+      createdAt: ts,
+      updatedAt: ts,
+    });
+  });
+
+  // Group DM Admin Alice can toggle groupAdminTalking on/off
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(grpId).update({ groupAdminTalking: true, updatedAt: pastDate(5000) })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directThreads").doc(grpId).update({ groupAdminTalking: false, updatedAt: pastDate(4000) })
+  );
+  // Non-admin member Bob CANNOT toggle groupAdminTalking
+  await assertFails(
+    bobDb.collection("directThreads").doc(grpId).update({ groupAdminTalking: true, updatedAt: pastDate(3000) })
+  );
+
+  // 3) Admin custom identity disguise fields (`customDisplayName`, `customNameColorHex`, `customMembershipTier`)
+  await assertSucceeds(
+    adminDb.collection("users").doc(ADMIN_UID).update({
+      customDisplayName: "Mystery VIP",
+      customNameColorHex: "#FF00AA",
+      customMembershipTier: "VIP_PRO",
+      updatedAt: pastDate(2000),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("userDirectory").doc(ADMIN_UID).set({
+      userId: ADMIN_UID,
+      displayName: "Mystery VIP",
+      handle: "owner_admin",
+      avatarColorHex: "#6C63FF",
+      staffTier: "ADMIN",
+      customDisplayName: "Mystery VIP",
+      customNameColorHex: "#FF00AA",
+      customMembershipTier: "VIP_PRO",
+      updatedAt: pastDate(1500),
+    })
+  );
+  // Regular user Bob CANNOT set custom identity disguise fields on users or userDirectory
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).update({
+      customDisplayName: "Fake Admin",
+      customNameColorHex: "#FF0000",
+      customMembershipTier: "ADMIN",
+      updatedAt: pastDate(1000),
+    })
+  );
+  await assertFails(
+    bobDb.collection("userDirectory").doc(BOB_UID).set({
+      userId: BOB_UID,
+      displayName: "Bob",
+      handle: "bob_guest",
+      avatarColorHex: "#00C4B4",
+      staffTier: "USER",
+      customDisplayName: "Fake Admin",
+      customNameColorHex: "#FF0000",
+      customMembershipTier: "ADMIN",
+      updatedAt: pastDate(500),
+    })
+  );
+});
+
+// 47. DEVICE BANS, MESSAGING DISABLEMENT BY STAFF/ADMIN, ADD-PEOPLE & AUTOMOD SPAM ESCALATION
+test("Device bans, Staff/Admin disableMessaging enforcement, and automated spam self-suspension/reports work securely", async () => {
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: "daj18801@gmail.com", email_verified: true })
+    .firestore();
+  const supportDb = testEnv
+    .authenticatedContext(SUPPORT_UID, { email: "support@vox.test", email_verified: true })
+    .firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const deviceHash = "dev_aabbccddeeff00112233445566778899";
+  const ts = pastDate(5000);
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("staffRoles").doc(SUPPORT_UID).set({
+      userId: SUPPORT_UID,
+      email: "support@vox.test",
+      displayName: "SupportSam",
+      staffTier: "SUPPORT",
+      canEnterInvisible: true,
+      addedByUid: ADMIN_UID,
+      addedByName: "OwnerAdmin",
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await db.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      displayName: "Alice",
+      lastDeviceId: deviceHash,
+    });
+    await db.collection("userDirectory").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      handle: "alice_vox",
+      avatarColorHex: "#0088FF",
+      staffTier: "USER",
+      updatedAt: ts,
+    });
+    await db.collection("rooms").doc("room_msg_test").set({
+      hostId: BOB_UID,
+      hostName: "Bob",
+      hostTier: "USER",
+      title: "Chat Test Room",
+      topic: "Testing messaging controls",
+      category: "LOUNGE",
+      coverKey: "HERO",
+      visibility: "PUBLIC",
+      status: "LIVE",
+      videoEnabled: true,
+      autoModEnabled: true,
+      autoModBlockMode: false,
+      linksBlocked: false,
+      roomLocked: false,
+      stageMicLocked: false,
+      slowModeSeconds: 0,
+      maxSpeakers: 6,
+      participantCount: 1,
+      moderatorIds: [BOB_UID],
+      bannedUserIds: [],
+      mutedUserIds: [],
+      blockedWords: [],
+      createdAt: ts,
+      updatedAt: ts,
+    });
+  });
+
+  // 1) Non-banned regular user CANNOT ban a device
+  await assertFails(
+    aliceDb.collection("bannedDevices").doc(deviceHash).set({
+      deviceHash,
+      bannedUserId: ALICE_UID,
+      bannedUserName: "Alice",
+      reason: "Fake ban",
+      bannedByUid: ALICE_UID,
+      bannedByName: "Alice",
+      active: true,
+      createdAt: pastDate(4000),
+      updatedAt: pastDate(4000),
+    })
+  );
+
+  // 2) Admin bans Alice's device -> another account (Bob) on the same device can GET bannedDevices/{deviceHash} to verify block, but CANNOT list all banned devices
+  await assertSucceeds(
+    adminDb.collection("bannedDevices").doc(deviceHash).set({
+      deviceHash,
+      bannedUserId: ALICE_UID,
+      bannedUserName: "Alice",
+      reason: "Banned account device lock",
+      bannedByUid: ADMIN_UID,
+      bannedByName: "OwnerAdmin",
+      active: true,
+      createdAt: pastDate(3500),
+      updatedAt: pastDate(3500),
+    })
+  );
+  await assertSucceeds(bobDb.collection("bannedDevices").doc(deviceHash).get());
+  await assertFails(bobDb.collection("bannedDevices").get());
+
+  // 3) Support Staff CAN disable and re-enable Alice's messaging (and mirror to userDirectory)
+  await assertSucceeds(
+    supportDb.collection("users").doc(ALICE_UID).update({
+      disableMessaging: true,
+      updatedAt: pastDate(3000),
+    })
+  );
+  await assertSucceeds(
+    supportDb.collection("userDirectory").doc(ALICE_UID).update({
+      disableMessaging: true,
+      updatedAt: pastDate(2900),
+    })
+  );
+
+  // Alice CANNOT re-enable her own messaging
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      disableMessaging: false,
+      updatedAt: pastDate(2800),
+    })
+  );
+
+  // While disableMessaging == true, Alice CANNOT send a room message
+  await assertFails(
+    aliceDb.collection("rooms").doc("room_msg_test").collection("messages").doc("msg_blocked").set({
+      roomId: "room_msg_test",
+      senderId: ALICE_UID,
+      senderName: "Alice",
+      senderRole: "LISTENER",
+      senderTier: "USER",
+      text: "Trying to bypass disabled messaging",
+      messageType: "TEXT",
+      flaggedByAutoMod: false,
+      deletedByMod: false,
+      createdAt: pastDate(2700),
+      updatedAt: pastDate(2700),
+    })
+  );
+
+  // Support Staff re-enables Alice's messaging -> Alice can send messages again
+  await assertSucceeds(
+    supportDb.collection("users").doc(ALICE_UID).update({
+      disableMessaging: false,
+      updatedAt: pastDate(2500),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("rooms").doc("room_msg_test").collection("messages").doc("msg_ok").set({
+      roomId: "room_msg_test",
+      senderId: ALICE_UID,
+      senderName: "Alice",
+      senderRole: "LISTENER",
+      senderTier: "USER",
+      text: "Hello after re-enable",
+      messageType: "TEXT",
+      flaggedByAutoMod: false,
+      deletedByMod: false,
+      createdAt: pastDate(2400),
+      updatedAt: pastDate(2400),
+    })
+  );
+
+  // 4) Automated spam self-escalation (forward suspension only) + automated SPAM_SCAM staff report
+  const nowMs = Date.now();
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      spamViolationTimestamps: [nowMs - 60000, nowMs],
+      suspendedUntilMillis: nowMs + 3600000,
+      suspensionReason: "2nd message spam violation (>20 msgs in 30s): 1-hour suspension",
+      updatedAt: pastDate(2000),
+    })
+  );
+  // Alice CANNOT lower her own suspendedUntilMillis
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      spamViolationTimestamps: [nowMs - 60000, nowMs, nowMs + 1000],
+      suspendedUntilMillis: 0,
+      suspensionReason: "",
+      updatedAt: pastDate(1500),
+    })
+  );
+  // Automated spam report for self succeeds without hitting manual reportRateLimits
+  await assertSucceeds(
+    aliceDb.collection("safetyReports").doc("automod_spam_alice_3").set({
+      reporterId: ALICE_UID,
+      reporterName: "AutoMod",
+      roomId: "AUTOMOD_SPAM",
+      roomTitle: "Message Spam Auto-Mod",
+      roomHostId: "SYSTEM_AUTOMOD",
+      targetUserId: ALICE_UID,
+      targetName: "Alice",
+      category: "SPAM_SCAM",
+      details: "3rd message spam violation (>20 messages in 30s). 4-hour suspension applied.",
+      status: "OPEN",
+      resolutionNote: "",
+      createdAt: pastDate(1000),
+      updatedAt: pastDate(1000),
+    })
+  );
+  // Alice CANNOT abuse AUTOMOD_SPAM to file a report targeting Bob
+  await assertFails(
+    aliceDb.collection("safetyReports").doc("automod_spam_fake_bob").set({
+      reporterId: ALICE_UID,
+      reporterName: "AutoMod",
+      roomId: "AUTOMOD_SPAM",
+      roomTitle: "Message Spam Auto-Mod",
+      roomHostId: "SYSTEM_AUTOMOD",
+      targetUserId: BOB_UID,
+      targetName: "Bob",
+      category: "SPAM_SCAM",
+      details: "Fake report against Bob",
+      status: "OPEN",
+      resolutionNote: "",
+      createdAt: pastDate(500),
+      updatedAt: pastDate(500),
+    })
+  );
+});
+
+test("48. VIP Pro company sub-accounts, supervisors, work orders, employee requests, DND, and room/DM isolation", async () => {
+  const OWNER_UID = "vip_owner_co";
+  const EMP1_UID = "emp_sub_01";
+  const SUP_UID = "emp_sup_02";
+  const FREE_UID = "free_user_co";
+  const OUTSIDER_UID = "outsider_co";
+  const CO_THREAD_ID = `company_${OWNER_UID}`;
+  const EMP1_CODE = "EMP_101AAA";
+  const SUP_CODE = "EMP_202BBB";
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("users").doc(OWNER_UID).set(validProfilePayload(OWNER_UID, {
+      displayName: "Acme Dispatch",
+      proMember: true,
+      proTier: "VIP_PRO",
+      proExpiresAtMillis: Date.now() + 86400000 * 30,
+    }));
+    await db.collection("users").doc(FREE_UID).set(validProfilePayload(FREE_UID, { displayName: "FreeGuy" }));
+    await db.collection("users").doc(EMP1_UID).set(validProfilePayload(EMP1_UID, { displayName: "EmpRaw" }));
+    await db.collection("users").doc(SUP_UID).set(validProfilePayload(SUP_UID, { displayName: "SupRaw" }));
+    await db.collection("users").doc(OUTSIDER_UID).set(validProfilePayload(OUTSIDER_UID, { displayName: "Outsider" }));
+  });
+
+  const ownerDb = testEnv.authenticatedContext(OWNER_UID).firestore();
+  const freeDb = testEnv.authenticatedContext(FREE_UID).firestore();
+  const emp1Db = testEnv.authenticatedContext(EMP1_UID).firestore();
+  const supDb = testEnv.authenticatedContext(SUP_UID).firestore();
+  const outsiderDb = testEnv.authenticatedContext(OUTSIDER_UID).firestore();
+
+  // 1. Free user CANNOT create company sub-account or company group DM
+  await assertFails(
+    freeDb.collection("companySubAccounts").doc("EMP_FREE01").set({
+      ownerId: FREE_UID,
+      ownerName: "FreeGuy",
+      companyName: "Free Co",
+      companyThreadId: `company_${FREE_UID}`,
+      subName: "Worker 1",
+      roleTitle: "Tech",
+      accessCode: "EMP_FREE01",
+      claimedUserId: "",
+      claimedEmail: "",
+      supervisor: false,
+      supervisorUids: [],
+      doNotDisturb: false,
+      active: true,
+      claimedAtMillis: 0,
+      createdAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // 2. VIP Pro owner creates Company Private Group DM (starts with just owner)
+  await assertSucceeds(
+    ownerDb.collection("directThreads").doc(CO_THREAD_ID).set({
+      participantIds: [OWNER_UID],
+      isGroup: true,
+      groupName: "Acme Dispatch HQ",
+      groupAdminId: OWNER_UID,
+      companyOwnerId: OWNER_UID,
+      groupSupervisorIds: [],
+      groupSupportIds: [],
+      participantNamesById: { [OWNER_UID]: "Acme Dispatch" },
+      userAId: OWNER_UID,
+      userAName: "Acme Dispatch",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: OWNER_UID,
+      userBName: "Acme Dispatch",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Company workspace ready",
+      lastMessageSenderId: OWNER_UID,
+      unreadByUserIds: [],
+      createdAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // 3. VIP Pro owner creates two sub-names
+  await assertSucceeds(
+    ownerDb.collection("companySubAccounts").doc(EMP1_CODE).set({
+      ownerId: OWNER_UID,
+      ownerName: "Acme Dispatch",
+      companyName: "Acme Dispatch HQ",
+      companyThreadId: CO_THREAD_ID,
+      subName: "Truck 12 - Mike",
+      roleTitle: "Driver",
+      accessCode: EMP1_CODE,
+      claimedUserId: "",
+      claimedEmail: "",
+      supervisor: false,
+      supervisorUids: [],
+      doNotDisturb: false,
+      active: true,
+      claimedAtMillis: 0,
+      createdAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
+  await assertSucceeds(
+    ownerDb.collection("companySubAccounts").doc(SUP_CODE).set({
+      ownerId: OWNER_UID,
+      ownerName: "Acme Dispatch",
+      companyName: "Acme Dispatch HQ",
+      companyThreadId: CO_THREAD_ID,
+      subName: "Lead - Sarah",
+      roleTitle: "Shift Supervisor",
+      accessCode: SUP_CODE,
+      claimedUserId: "",
+      claimedEmail: "",
+      supervisor: false,
+      supervisorUids: [],
+      doNotDisturb: false,
+      active: true,
+      claimedAtMillis: 0,
+      createdAt: pastDate(2000),
+      updatedAt: pastDate(2000),
+    })
+  );
+
+  // 4. Employee 1 claims EMP1_CODE, binds profile as companySubAccount, and self-joins company thread
+  await assertSucceeds(emp1Db.collection("companySubAccounts").doc(EMP1_CODE).get());
+  await assertSucceeds(
+    emp1Db.collection("companySubAccounts").doc(EMP1_CODE).update({
+      claimedUserId: EMP1_UID,
+      claimedEmail: "mike@acme.test",
+      claimedAtMillis: Date.now(),
+      updatedAt: pastDate(1500),
+    })
+  );
+  await assertSucceeds(
+    emp1Db.collection("users").doc(EMP1_UID).update({
+      companySubAccount: true,
+      parentCompanyOwnerId: OWNER_UID,
+      companyName: "Acme Dispatch HQ",
+      companyThreadId: CO_THREAD_ID,
+      subAccountId: EMP1_CODE,
+      displayName: "Truck 12 - Mike",
+      doNotDisturb: false,
+      updatedAt: pastDate(1400),
+    })
+  );
+  await assertSucceeds(
+    emp1Db.collection("directThreads").doc(CO_THREAD_ID).update({
+      participantIds: [OWNER_UID, EMP1_UID],
+      participantNamesById: { [OWNER_UID]: "Acme Dispatch", [EMP1_UID]: "Truck 12 - Mike" },
+      updatedAt: pastDate(1300),
+    })
+  );
+
+  // Supervisor claims SUP_CODE & self-joins
+  await assertSucceeds(
+    supDb.collection("companySubAccounts").doc(SUP_CODE).update({
+      claimedUserId: SUP_UID,
+      claimedEmail: "sarah@acme.test",
+      claimedAtMillis: Date.now(),
+      updatedAt: pastDate(1250),
+    })
+  );
+  await assertSucceeds(
+    supDb.collection("users").doc(SUP_UID).update({
+      companySubAccount: true,
+      parentCompanyOwnerId: OWNER_UID,
+      companyName: "Acme Dispatch HQ",
+      companyThreadId: CO_THREAD_ID,
+      subAccountId: SUP_CODE,
+      displayName: "Lead - Sarah",
+      doNotDisturb: false,
+      updatedAt: pastDate(1200),
+    })
+  );
+  await assertSucceeds(
+    supDb.collection("directThreads").doc(CO_THREAD_ID).update({
+      participantIds: [OWNER_UID, EMP1_UID, SUP_UID],
+      participantNamesById: {
+        [OWNER_UID]: "Acme Dispatch",
+        [EMP1_UID]: "Truck 12 - Mike",
+        [SUP_UID]: "Lead - Sarah",
+      },
+      updatedAt: pastDate(1150),
+    })
+  );
+
+  // 5. Sub-account CANNOT create rooms, create other DMs, or send external friend requests
+  await assertFails(
+    emp1Db.collection("rooms").doc("sub_room_blocked").set(validRoomPayload(EMP1_UID, { title: "Blocked Room" }))
+  );
+  await assertFails(
+    emp1Db.collection("friendships").doc(`${EMP1_UID}_${OUTSIDER_UID}`).set({
+      userIds: [EMP1_UID, OUTSIDER_UID],
+      requesterId: EMP1_UID,
+      requesterName: "Truck 12 - Mike",
+      requesterHandle: "mike12",
+      requesterColorHex: "#0088FF",
+      requesterTier: "USER",
+      recipientId: OUTSIDER_UID,
+      recipientName: "Outsider",
+      recipientHandle: "outsider",
+      recipientColorHex: "#0088FF",
+      recipientTier: "USER",
+      status: "PENDING",
+      createdAt: pastDate(1100),
+      updatedAt: pastDate(1100),
+    })
+  );
+  await assertFails(
+    emp1Db.collection("directThreads").doc(`${EMP1_UID}_${OUTSIDER_UID}`).set({
+      participantIds: [EMP1_UID, OUTSIDER_UID],
+      userAId: EMP1_UID,
+      userAName: "Truck 12 - Mike",
+      userAColorHex: "#0088FF",
+      userATier: "USER",
+      userBId: OUTSIDER_UID,
+      userBName: "Outsider",
+      userBColorHex: "#0088FF",
+      userBTier: "USER",
+      lastMessageText: "Hi",
+      lastMessageSenderId: EMP1_UID,
+      unreadByUserIds: [OUTSIDER_UID],
+      createdAt: pastDate(1100),
+      updatedAt: pastDate(1100),
+    })
+  );
+
+  // Sub-account CAN toggle Do Not Disturb & update displayName
+  await assertSucceeds(
+    emp1Db.collection("users").doc(EMP1_UID).update({
+      doNotDisturb: true,
+      displayName: "Truck 12 - Mike B",
+      updatedAt: pastDate(1050),
+    })
+  );
+  await assertSucceeds(
+    emp1Db.collection("companySubAccounts").doc(EMP1_CODE).update({
+      doNotDisturb: true,
+      subName: "Truck 12 - Mike B",
+      updatedAt: pastDate(1040),
+    })
+  );
+
+  // 6. Owner appoints SUP_UID as Group DM Supervisor
+  await assertSucceeds(
+    ownerDb.collection("directThreads").doc(CO_THREAD_ID).update({
+      groupSupervisorIds: [SUP_UID],
+      updatedAt: pastDate(1000),
+    })
+  );
+  await assertSucceeds(
+    ownerDb.collection("companySubAccounts").doc(SUP_CODE).update({
+      supervisor: true,
+      supervisorUids: [SUP_UID],
+      updatedAt: pastDate(990),
+    })
+  );
+
+  // 7. Supervisor sends an URGENT Work Order to Employee 1; Outsider CANNOT
+  await assertSucceeds(
+    supDb.collection("workOrders").doc("wo_urgent_01").set({
+      companyOwnerId: OWNER_UID,
+      threadId: CO_THREAD_ID,
+      supervisorUids: [SUP_UID],
+      senderId: SUP_UID,
+      senderName: "Lead - Sarah",
+      senderRole: "Supervisor",
+      targetUserId: EMP1_UID,
+      targetName: "Truck 12 - Mike B",
+      orderType: "WORK_ORDER",
+      priority: "URGENT",
+      title: "Dock 4 Priority Pickup",
+      body: "Head to Dock 4 immediately for priority pallet load.",
+      status: "OPEN",
+      acknowledged: false,
+      acknowledgedAtMillis: 0,
+      completedAtMillis: 0,
+      createdAt: pastDate(900),
+      updatedAt: pastDate(900),
+    })
+  );
+  await assertFails(
+    outsiderDb.collection("workOrders").doc("wo_fake_outsider").set({
+      companyOwnerId: OWNER_UID,
+      threadId: CO_THREAD_ID,
+      supervisorUids: [SUP_UID],
+      senderId: OUTSIDER_UID,
+      senderName: "Outsider",
+      senderRole: "Fake",
+      targetUserId: EMP1_UID,
+      targetName: "Truck 12 - Mike B",
+      orderType: "NOTE",
+      priority: "NORMAL",
+      title: "Spoof",
+      body: "Unauthorized note",
+      status: "OPEN",
+      acknowledged: false,
+      acknowledgedAtMillis: 0,
+      completedAtMillis: 0,
+      createdAt: pastDate(850),
+      updatedAt: pastDate(850),
+    })
+  );
+
+  // Employee 1 acknowledges & completes Work Order; Outsider cannot read it
+  await assertFails(outsiderDb.collection("workOrders").doc("wo_urgent_01").get());
+  await assertSucceeds(
+    emp1Db.collection("workOrders").doc("wo_urgent_01").update({
+      status: "COMPLETED",
+      acknowledged: true,
+      acknowledgedAtMillis: Date.now(),
+      completedAtMillis: Date.now(),
+      updatedAt: pastDate(800),
+    })
+  );
+
+  // 8. Employee 1 submits an Employee Request; Supervisor approves it
+  await assertSucceeds(
+    emp1Db.collection("employeeRequests").doc("req_01").set({
+      companyOwnerId: OWNER_UID,
+      threadId: CO_THREAD_ID,
+      supervisorUids: [SUP_UID],
+      requesterId: EMP1_UID,
+      requesterName: "Truck 12 - Mike B",
+      category: "SUPPLIES",
+      subject: "Need replacement straps",
+      details: "Two ratchet straps snapped on route 9.",
+      urgent: false,
+      status: "PENDING",
+      reviewedById: "",
+      reviewedByName: "",
+      reviewerNote: "",
+      createdAt: pastDate(700),
+      updatedAt: pastDate(700),
+    })
+  );
+  await assertSucceeds(
+    supDb.collection("employeeRequests").doc("req_01").update({
+      status: "APPROVED",
+      reviewedById: SUP_UID,
+      reviewedByName: "Lead - Sarah",
+      reviewerNote: "Pick up 4 straps from Bay 2.",
+      updatedAt: pastDate(600),
+    })
+  );
+});
+
+
+
 
 
 

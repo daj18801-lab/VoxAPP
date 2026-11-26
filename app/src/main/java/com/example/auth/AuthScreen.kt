@@ -22,6 +22,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Badge
+import androidx.compose.material.icons.rounded.Business
 import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.HourglassBottom
@@ -63,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import com.example.R
 import com.example.data.AppConfig
+import com.example.security.DeviceBanManager
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 
@@ -84,8 +87,18 @@ fun AuthScreen(
         mutableStateOf(TrialSessionManager.loadSession(context)?.displayName.orEmpty())
     }
     var trialError by remember { mutableStateOf<String?>(null) }
+    var showEmployeeLogin by remember { mutableStateOf(false) }
+    var empSubNameInput by remember { mutableStateOf("") }
+    var empAccessCodeInput by remember { mutableStateOf("") }
+    var empError by remember { mutableStateOf<String?>(null) }
     val hasExpiredTrial = remember(context, trialNoticeMessage) {
         TrialSessionManager.hasTrialExpired(context)
+    }
+    val isLocallyDeviceBanned = remember(context) {
+        DeviceBanManager.isLocallyDeviceBanned(context)
+    }
+    val localDeviceBanReason = remember(context) {
+        DeviceBanManager.getLocalDeviceBanReason(context)
     }
 
     LaunchedEffect(Unit) {
@@ -286,6 +299,39 @@ fun AuthScreen(
                     .fillMaxWidth()
                     .padding(top = 24.dp)
             ) {
+                if (isLocallyDeviceBanned) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = LiveCoral.copy(alpha = 0.16f),
+                        border = BorderStroke(1.2.dp, LiveCoral.copy(alpha = 0.55f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .testTag("auth_device_banned_banner")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Device Banned from VOX",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = LiveCoral
+                            )
+                            Text(
+                                text = buildString {
+                                    append("This device is banned and cannot sign in with alternate emails or trial accounts.")
+                                    if (localDeviceBanReason.isNotBlank()) {
+                                        append(" ($localDeviceBanReason)")
+                                    }
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+
                 if (!trialNoticeMessage.isNullOrBlank()) {
                     Surface(
                         shape = RoundedCornerShape(14.dp),
@@ -324,6 +370,7 @@ fun AuthScreen(
                 Button(
                     onClick = {
                         errorMessage = null
+                        SubAccountLoginPrefs.clear(context)
                         isLoading = true
                         onGoogleSignInClicked(
                             context = context,
@@ -370,6 +417,143 @@ fun AuthScreen(
                             text = stringResource(R.string.auth_sign_in_google),
                             style = MaterialTheme.typography.labelLarge
                         )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Company Employee Sub-Account Login Card
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Business,
+                                    contentDescription = "Company Employee Login",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "Company Employee Login",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = { showEmployeeLogin = !showEmployeeLogin },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.testTag("toggle_employee_login_button")
+                            ) {
+                                Text(if (showEmployeeLogin) "Hide" else "Sub-Name Login")
+                            }
+                        }
+
+                        if (showEmployeeLogin) {
+                            Text(
+                                text = "Have an assigned Sub-Name and Access Code from a VIP Pro company account? Enter them below, then sign in with Google to join your company's private Group DM & 60s PTT channel.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedTextField(
+                                value = empSubNameInput,
+                                onValueChange = {
+                                    empSubNameInput = it.take(40)
+                                    empError = null
+                                },
+                                label = { Text("Assigned Sub-Name") },
+                                placeholder = { Text("e.g., Truck 12 - Mike") },
+                                leadingIcon = {
+                                    Icon(imageVector = Icons.Rounded.Badge, contentDescription = null)
+                                },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("employee_sub_name_input")
+                            )
+                            OutlinedTextField(
+                                value = empAccessCodeInput,
+                                onValueChange = {
+                                    empAccessCodeInput = it.uppercase().take(20)
+                                    empError = null
+                                },
+                                label = { Text("Company Access Code") },
+                                placeholder = { Text("e.g., EMP_X9K2M4") },
+                                leadingIcon = {
+                                    Icon(imageVector = Icons.Rounded.Lock, contentDescription = null)
+                                },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("employee_access_code_input")
+                            )
+                            if (empError != null) {
+                                Text(
+                                    text = empError!!,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    val cleanSub = empSubNameInput.trim()
+                                    val cleanCode = SubAccountLoginPrefs.normalizeCode(empAccessCodeInput)
+                                    if (cleanSub.isEmpty() || cleanCode.length < 4) {
+                                        empError = "Enter both your assigned Sub-Name and Access Code."
+                                        return@Button
+                                    }
+                                    empError = null
+                                    errorMessage = null
+                                    SubAccountLoginPrefs.savePendingClaim(context, cleanSub, cleanCode)
+                                    isLoading = true
+                                    onGoogleSignInClicked(
+                                        context = context,
+                                        credentialManager = credentialManager,
+                                        onAuthSuccess = {
+                                            isLoading = false
+                                            TrialSessionManager.deactivateTrial(context)
+                                            onAuthSuccess()
+                                        },
+                                        onAuthError = { msg ->
+                                            isLoading = false
+                                            errorMessage = msg
+                                        },
+                                        scope = scope,
+                                        onAuthCancelled = {
+                                            isLoading = false
+                                        }
+                                    )
+                                },
+                                enabled = !isLoading && !isCheckingAutoSignIn,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp)
+                                    .testTag("employee_google_sign_in_button")
+                            ) {
+                                Text(
+                                    text = "Sign in with Google as Employee",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -420,6 +604,14 @@ fun AuthScreen(
                         }
 
                         when {
+                            isLocallyDeviceBanned -> {
+                                Text(
+                                    text = "Trial logins are disabled because this device is banned from VOX.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = LiveCoral,
+                                    modifier = Modifier.testTag("trial_device_banned_notice")
+                                )
+                            }
                             !appConfig.trialLoginsEnabled -> {
                                 Text(
                                     text = "Trial logins are currently disabled by the Administrator. Please sign in with your Google email above.",

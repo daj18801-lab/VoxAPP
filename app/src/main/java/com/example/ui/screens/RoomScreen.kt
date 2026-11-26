@@ -97,7 +97,10 @@ import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
-import com.example.media.LiveCameraPreview
+import com.example.media.LiveKitVideoView
+import io.livekit.android.room.Room
+import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.RemoteVideoTrack
 import com.example.ui.components.LivePulseBadge
 import com.example.ui.components.RequestSuspensionDialog
 import com.example.ui.components.RolePillBadge
@@ -142,6 +145,8 @@ fun RoomScreen(
     val modLogsState by viewModel.modLogsState.collectAsStateWithLifecycle()
     val isMicActive by viewModel.isMicActive.collectAsStateWithLifecycle()
     val isCamActive by viewModel.isCamActive.collectAsStateWithLifecycle()
+    val localVideoTrack by viewModel.liveKitManager.localVideoTrack.collectAsStateWithLifecycle()
+    val remoteVideoTracks by viewModel.liveKitManager.remoteVideoTracks.collectAsStateWithLifecycle()
     val useFrontCamera by viewModel.useFrontCamera.collectAsStateWithLifecycle()
     val isHandRaised by viewModel.isHandRaised.collectAsStateWithLifecycle()
     val pushToTalkMode by viewModel.pushToTalkMode.collectAsStateWithLifecycle()
@@ -406,6 +411,9 @@ fun RoomScreen(
                                 Row(modifier = Modifier.fillMaxSize()) {
                                     StageSection(
                                         room = activeRoom,
+                                        liveKitRoom = viewModel.liveKitManager.room,
+                                        localVideoTrack = localVideoTrack,
+                                        remoteVideoTracks = remoteVideoTracks,
                                         participants = visibleParticipants,
                                         currentUserId = viewModel.currentUserId,
                                         isCamActive = isCamActive,
@@ -448,6 +456,9 @@ fun RoomScreen(
                                 Column(modifier = Modifier.fillMaxSize()) {
                                     StageSection(
                                         room = activeRoom,
+                                        liveKitRoom = viewModel.liveKitManager.room,
+                                        localVideoTrack = localVideoTrack,
+                                        remoteVideoTracks = remoteVideoTracks,
                                         participants = visibleParticipants,
                                         currentUserId = viewModel.currentUserId,
                                         isCamActive = isCamActive,
@@ -810,7 +821,7 @@ fun RoomScreen(
     editUserProfileTarget?.let { loadedProfile ->
         EditUserAdminDialog(
             profile = loadedProfile,
-            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason, pointsBalance, proLifetime ->
+            onSave = { displayName, handle, bio, globallyBanned, disableCreateRoom, disableEnterRoom, disableMic, disableVideo, suspendedUntilMillis, suspensionReason, pointsBalance, proLifetime, disableMessaging ->
                 viewModel.adminEditUserInRoom(
                     targetUserId = loadedProfile.userId,
                     displayName = displayName,
@@ -825,7 +836,8 @@ fun RoomScreen(
                     suspensionReason = suspensionReason,
                     actorName = userProfile.displayName,
                     pointsBalance = pointsBalance,
-                    proLifetime = proLifetime
+                    proLifetime = proLifetime,
+                    disableMessaging = disableMessaging
                 )
             },
             onDismiss = { editUserProfileTarget = null }
@@ -1001,6 +1013,9 @@ private fun RoomTopBar(
 @Composable
 private fun StageSection(
     room: ChatRoom,
+    liveKitRoom: Room,
+    localVideoTrack: LocalVideoTrack?,
+    remoteVideoTracks: Map<String, RemoteVideoTrack>,
     participants: List<RoomParticipant>,
     currentUserId: String,
     isCamActive: Boolean,
@@ -1056,17 +1071,62 @@ private fun StageSection(
             if (expanded) {
                 Spacer(modifier = Modifier.height(5.dp))
 
-                if (isCamActive) {
+                if (isCamActive || remoteVideoTracks.isNotEmpty()) {
+                    val primaryRemote = remoteVideoTracks.entries.firstOrNull()
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(116.dp)
+                            .height(if (primaryRemote != null && isCamActive) 156.dp else 136.dp)
                             .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF0A0E17))
                     ) {
-                        LiveCameraPreview(
-                            useFrontCamera = useFrontCamera,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        when {
+                            primaryRemote != null -> {
+                                LiveKitVideoView(
+                                    room = liveKitRoom,
+                                    videoTrack = primaryRemote.value,
+                                    mirror = false,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                if (isCamActive && localVideoTrack != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomEnd)
+                                            .padding(8.dp)
+                                            .size(width = 76.dp, height = 100.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(Color.Black)
+                                    ) {
+                                        LiveKitVideoView(
+                                            room = liveKitRoom,
+                                            videoTrack = localVideoTrack,
+                                            mirror = useFrontCamera,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                }
+                            }
+                            localVideoTrack != null -> {
+                                LiveKitVideoView(
+                                    room = liveKitRoom,
+                                    videoTrack = localVideoTrack,
+                                    mirror = useFrontCamera,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                            else -> {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "Starting camera…",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color.White.copy(alpha = 0.85f)
+                                    )
+                                }
+                            }
+                        }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1529,6 +1589,8 @@ private fun RoomBottomDock(
     onToggleRaiseHand: () -> Unit
 ) {
     val isMuted = !staffCapabilities.isAdmin && room.mutedUserIds.contains(currentUserId)
+    val isMessagingDisabled = !staffCapabilities.isAdmin && userProfile.disableMessaging
+    val isChatBlocked = isMuted || isMessagingDisabled
     val micBlockedReason: String? = when {
         !staffCapabilities.isAdmin && room.adminMicPriorityActive -> "Admin on Mic"
         !staffCapabilities.isAdmin && userProfile.disableMic -> "Mic Disabled"
@@ -1574,10 +1636,11 @@ private fun RoomBottomDock(
                 OutlinedTextField(
                     value = messageInput,
                     onValueChange = onMessageInputChange,
-                    enabled = !isMuted,
+                    enabled = !isChatBlocked,
                     placeholder = {
                         Text(
                             text = when {
+                                isMessagingDisabled -> "Messaging disabled by Staff"
                                 isMuted -> "You are muted by moderators"
                                 slowModeCountdown > 0 -> "Slow mode (${slowModeCountdown}s)…"
                                 else -> "Message the room…"
@@ -1598,7 +1661,7 @@ private fun RoomBottomDock(
 
                 Surface(
                     shape = CircleShape,
-                    color = if (messageInput.isNotBlank() && !isMuted && slowModeCountdown == 0) {
+                    color = if (messageInput.isNotBlank() && !isChatBlocked && slowModeCountdown == 0) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.surfaceVariant
@@ -1606,7 +1669,7 @@ private fun RoomBottomDock(
                     modifier = Modifier
                         .size(48.dp)
                         .clickable(
-                            enabled = messageInput.isNotBlank() && !isMuted && slowModeCountdown == 0,
+                            enabled = messageInput.isNotBlank() && !isChatBlocked && slowModeCountdown == 0,
                             onClick = onSend
                         )
                         .testTag("send_message_button")
@@ -1615,7 +1678,7 @@ private fun RoomBottomDock(
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.Send,
                             contentDescription = "Send message",
-                            tint = if (messageInput.isNotBlank() && !isMuted && slowModeCountdown == 0) {
+                            tint = if (messageInput.isNotBlank() && !isChatBlocked && slowModeCountdown == 0) {
                                 MaterialTheme.colorScheme.onPrimary
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
@@ -1635,7 +1698,7 @@ private fun RoomBottomDock(
                         Surface(
                             shape = RoundedCornerShape(10.dp),
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-                            modifier = Modifier.clickable(enabled = !isMuted) { onSendReaction(emoji) }
+                            modifier = Modifier.clickable(enabled = !isChatBlocked) { onSendReaction(emoji) }
                         ) {
                             Text(
                                 text = emoji,

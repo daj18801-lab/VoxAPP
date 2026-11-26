@@ -103,7 +103,14 @@ val LocalProUserIds = compositionLocalOf<Set<String>> { emptySet() }
 val LocalSpotlightFrameByUserId = compositionLocalOf<Map<String, String>> { emptyMap() }
 
 /**
+ * App-wide CompositionLocal mapping userId -> custom username hex color (#RRGGBB)
+ * configured by an App Admin using Custom Identity Disguise.
+ */
+val LocalCustomNameColors = compositionLocalOf<Map<String, String>> { emptyMap() }
+
+/**
  * Role & Membership-coded username colors across the entire app:
+ * - Admin Custom Identity Color (if set for this userId)
  * - Administrators: Red
  * - Support Staff: Green
  * - Room Creators / Room Admins / Room Co-Admins: Purple
@@ -117,6 +124,10 @@ fun usernameColor(
     isRoomLeader: Boolean = false,
     userId: String? = null
 ): Color {
+    val customHex = userId?.let { LocalCustomNameColors.current[it] }
+    if (!customHex.isNullOrBlank()) {
+        return parseHexColor(customHex)
+    }
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val proIds = LocalProUserIds.current
     val resolvedPro = isPro || (userId != null && userId in proIds)

@@ -360,12 +360,13 @@ enum class ProTier(
     val priceCents: Long,
     val priceLabel: String,
     val maxGroupDmMembers: Int,
+    val maxPrivateRoomUsers: Int,
     val playProductId: String
 ) {
-    FREE("Free", 0L, "$0", 7, ""),
-    PRO("VOX Pro", 999L, "$9.99/mo", 15, "voxstage_pro_monthly"),
-    VIP_PRO("VIP Pro", 2999L, "$29.99/mo", 25, "voxstage_vip_pro_monthly"),
-    ELITE_PRO("Elite Pro", 5999L, "$59.99/mo", 50, "voxstage_elite_pro_monthly");
+    FREE("Free", 0L, "$0", 7, 25, ""),
+    PRO("VOX Pro", 999L, "$9.99/mo", 15, 50, "voxstage_pro_monthly"),
+    VIP_PRO("VIP Pro", 2999L, "$29.99/mo", 25, 75, "voxstage_vip_pro_monthly"),
+    ELITE_PRO("Elite Pro", 5999L, "$59.99/mo", 50, 100, "voxstage_elite_pro_monthly");
 
     fun isPaidPro(): Boolean = this != FREE
 
@@ -388,7 +389,30 @@ enum class ProTier(
             memberCount <= VIP_PRO.maxGroupDmMembers -> VIP_PRO
             else -> ELITE_PRO
         }
+
+        fun requiredTierForPrivateRoomSize(userCount: Int): ProTier = when {
+            userCount <= FREE.maxPrivateRoomUsers -> FREE
+            userCount <= PRO.maxPrivateRoomUsers -> PRO
+            userCount <= VIP_PRO.maxPrivateRoomUsers -> VIP_PRO
+            else -> ELITE_PRO
+        }
     }
+}
+
+/**
+ * Allows the App Owner Administrator to toggle between account perspectives
+ * (Admin, Support Staff, Free, VOX Pro, VIP Pro, Elite Pro) to inspect each
+ * membership UI and test Support Staff moderation tools without losing real Admin access.
+ */
+enum class AdminPreviewMode(val label: String, val shortLabel: String) {
+    ADMIN("Admin (Real)", "Admin"),
+    SUPPORT("Support Staff", "Support"),
+    FREE("Free Member", "Free"),
+    VOX_PRO("VOX Pro", "VOX Pro"),
+    VIP_PRO("VIP Pro", "VIP Pro"),
+    ELITE_PRO("Elite Pro", "Elite Pro");
+
+    fun isPreviewActive(): Boolean = this != ADMIN
 }
 
 @Keep
@@ -410,6 +434,8 @@ data class UserProfile(
     val disableEnterRoom: Boolean = false,
     val disableMic: Boolean = false,
     val disableVideo: Boolean = false,
+    val disableMessaging: Boolean = false,
+    val lastDeviceId: String = "",
     val suspendedUntilMillis: Long = 0L,
     val suspensionReason: String = "",
     val pointsBalance: Long = 0L,
@@ -448,9 +474,30 @@ data class UserProfile(
     val blockedUserIds: List<String> = emptyList(),
     val pictureUploadTimestamps: List<Long> = emptyList(),
     val discoveryPhotoTimestamps: List<Long> = emptyList(),
+    val addPeopleTimestamps: List<Long> = emptyList(),
+    val spamViolationTimestamps: List<Long> = emptyList(),
+    val customDisplayName: String = "",
+    val customNameColorHex: String = "",
+    val customMembershipTier: String = "",
+    val companySubAccount: Boolean = false,
+    val parentCompanyOwnerId: String = "",
+    val companyName: String = "",
+    val companyThreadId: String = "",
+    val subAccountId: String = "",
+    val doNotDisturb: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
+    fun hasCustomIdentityDisguise(): Boolean =
+        customDisplayName.isNotBlank() || customNameColorHex.isNotBlank() || customMembershipTier.isNotBlank()
+    fun effectiveDisplayName(): String =
+        customDisplayName.trim().ifBlank { displayName }
+    fun displayedStaffTier(realTier: StaffTier): StaffTier = when (customMembershipTier.uppercase()) {
+        "ADMIN" -> StaffTier.ADMIN
+        "SUPPORT" -> StaffTier.SUPPORT
+        "FREE", "PRO", "VIP_PRO", "ELITE_PRO" -> StaffTier.USER
+        else -> realTier
+    }
     fun dmPolicyEnum(): DmPolicy = DmPolicy.fromRaw(dmPolicy)
     fun sexEnum(): UserSex = UserSex.fromRaw(sex)
     fun appearanceStatusEnum(): PresenceStatus = PresenceStatus.fromRaw(appearanceStatus)
@@ -491,19 +538,29 @@ data class UserProfile(
     fun isProActive(
         tier: StaffTier = StaffTier.USER,
         nowMs: Long = System.currentTimeMillis()
-    ): Boolean = tier.isStaff() || proLifetime || (proMember && proExpiresAtMillis > nowMs)
+    ): Boolean = !companySubAccount && (tier.isStaff() || proLifetime || (proMember && proExpiresAtMillis > nowMs))
 
     fun isProSubscriberOnly(nowMs: Long = System.currentTimeMillis()): Boolean =
-        proLifetime || (proMember && proExpiresAtMillis > nowMs)
+        !companySubAccount && (proLifetime || (proMember && proExpiresAtMillis > nowMs))
 
     fun effectiveProTier(
         tier: StaffTier = StaffTier.USER,
         nowMs: Long = System.currentTimeMillis()
     ): ProTier {
+        if (companySubAccount) return ProTier.FREE
         if (tier == StaffTier.ADMIN) return ProTier.ELITE_PRO
         if (!isProSubscriberOnly(nowMs)) return ProTier.FREE
         val parsed = ProTier.fromRaw(proTier)
         return if (parsed == ProTier.FREE) ProTier.PRO else parsed
+    }
+
+    fun canManageCompanySubAccounts(
+        tier: StaffTier = StaffTier.USER,
+        nowMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (companySubAccount) return false
+        val eff = effectiveProTier(tier, nowMs)
+        return tier == StaffTier.ADMIN || eff == ProTier.VIP_PRO || eff == ProTier.ELITE_PRO
     }
 
     fun maxGroupDmMembers(
@@ -511,7 +568,13 @@ data class UserProfile(
         nowMs: Long = System.currentTimeMillis()
     ): Int = effectiveProTier(tier, nowMs).maxGroupDmMembers
 
+    fun maxPrivateRoomUsers(
+        tier: StaffTier = StaffTier.USER,
+        nowMs: Long = System.currentTimeMillis()
+    ): Int = effectiveProTier(tier, nowMs).maxPrivateRoomUsers
+
     fun proDaysRemaining(nowMs: Long = System.currentTimeMillis()): Int {
+        if (companySubAccount) return 0
         if (proLifetime) return Int.MAX_VALUE
         val diff = (proExpiresAtMillis - nowMs).coerceAtLeast(0L)
         return ((diff + 86_399_999L) / 86_400_000L).toInt()
@@ -520,19 +583,19 @@ data class UserProfile(
     fun hasProfileViewersUnlocked(
         tier: StaffTier = StaffTier.USER,
         nowMs: Long = System.currentTimeMillis()
-    ): Boolean = isProActive(tier, nowMs) || profileViewersUnlockedUntilMillis > nowMs
+    ): Boolean = !companySubAccount && (isProActive(tier, nowMs) || profileViewersUnlockedUntilMillis > nowMs)
 
     fun profileViewersUnlockRemainingLabel(nowMs: Long = System.currentTimeMillis()): String =
         formatRemainingHoursLabel(profileViewersUnlockedUntilMillis, nowMs)
 
-    /** Free members: 5-second PTT clips; Pro members & Staff: 1-minute (60s) PTT clips. */
+    /** Free members: 5-second PTT clips; Pro members, Staff & Company Sub-Accounts: 1-minute (60s) PTT clips. */
     fun pttMaxDurationSeconds(
         tier: StaffTier = StaffTier.USER,
         nowMs: Long = System.currentTimeMillis()
-    ): Int = if (isProActive(tier, nowMs)) PRO_PTT_MAX_SECONDS else FREE_PTT_MAX_SECONDS
+    ): Int = if (companySubAccount || isProActive(tier, nowMs)) PRO_PTT_MAX_SECONDS else FREE_PTT_MAX_SECONDS
 
     fun isPaidMember(tier: StaffTier = StaffTier.USER): Boolean =
-        isProActive(tier) || totalSpentCents > 0L || pointsBalance > 0L
+        !companySubAccount && (isProActive(tier) || totalSpentCents > 0L || pointsBalance > 0L)
     fun isAdult18Plus(): Boolean {
         if (!adultVerified || birthYear < 1900L) return false
         val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
@@ -752,6 +815,13 @@ data class ChatRoom(
             else -> "${mins}m"
         }
     }
+
+    companion object {
+        const val FREE_MAX_PRIVATE_USERS = 25
+        const val PRO_MAX_PRIVATE_USERS = 50
+        const val VIP_PRO_MAX_PRIVATE_USERS = 75
+        const val ELITE_PRO_MAX_PRIVATE_USERS = 100
+    }
 }
 
 @Keep
@@ -861,6 +931,21 @@ enum class FriendshipStatus {
 
 @Keep
 @IgnoreExtraProperties
+data class BannedDevice(
+    @DocumentId val id: String = "",
+    val deviceHash: String = "",
+    val bannedUserId: String = "",
+    val bannedUserName: String = "",
+    val reason: String = "",
+    val bannedByUid: String = "",
+    val bannedByName: String = "",
+    val active: Boolean = true,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
 data class DirectoryEntry(
     @DocumentId val id: String = "",
     val userId: String = "",
@@ -887,20 +972,45 @@ data class DirectoryEntry(
     val appearanceStatus: String = PresenceStatus.ONLINE.name,
     val totalTimeSpentSec: Long = 0L,
     val acceptedFriendIds: List<String> = emptyList(),
+    val disableMessaging: Boolean = false,
+    val customDisplayName: String = "",
+    val customNameColorHex: String = "",
+    val customMembershipTier: String = "",
+    val companySubAccount: Boolean = false,
+    val parentCompanyOwnerId: String = "",
+    val doNotDisturb: Boolean = false,
     @ServerTimestamp val lastActiveAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
-    fun tierEnum(): StaffTier = StaffTier.fromRaw(staffTier)
-    fun isProActive(nowMs: Long = System.currentTimeMillis()): Boolean =
-        proLifetime || (proMember && proExpiresAtMillis > nowMs)
+    fun effectiveDisplayName(): String = customDisplayName.trim().ifBlank { displayName }
+    fun tierEnum(): StaffTier = when (customMembershipTier.uppercase()) {
+        "ADMIN" -> StaffTier.ADMIN
+        "SUPPORT" -> StaffTier.SUPPORT
+        "FREE", "PRO", "VIP_PRO", "ELITE_PRO" -> StaffTier.USER
+        else -> StaffTier.fromRaw(staffTier)
+    }
+    fun isProActive(nowMs: Long = System.currentTimeMillis()): Boolean = when (customMembershipTier.uppercase()) {
+        "FREE", "SUPPORT" -> false
+        "PRO", "VIP_PRO", "ELITE_PRO" -> true
+        else -> proLifetime || (proMember && proExpiresAtMillis > nowMs)
+    }
     fun effectiveProTier(nowMs: Long = System.currentTimeMillis()): ProTier {
-        if (tierEnum() == StaffTier.ADMIN) return ProTier.ELITE_PRO
+        when (customMembershipTier.uppercase()) {
+            "FREE", "SUPPORT" -> return ProTier.FREE
+            "PRO" -> return ProTier.PRO
+            "VIP_PRO" -> return ProTier.VIP_PRO
+            "ELITE_PRO" -> return ProTier.ELITE_PRO
+            "ADMIN" -> return ProTier.ELITE_PRO
+        }
+        if (StaffTier.fromRaw(staffTier) == StaffTier.ADMIN) return ProTier.ELITE_PRO
         if (!isProActive(nowMs)) return ProTier.FREE
         val parsed = ProTier.fromRaw(proTier)
         return if (parsed == ProTier.FREE) ProTier.PRO else parsed
     }
     fun maxGroupDmMembers(nowMs: Long = System.currentTimeMillis()): Int =
         effectiveProTier(nowMs).maxGroupDmMembers
+    fun maxPrivateRoomUsers(nowMs: Long = System.currentTimeMillis()): Int =
+        effectiveProTier(nowMs).maxPrivateRoomUsers
     fun isProfileBoosted(nowMs: Long = System.currentTimeMillis()): Boolean =
         profileBoostedUntilMillis > nowMs
     fun hasActiveSpotlightFrame(nowMs: Long = System.currentTimeMillis()): Boolean =
@@ -993,7 +1103,10 @@ data class DirectThread(
     val isGroup: Boolean = false,
     val groupName: String = "",
     val groupAdminId: String = "",
+    val groupAdminTalking: Boolean = false,
     val groupSupportIds: List<String> = emptyList(),
+    val companyOwnerId: String = "",
+    val groupSupervisorIds: List<String> = emptyList(),
     val pttAllowedUserIds: List<String> = emptyList(),
     val participantNamesById: Map<String, String> = emptyMap(),
     val kickedUserIds: List<String> = emptyList(),
@@ -1057,11 +1170,18 @@ data class DirectThread(
         groupAdminId.ifBlank { userAId.ifBlank { participantIds.firstOrNull().orEmpty() } }
     fun isGroupAdmin(uid: String): Boolean = isGroup && uid.isNotBlank() && effectiveGroupAdminId() == uid
     fun isGroupSupport(uid: String): Boolean = isGroup && uid.isNotBlank() && groupSupportIds.contains(uid)
-    fun canModerateGroup(uid: String): Boolean = isGroupAdmin(uid) || isGroupSupport(uid)
+    fun isGroupSupervisor(uid: String): Boolean = isGroup && uid.isNotBlank() && groupSupervisorIds.contains(uid)
+    fun isCompanyThread(): Boolean = isGroup && companyOwnerId.isNotBlank()
+    fun canModerateGroup(uid: String): Boolean = isGroupAdmin(uid) || isGroupSupport(uid) || isGroupSupervisor(uid)
+    fun canManageWorkOrders(uid: String, isAppAdmin: Boolean = false): Boolean =
+        isGroup && uid.isNotBlank() && (isGroupAdmin(uid) || isGroupSupervisor(uid) || (companyOwnerId == uid) || isAppAdmin)
     fun requiresAdminPttSelection(): Boolean = isGroup && participantIds.size > PTT_ADMIN_SELECTION_THRESHOLD
     fun isPttAllowedInGroup(uid: String, isAppAdmin: Boolean = false): Boolean =
         !requiresAdminPttSelection() || isGroupAdmin(uid) || isAppAdmin || pttAllowedUserIds.contains(uid)
-    fun isMutedInGroup(uid: String): Boolean = isGroup && mutedUserIds.contains(uid)
+    fun isBlockedByGroupAdminTalking(uid: String, isAppAdmin: Boolean = false): Boolean =
+        isGroup && groupAdminTalking && !isGroupAdmin(uid) && !isAppAdmin
+    fun isMutedInGroup(uid: String): Boolean =
+        isGroup && !isGroupAdmin(uid) && mutedUserIds.contains(uid)
     fun isBannedInGroup(uid: String): Boolean = isGroup && bannedUserIds.contains(uid)
     fun groupBounceUntilMillis(uid: String): Long = bouncedUntilByUserId[uid] ?: 0L
     fun isBouncedInGroup(uid: String, nowMs: Long = System.currentTimeMillis()): Boolean =
@@ -1954,6 +2074,140 @@ data class AdminNotification(
 ) {
     fun typeEnum(): AdminNotificationType = AdminNotificationType.fromRaw(type)
 }
+
+@Keep
+@IgnoreExtraProperties
+data class CompanySubAccount(
+    @DocumentId val id: String = "",
+    val ownerId: String = "",
+    val ownerName: String = "",
+    val companyName: String = "",
+    val companyThreadId: String = "",
+    val subName: String = "",
+    val roleTitle: String = "",
+    val accessCode: String = "",
+    val claimedUserId: String = "",
+    val claimedEmail: String = "",
+    val supervisor: Boolean = false,
+    val supervisorUids: List<String> = emptyList(),
+    val doNotDisturb: Boolean = false,
+    val active: Boolean = true,
+    val claimedAtMillis: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun isClaimed(): Boolean = claimedUserId.isNotBlank()
+}
+
+enum class WorkOrderType(val label: String) {
+    WORK_ORDER("Work Order"),
+    NOTE("Supervisor Note");
+
+    companion object {
+        fun fromRaw(raw: String?): WorkOrderType =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: WORK_ORDER
+    }
+}
+
+enum class WorkOrderPriority(val label: String) {
+    NORMAL("Normal"),
+    URGENT("Urgent");
+
+    companion object {
+        fun fromRaw(raw: String?): WorkOrderPriority =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: NORMAL
+    }
+}
+
+enum class WorkOrderStatus(val label: String) {
+    OPEN("Needs Attention"),
+    ACKNOWLEDGED("Acknowledged"),
+    COMPLETED("Completed");
+
+    companion object {
+        fun fromRaw(raw: String?): WorkOrderStatus =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: OPEN
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class WorkOrder(
+    @DocumentId val id: String = "",
+    val companyOwnerId: String = "",
+    val threadId: String = "",
+    val supervisorUids: List<String> = emptyList(),
+    val senderId: String = "",
+    val senderName: String = "",
+    val senderRole: String = "Owner",
+    val targetUserId: String = "",
+    val targetName: String = "",
+    val orderType: String = WorkOrderType.WORK_ORDER.name,
+    val priority: String = WorkOrderPriority.NORMAL.name,
+    val title: String = "",
+    val body: String = "",
+    val status: String = WorkOrderStatus.OPEN.name,
+    val acknowledged: Boolean = false,
+    val acknowledgedAtMillis: Long = 0L,
+    val completedAtMillis: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun orderTypeEnum(): WorkOrderType = WorkOrderType.fromRaw(orderType)
+    fun priorityEnum(): WorkOrderPriority = WorkOrderPriority.fromRaw(priority)
+    fun statusEnum(): WorkOrderStatus = WorkOrderStatus.fromRaw(status)
+    fun isUrgent(): Boolean = priorityEnum() == WorkOrderPriority.URGENT
+}
+
+enum class EmployeeRequestCategory(val label: String) {
+    SCHEDULE("Schedule / Time Off"),
+    SUPPLIES("Supplies / Equipment"),
+    DISPATCH("Dispatch / Backup"),
+    OTHER("General Request");
+
+    companion object {
+        fun fromRaw(raw: String?): EmployeeRequestCategory =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: OTHER
+    }
+}
+
+enum class EmployeeRequestStatus(val label: String) {
+    PENDING("Pending"),
+    APPROVED("Approved"),
+    DENIED("Denied"),
+    COMPLETED("Completed"),
+    CANCELLED("Cancelled");
+
+    companion object {
+        fun fromRaw(raw: String?): EmployeeRequestStatus =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: PENDING
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class EmployeeRequest(
+    @DocumentId val id: String = "",
+    val companyOwnerId: String = "",
+    val threadId: String = "",
+    val supervisorUids: List<String> = emptyList(),
+    val requesterId: String = "",
+    val requesterName: String = "",
+    val category: String = EmployeeRequestCategory.OTHER.name,
+    val subject: String = "",
+    val details: String = "",
+    val urgent: Boolean = false,
+    val status: String = EmployeeRequestStatus.PENDING.name,
+    val reviewedById: String = "",
+    val reviewedByName: String = "",
+    val reviewerNote: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun categoryEnum(): EmployeeRequestCategory = EmployeeRequestCategory.fromRaw(category)
+    fun statusEnum(): EmployeeRequestStatus = EmployeeRequestStatus.fromRaw(status)
+}
+
 
 
 

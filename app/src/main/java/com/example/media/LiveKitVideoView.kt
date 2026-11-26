@@ -5,14 +5,18 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
-import io.livekit.android.renderer.SurfaceViewRenderer
+import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.VideoTrack
 import livekit.org.webrtc.RendererCommon
 
 /**
- * Renders a LiveKit [VideoTrack] (local or remote) inside Jetpack Compose
- * using LiveKit's [SurfaceViewRenderer] with safe lifecycle cleanup.
+ * Renders a LiveKit [VideoTrack] (local or remote) inside Jetpack Compose using
+ * LiveKit's [TextureViewRenderer].
+ *
+ * Unlike SurfaceViewRenderer (which punches a separate hardware window hole and can vanish
+ * or clip black inside Compose Cards/LazyLists/animated containers), TextureViewRenderer
+ * composites cleanly inside the Compose view hierarchy.
  */
 @Composable
 fun LiveKitVideoView(
@@ -22,7 +26,7 @@ fun LiveKitVideoView(
     mirror: Boolean = false
 ) {
     val boundTrackHolder = remember { arrayOfNulls<VideoTrack>(1) }
-    val rendererHolder = remember { arrayOfNulls<SurfaceViewRenderer>(1) }
+    val rendererHolder = remember { arrayOfNulls<TextureViewRenderer>(1) }
 
     DisposableEffect(videoTrack) {
         val view = rendererHolder[0]
@@ -48,7 +52,7 @@ fun LiveKitVideoView(
     AndroidView(
         modifier = modifier,
         factory = { context ->
-            SurfaceViewRenderer(context).apply {
+            TextureViewRenderer(context).apply {
                 runCatching {
                     room.initVideoRenderer(this)
                     setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)

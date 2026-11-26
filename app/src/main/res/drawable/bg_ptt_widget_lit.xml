@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Outer glowing ON AIR halo -->
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:centerColor="#CCFF3B30"
+                android:endColor="#22FF9500"
+                android:gradientRadius="44dp"
+                android:startColor="#FFFF4D4F"
+                android:type="radial" />
+        </shape>
+    </item>
+    <!-- Lit bright neon coral/amber active transmit core -->
+    <item
+        android:bottom="5dp"
+        android:left="5dp"
+        android:right="5dp"
+        android:top="5dp">
+        <shape android:shape="oval">
+            <gradient
+                android:angle="135"
+                android:endColor="#FF2D55"
+                android:startColor="#FF6B35"
+                android:type="linear" />
+            <stroke
+                android:width="3dp"
+                android:color="#FFF59D" />
+        </shape>
+    </item>
+</layer-list>
