@@ -28,6 +28,7 @@ import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -136,6 +137,23 @@ object LivePttSessionManager {
     private val _isFloatingPttEnabled = MutableStateFlow(true)
     val isFloatingPttEnabled: StateFlow<Boolean> = _isFloatingPttEnabled.asStateFlow()
 
+    data class FloatingClosePrompt(
+        val threadId: String,
+        val peerName: String
+    )
+
+    /** Non-null when the user tapped X on the floating PTT button and we should ask whether to end PTT or keep it docked in DM. */
+    private val _pendingFloatingClosePrompt = MutableStateFlow<FloatingClosePrompt?>(null)
+    val pendingFloatingClosePrompt: StateFlow<FloatingClosePrompt?> = _pendingFloatingClosePrompt.asStateFlow()
+
+    /**
+     * When the user closes the floating PTT button and chooses NOT to end the PTT stream,
+     * this holds the thread ID so the floating overlay stays hidden and a matching 68dp circle
+     * PTT button docks at the bottom-right of that Private DM (double-tap to float again).
+     */
+    private val _floatingButtonDockedThreadId = MutableStateFlow<String?>(null)
+    val floatingButtonDockedThreadId: StateFlow<String?> = _floatingButtonDockedThreadId.asStateFlow()
+
     /** True = User enabled PTT Voice-to-Text so outgoing PTT also posts a voice-to-text message. */
     private val _isPttVoiceToTextEnabled = MutableStateFlow(false)
     val isPttVoiceToTextEnabled: StateFlow<Boolean> = _isPttVoiceToTextEnabled.asStateFlow()
@@ -143,6 +161,14 @@ object LivePttSessionManager {
     /** True = Lock-Screen Do Not Disturb is active: incoming PTT audio is muted & converted to voice-to-text. */
     private val _isLockScreenDndEnabled = MutableStateFlow(false)
     val isLockScreenDndEnabled: StateFlow<Boolean> = _isLockScreenDndEnabled.asStateFlow()
+
+    /** True = Lock-Screen PTT overlay can launch when the screen locks during active PTT. */
+    private val _isLockScreenPttEnabled = MutableStateFlow(true)
+    val isLockScreenPttEnabled: StateFlow<Boolean> = _isLockScreenPttEnabled.asStateFlow()
+
+    /** True = Hardware Volume Down button acts as Push-to-Talk while PTT is active. */
+    private val _isVolumeDownPttEnabled = MutableStateFlow(true)
+    val isVolumeDownPttEnabled: StateFlow<Boolean> = _isVolumeDownPttEnabled.asStateFlow()
 
     /** True = Active DM thread requires auto voice-to-text (someone enabled VTT or DND in the thread). */
     private val _threadRequiresVoiceToText = MutableStateFlow(false)
@@ -155,6 +181,25 @@ object LivePttSessionManager {
     /** True when every other participant in the active thread has Do Not Disturb turned on. */
     @Volatile
     private var allOtherRecipientsInDnd: Boolean = false
+
+    private data class ThreadPttPolicy(
+        val senderSelfVttOn: Boolean,
+        val hasAnyLiveListener: Boolean,
+        val anyNeedsVtt: Boolean,
+        val allOthersInDnd: Boolean,
+        val myDndActive: Boolean,
+        val myListenOnlyOn: Boolean
+    )
+
+    private val threadPttPolicyById = ConcurrentHashMap<String, ThreadPttPolicy>()
+
+    /** True when the current LiveKit connection is listen-only (user can hear PTT audio without broadcasting back). */
+    private val _isListenOnlyMode = MutableStateFlow(false)
+    val isListenOnlyMode: StateFlow<Boolean> = _isListenOnlyMode.asStateFlow()
+
+    /** True while an active press is capturing Voice-to-Text only (no live audio transmitted). */
+    private val _isVoiceToTextOnlyTransmitting = MutableStateFlow(false)
+    val isVoiceToTextOnlyTransmitting: StateFlow<Boolean> = _isVoiceToTextOnlyTransmitting.asStateFlow()
 
     /** Live partial transcript while speaking with PTT Voice-to-Text enabled. */
     private val _livePttTranscript = MutableStateFlow("")
@@ -191,6 +236,10 @@ object LivePttSessionManager {
     private val _lastIncomingBeep = MutableStateFlow<IncomingPttBeep?>(null)
     val lastIncomingBeep: StateFlow<IncomingPttBeep?> = _lastIncomingBeep.asStateFlow()
 
+    /** Incremented whenever a PTT Beep is sent so UI countdowns/remaining badges refresh immediately. */
+    private val _beepLimitVersion = MutableStateFlow(0L)
+    val beepLimitVersion: StateFlow<Long> = _beepLimitVersion.asStateFlow()
+
     fun setMaxDurationSeconds(seconds: Int) {
         _maxPttSeconds.value = seconds.coerceIn(5, 60)
     }
@@ -213,29 +262,48 @@ object LivePttSessionManager {
         val floatingEnabled = DirectMessageNotificationPrefs.isFloatingPttEnabled(appContext)
         val vttEnabled = DirectMessageNotificationPrefs.isPttVoiceToTextEnabled(appContext)
         val lockDndEnabled = DirectMessageNotificationPrefs.isLockScreenDndEnabled(appContext)
+        val lockScreenPttEnabled = DirectMessageNotificationPrefs.isLockScreenPttEnabled(appContext)
+        val volumeDownPttEnabled = DirectMessageNotificationPrefs.isVolumeDownPttEnabled(appContext)
         _isLoudspeakerEnabled.value = speaker
         _isPttSilentMode.value = silent
         _isBeepSilenced.value = beepSilent
         _isFloatingPttEnabled.value = floatingEnabled
         _isPttVoiceToTextEnabled.value = vttEnabled
         _isLockScreenDndEnabled.value = lockDndEnabled
+        _isLockScreenPttEnabled.value = lockScreenPttEnabled
+        _isVolumeDownPttEnabled.value = volumeDownPttEnabled
         liveKitManager?.setAudioOutputLoudspeaker(speaker)
         recomputeRemoteAudioMute()
     }
 
     fun syncActiveThreadPttFlags(context: Context, thread: DirectThread, currentUserId: String) {
+        if (thread.id.isBlank()) return
+        val policy = ThreadPttPolicy(
+            senderSelfVttOn = thread.isPttVoiceToTextEnabledFor(currentUserId),
+            hasAnyLiveListener = thread.hasAnyLiveAudioListenerOtherThan(currentUserId),
+            anyNeedsVtt = thread.shouldAutoTranscribePttFrom(currentUserId),
+            allOthersInDnd = thread.areAllOtherParticipantsInDnd(currentUserId),
+            myDndActive = thread.isPttDndEnabledFor(currentUserId),
+            myListenOnlyOn = thread.isPttListenOnlyEnabledFor(currentUserId)
+        )
+        threadPttPolicyById[thread.id] = policy
         val activeTid = _activeThreadId.value
-        if (activeTid.isNullOrBlank() || thread.id != activeTid) return
-        _threadRequiresVoiceToText.value = thread.shouldAutoTranscribePttFrom(currentUserId)
-        _threadDndActiveForMe.value = thread.isPttDndEnabledFor(currentUserId)
-        allOtherRecipientsInDnd = thread.areAllOtherParticipantsInDnd(currentUserId)
-        recomputeRemoteAudioMute()
+        if (activeTid.isNullOrBlank() || thread.id == activeTid) {
+            _threadRequiresVoiceToText.value = policy.anyNeedsVtt
+            _threadDndActiveForMe.value = policy.myDndActive
+            allOtherRecipientsInDnd = policy.allOthersInDnd
+            recomputeRemoteAudioMute()
+        }
     }
 
     fun setPttVoiceToTextEnabled(context: Context, enabled: Boolean) {
         val appContext = context.applicationContext
         _isPttVoiceToTextEnabled.value = enabled
         DirectMessageNotificationPrefs.setPttVoiceToTextEnabled(appContext, enabled)
+        if (enabled && _isTransmitting.value && !_isVoiceToTextOnlyTransmitting.value) {
+            scope.launch { liveKitManager?.setMicEnabled(false) }
+            setTransmitting(appContext, false)
+        }
         triggerPttHaptic(appContext)
         val tid = _activeThreadId.value
         if (!tid.isNullOrBlank()) {
@@ -263,6 +331,31 @@ object LivePttSessionManager {
         setLockScreenDndEnabled(context, !_isLockScreenDndEnabled.value)
     }
 
+    fun setLockScreenPttEnabled(context: Context, enabled: Boolean) {
+        val appContext = context.applicationContext
+        _isLockScreenPttEnabled.value = enabled
+        DirectMessageNotificationPrefs.setLockScreenPttEnabled(appContext, enabled)
+        triggerPttHaptic(appContext)
+    }
+
+    fun toggleLockScreenPtt(context: Context) {
+        setLockScreenPttEnabled(context, !_isLockScreenPttEnabled.value)
+    }
+
+    fun setVolumeDownPttEnabled(context: Context, enabled: Boolean) {
+        val appContext = context.applicationContext
+        _isVolumeDownPttEnabled.value = enabled
+        DirectMessageNotificationPrefs.setVolumeDownPttEnabled(appContext, enabled)
+        if (!enabled) {
+            handleHardwarePttKey(appContext, pressed = false)
+        }
+        triggerPttHaptic(appContext)
+    }
+
+    fun toggleVolumeDownPtt(context: Context) {
+        setVolumeDownPttEnabled(context, !_isVolumeDownPttEnabled.value)
+    }
+
     fun clearPttTranscriptFeedback() {
         _lastPttTranscriptFeedback.value = null
     }
@@ -287,10 +380,12 @@ object LivePttSessionManager {
                 if (thread.hasAnyBlock() || thread.isUserKicked(uid) || !thread.participantIds.contains(uid)) {
                     return@runCatching
                 }
-                val currentList = if (fieldName == "pttDndUserIds") {
-                    thread.pttDndUserIds
-                } else {
-                    thread.pttVoiceToTextUserIds
+                val currentList = when (fieldName) {
+                    "pttDndUserIds" -> thread.pttDndUserIds
+                    "pttVoiceToTextUserIds" -> thread.pttVoiceToTextUserIds
+                    "pttEnabledUserIds" -> thread.pttEnabledUserIds
+                    "pttListenOnlyUserIds" -> thread.pttListenOnlyUserIds
+                    else -> return@runCatching
                 }
                 val updatedList = if (enabled) {
                     if (currentList.contains(uid)) return@runCatching
@@ -353,6 +448,17 @@ object LivePttSessionManager {
         }
     }
 
+    private fun finishVttOnlyCaptureStateIfActive() {
+        if (_isVoiceToTextOnlyTransmitting.value) {
+            transmitLimitJob?.cancel()
+            transmitLimitJob = null
+            _isTransmitting.value = false
+            _isVoiceToTextOnlyTransmitting.value = false
+            _transmittingElapsedSec.value = 0
+            scope.launch { liveKitManager?.setMicEnabled(false) }
+        }
+    }
+
     private fun stopPttSpeechCaptureAndSend(appContext: Context) {
         mainHandler.post {
             if (!pttSpeechCapturing) return@post
@@ -363,11 +469,15 @@ object LivePttSessionManager {
                 if (pttSpeechCapturing) {
                     val targetTid = pttSpeechTargetThreadId
                     val captured = _livePttTranscript.value.trim()
+                    val wasVttOnly = _isVoiceToTextOnlyTransmitting.value || _isPttVoiceToTextEnabled.value || _isPttSilentMode.value
                     pttSpeechCapturing = false
                     pttSpeechTargetThreadId = ""
                     _livePttTranscript.value = ""
+                    finishVttOnlyCaptureStateIfActive()
                     if (targetTid.isNotBlank() && captured.isNotBlank()) {
                         sendTranscribedPttMessage(appContext.applicationContext, targetTid, captured)
+                    } else if (wasVttOnly) {
+                        _lastPttTranscriptFeedback.value = "Didn't catch any speech — hold PTT and speak clearly."
                     }
                 }
             }
@@ -402,6 +512,7 @@ object LivePttSessionManager {
                 pttSpeechFallbackRunnable = null
                 val targetTid = pttSpeechTargetThreadId
                 val ctx = pttSpeechAppContext ?: appContext
+                val wasVttOnly = _isVoiceToTextOnlyTransmitting.value || _isPttVoiceToTextEnabled.value || _isPttSilentMode.value
                 val finalText = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
@@ -411,8 +522,11 @@ object LivePttSessionManager {
                 pttSpeechCapturing = false
                 pttSpeechTargetThreadId = ""
                 _livePttTranscript.value = ""
+                finishVttOnlyCaptureStateIfActive()
                 if (targetTid.isNotBlank() && finalText.isNotBlank()) {
                     sendTranscribedPttMessage(ctx, targetTid, finalText)
+                } else if (wasVttOnly) {
+                    _lastPttTranscriptFeedback.value = "Didn't catch any speech — hold PTT and speak clearly."
                 }
             }
 
@@ -421,12 +535,24 @@ object LivePttSessionManager {
                 pttSpeechFallbackRunnable = null
                 val targetTid = pttSpeechTargetThreadId
                 val ctx = pttSpeechAppContext ?: appContext
+                val wasVttOnly = _isVoiceToTextOnlyTransmitting.value || _isPttVoiceToTextEnabled.value || _isPttSilentMode.value
                 val partial = _livePttTranscript.value.trim()
                 pttSpeechCapturing = false
                 pttSpeechTargetThreadId = ""
                 _livePttTranscript.value = ""
+                finishVttOnlyCaptureStateIfActive()
                 if (targetTid.isNotBlank() && partial.isNotBlank()) {
                     sendTranscribedPttMessage(ctx, targetTid, partial)
+                } else if (wasVttOnly) {
+                    _lastPttTranscriptFeedback.value = when (error) {
+                        SpeechRecognizer.ERROR_AUDIO -> "Audio recording error — check microphone."
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is required."
+                        SpeechRecognizer.ERROR_NETWORK,
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network error during voice-to-text."
+                        SpeechRecognizer.ERROR_NO_MATCH,
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Didn't catch that — hold PTT and speak clearly."
+                        else -> "Voice-to-text interrupted — try again."
+                    }
                 }
             }
 
@@ -457,13 +583,22 @@ object LivePttSessionManager {
                     return@runCatching
                 }
                 val profileSnap = runCatching { db.collection("users").document(uid).get().await() }.getOrNull()
-                if (profileSnap?.getBoolean("messagingDisabled") == true) return@runCatching
+                if (profileSnap?.getBoolean("disableMessaging") == true ||
+                    profileSnap?.getBoolean("messagingDisabled") == true
+                ) return@runCatching
                 val staffSnap = runCatching { db.collection("staffRoles").document(uid).get().await() }.getOrNull()
-                val senderName = profileSnap?.getString("displayName")?.trim()?.takeIf { it.isNotBlank() }
+                val senderName = profileSnap?.getString("customDisplayName")?.trim()?.takeIf { it.isNotBlank() }
+                    ?: profileSnap?.getString("displayName")?.trim()?.takeIf { it.isNotBlank() }
                     ?: cachedMyDisplayName.takeIf { it.isNotBlank() && it != "Member" }
                     ?: Firebase.auth.currentUser?.displayName?.trim()?.takeIf { it.isNotBlank() }
                     ?: "Member"
-                val senderTier = StaffTier.fromRaw(staffSnap?.getString("staffTier"))
+                val realTier = StaffTier.fromRaw(staffSnap?.getString("staffTier"))
+                val senderTier = when (profileSnap?.getString("customMembershipTier")?.trim()?.uppercase()) {
+                    "ADMIN" -> StaffTier.ADMIN
+                    "SUPPORT" -> StaffTier.SUPPORT
+                    "FREE", "PRO", "VIP_PRO", "BUSINESS" -> StaffTier.USER
+                    else -> realTier
+                }
 
                 val msgRef = threadRef.collection("messages").document()
                 val msgPayload = mapOf(
@@ -497,9 +632,17 @@ object LivePttSessionManager {
         }
     }
 
+    private fun shouldShowFloatingOverlayFor(threadId: String?): Boolean {
+        return !_isListenOnlyMode.value &&
+            _isFloatingPttEnabled.value &&
+            (threadId.isNullOrBlank() || _floatingButtonDockedThreadId.value != threadId)
+    }
+
     fun setFloatingPttEnabled(context: Context, enabled: Boolean) {
         val appContext = context.applicationContext
         _isFloatingPttEnabled.value = enabled
+        _floatingButtonDockedThreadId.value = null
+        _pendingFloatingClosePrompt.value = null
         DirectMessageNotificationPrefs.setFloatingPttEnabled(appContext, enabled)
         val tid = _activeThreadId.value
         val peer = _activePeerName.value
@@ -511,13 +654,232 @@ object LivePttSessionManager {
                 threadId = tid,
                 peerName = peer,
                 isTransmitting = _isTransmitting.value,
-                showFloatingOverlay = true
+                showFloatingOverlay = shouldShowFloatingOverlayFor(tid)
             )
         }
     }
 
     fun toggleFloatingPttEnabled(context: Context) {
         setFloatingPttEnabled(context, !_isFloatingPttEnabled.value)
+    }
+
+    /** Called when user taps close (X) on the floating PTT button while the app is open. */
+    fun requestFloatingPttClosePrompt(threadId: String? = _activeThreadId.value, peerName: String? = _activePeerName.value) {
+        val tid = threadId?.takeIf { it.isNotBlank() } ?: _activeThreadId.value ?: return
+        val peer = peerName?.takeIf { it.isNotBlank() } ?: _activePeerName.value.ifBlank { "Private Chat" }
+        _pendingFloatingClosePrompt.value = FloatingClosePrompt(threadId = tid, peerName = peer)
+    }
+
+    fun dismissFloatingPttClosePrompt() {
+        _pendingFloatingClosePrompt.value = null
+    }
+
+    /**
+     * User closed the floating PTT button and chose to KEEP the PTT stream open.
+     * Hides the floating overlay and docks a matching circle PTT button inside the Private DM.
+     */
+    fun dockFloatingPttToDm(context: Context, threadId: String? = _activeThreadId.value) {
+        val appContext = context.applicationContext
+        val tid = threadId?.takeIf { it.isNotBlank() } ?: _activeThreadId.value
+        _pendingFloatingClosePrompt.value = null
+        if (!tid.isNullOrBlank()) {
+            _floatingButtonDockedThreadId.value = tid
+        }
+        setTransmitting(appContext, false, threadId = tid)
+        PrivateCallForegroundService.hideFloatingPttOverlay(appContext)
+    }
+
+    /**
+     * User double-tapped the docked circle PTT button inside the Private DM to reopen the floating PTT button.
+     */
+    fun reopenFloatingPttFromDock(context: Context) {
+        val appContext = context.applicationContext
+        _floatingButtonDockedThreadId.value = null
+        _pendingFloatingClosePrompt.value = null
+        _isFloatingPttEnabled.value = true
+        DirectMessageNotificationPrefs.setFloatingPttEnabled(appContext, true)
+        triggerPttHaptic(appContext)
+        val tid = _activeThreadId.value
+        val peer = _activePeerName.value
+        if (!tid.isNullOrBlank() && (_isConnected.value || _isConnecting.value)) {
+            PrivateCallForegroundService.startPtt(
+                context = appContext,
+                threadId = tid,
+                peerName = peer,
+                isTransmitting = _isTransmitting.value,
+                showFloatingOverlay = !_isListenOnlyMode.value
+            )
+        }
+    }
+
+    /**
+     * User chose to END the PTT stream completely: disconnects live audio, stops foreground service,
+     * disables PTT for the current user in Firestore (so the PTT Live button is deselected in DM),
+     * and notifies the DM user(s) that they disconnected from Push-to-Talk.
+     */
+    fun endPttSessionAndDisableInThread(
+        context: Context,
+        threadId: String? = _activeThreadId.value,
+        disconnectAllDmThreads: Boolean = false,
+        notifyDmUsers: Boolean = true,
+        senderDisplayNameOverride: String? = null,
+        senderTierOverride: StaffTier? = null
+    ) {
+        val appContext = context.applicationContext
+        val primaryTid = threadId?.takeIf { it.isNotBlank() } ?: _activeThreadId.value
+        _pendingFloatingClosePrompt.value = null
+        _floatingButtonDockedThreadId.value = null
+        disconnect(appContext)
+
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val uid = Firebase.auth.currentUser?.uid
+                    ?: cachedMyUserId.takeIf { it.isNotBlank() }
+                    ?: return@runCatching
+                val databaseId = appContext.getString(R.string.firestore_database_id)
+                val db = FirebaseFirestore.getInstance(databaseId)
+
+                // Collect all DM threads where this user is a participant and has PTT Live or Listen-Only enabled
+                val threadsById = linkedMapOf<String, DirectThread>()
+                if (!primaryTid.isNullOrBlank()) {
+                    runCatching {
+                        val snap = db.collection("directThreads").document(primaryTid).get().await()
+                        snap.toObject(DirectThread::class.java)?.let { t ->
+                            val resolved = if (t.id.isBlank()) t.copy(id = snap.id) else t
+                            threadsById[resolved.id] = resolved
+                        }
+                    }
+                }
+                if (disconnectAllDmThreads) {
+                    runCatching {
+                        val myThreadsSnap = db.collection("directThreads")
+                            .whereArrayContains("participantIds", uid)
+                            .get()
+                            .await()
+                        myThreadsSnap.documents.forEach { doc ->
+                            doc.toObject(DirectThread::class.java)?.let { t ->
+                                val resolved = if (t.id.isBlank()) t.copy(id = doc.id) else t
+                                if (resolved.pttEnabledUserIds.contains(uid) ||
+                                    resolved.pttListenOnlyUserIds.contains(uid)
+                                ) {
+                                    threadsById[resolved.id] = resolved
+                                }
+                            }
+                        }
+                    }
+                }
+                if (threadsById.isEmpty()) return@runCatching
+
+                // Resolve effective display name & displayed staff tier once
+                val profileSnap = runCatching { db.collection("users").document(uid).get().await() }.getOrNull()
+                val staffSnap = runCatching { db.collection("staffRoles").document(uid).get().await() }.getOrNull()
+                val messagingDisabled = profileSnap?.getBoolean("disableMessaging") == true ||
+                    profileSnap?.getBoolean("messagingDisabled") == true
+                val senderName = senderDisplayNameOverride?.trim()?.takeIf { it.isNotBlank() }
+                    ?: profileSnap?.getString("customDisplayName")?.trim()?.takeIf { it.isNotBlank() }
+                    ?: profileSnap?.getString("displayName")?.trim()?.takeIf { it.isNotBlank() }
+                    ?: cachedMyDisplayName.takeIf { it.isNotBlank() && it != "Member" }
+                    ?: Firebase.auth.currentUser?.displayName?.trim()?.takeIf { it.isNotBlank() }
+                    ?: "Member"
+                val realTier = StaffTier.fromRaw(staffSnap?.getString("staffTier"))
+                val senderTier = senderTierOverride ?: when (profileSnap?.getString("customMembershipTier")?.trim()?.uppercase()) {
+                    "ADMIN" -> StaffTier.ADMIN
+                    "SUPPORT" -> StaffTier.SUPPORT
+                    "FREE", "PRO", "VIP_PRO", "BUSINESS" -> StaffTier.USER
+                    else -> realTier
+                }
+
+                val noticeText = "📡 ${senderName.take(40)} disconnected from Push-to-Talk"
+
+                threadsById.values.forEach { thread ->
+                    if (thread.id.isBlank() ||
+                        thread.hasAnyBlock() ||
+                        thread.isUserKicked(uid) ||
+                        !thread.participantIds.contains(uid)
+                    ) {
+                        return@forEach
+                    }
+                    val hadPttEnabled = thread.pttEnabledUserIds.contains(uid)
+                    val hadListenOnly = thread.pttListenOnlyUserIds.contains(uid)
+                    if (!hadPttEnabled && !hadListenOnly && thread.id != primaryTid) {
+                        return@forEach
+                    }
+
+                    val threadRef = db.collection("directThreads").document(thread.id)
+
+                    // Perform each list toggle in its own rules-compliant update (diffKeys.hasOnly)
+                    if (hadPttEnabled) {
+                        val nextPttEnabled = thread.pttEnabledUserIds.filter { it != uid }
+                        runCatching {
+                            threadRef.update(
+                                mapOf(
+                                    "pttEnabledUserIds" to nextPttEnabled,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }.onFailure { err ->
+                            Log.w(TAG, "Failed clearing pttEnabledUserIds on ${thread.id}", err)
+                        }
+                    }
+                    if (hadListenOnly) {
+                        val nextListenOnly = thread.pttListenOnlyUserIds.filter { it != uid }
+                        runCatching {
+                            threadRef.update(
+                                mapOf(
+                                    "pttListenOnlyUserIds" to nextListenOnly,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }.onFailure { err ->
+                            Log.w(TAG, "Failed clearing pttListenOnlyUserIds on ${thread.id}", err)
+                        }
+                    }
+
+                    val canNotify = notifyDmUsers &&
+                        !thread.voxOfficial &&
+                        !messagingDisabled &&
+                        !thread.isMutedInGroup(uid) &&
+                        !thread.isBouncedInGroup(uid) &&
+                        !thread.isBannedInGroup(uid)
+
+                    if (canNotify) {
+                        runCatching {
+                            val msgRef = threadRef.collection("messages").document()
+                            val msgPayload = mutableMapOf<String, Any>(
+                                "threadId" to thread.id,
+                                "participantIds" to thread.participantIds,
+                                "senderId" to uid,
+                                "senderName" to senderName.take(40),
+                                "senderTier" to senderTier.name,
+                                "text" to noticeText.take(500),
+                                "messageType" to com.example.data.DirectMessage.TYPE_SUPPORT_HANDOFF,
+                                "createdAt" to FieldValue.serverTimestamp()
+                            )
+                            if (thread.companyOwnerId.isNotBlank()) {
+                                msgPayload["companyOwnerId"] = thread.companyOwnerId
+                            }
+                            val unreadRecipients = thread.participantIds.filter { it != uid }
+                            val batch = db.batch()
+                            batch.set(msgRef, msgPayload)
+                            batch.update(
+                                threadRef,
+                                mapOf(
+                                    "lastMessageText" to noticeText.take(300),
+                                    "lastMessageSenderId" to uid,
+                                    "unreadByUserIds" to unreadRecipients,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            )
+                            batch.commit().await()
+                        }.onFailure { err ->
+                            Log.w(TAG, "Failed notifying DM thread ${thread.id} of PTT disconnect", err)
+                        }
+                    }
+                }
+            }.onFailure { err ->
+                Log.w(TAG, "Failed disconnecting DM PTT connections", err)
+            }
+        }
     }
 
     fun setThreadGroupAdminState(
@@ -584,6 +946,10 @@ object LivePttSessionManager {
         _isPttSilentMode.value = silent
         DirectMessageNotificationPrefs.setPttSilentModeEnabled(appContext, silent)
         recomputeRemoteAudioMute()
+        if (silent && _isTransmitting.value && !_isVoiceToTextOnlyTransmitting.value) {
+            scope.launch { liveKitManager?.setMicEnabled(false) }
+            setTransmitting(appContext, false)
+        }
         triggerPttHaptic(appContext)
     }
 
@@ -616,9 +982,40 @@ object LivePttSessionManager {
         )
     }
 
+    private fun resolveTargetBeepThreadId(appContext: Context, threadId: String?): String {
+        val prefs = appContext.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+        return threadId?.takeIf { it.isNotBlank() }
+            ?: _activeThreadId.value?.takeIf { it.isNotBlank() }
+            ?: prefs.getString(KEY_LAST_THREAD_ID, "").orEmpty()
+    }
+
+    private fun resolveRateLimitUserId(appContext: Context): String {
+        val prefs = appContext.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+        return Firebase.auth.currentUser?.uid
+            ?: cachedMyUserId.takeIf { it.isNotBlank() }
+            ?: prefs.getString(KEY_LAST_USER_ID, "").orEmpty().ifBlank { "local" }
+    }
+
+    fun getRemainingPttBeeps(context: Context, threadId: String? = _activeThreadId.value): Int {
+        val appContext = context.applicationContext
+        val targetThreadId = resolveTargetBeepThreadId(appContext, threadId)
+        if (targetThreadId.isBlank()) return DirectMessageNotificationPrefs.PTT_BEEP_MAX_PER_WINDOW
+        val uid = resolveRateLimitUserId(appContext)
+        return DirectMessageNotificationPrefs.remainingPttBeepsInWindow(appContext, uid, targetThreadId)
+    }
+
+    fun getPttBeepCooldownSeconds(context: Context, threadId: String? = _activeThreadId.value): Int {
+        val appContext = context.applicationContext
+        val targetThreadId = resolveTargetBeepThreadId(appContext, threadId)
+        if (targetThreadId.isBlank()) return 0
+        val uid = resolveRateLimitUserId(appContext)
+        return DirectMessageNotificationPrefs.pttBeepCooldownRemainingSeconds(appContext, uid, targetThreadId)
+    }
+
     /**
-     * Sends a real-time PTT "Beep" tone to the active PTT group or user via Firestore so
-     * recipients hear the walkie-talkie beep immediately (even in PTT Silent Mode unless they silenced beeps).
+     * Sends a real-time PTT "Beep" & vibration alert to the active PTT group or user via Firestore so
+     * recipients hear the walkie-talkie beep and feel their phone vibrate immediately.
+     * Rate-limited to 5 beeps per 3-minute rolling window per user/channel.
      */
     fun sendPttBeep(
         context: Context,
@@ -627,9 +1024,7 @@ object LivePttSessionManager {
     ) {
         val appContext = context.applicationContext
         val prefs = appContext.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
-        val targetThreadId = threadId?.takeIf { it.isNotBlank() }
-            ?: _activeThreadId.value?.takeIf { it.isNotBlank() }
-            ?: prefs.getString(KEY_LAST_THREAD_ID, "").orEmpty()
+        val targetThreadId = resolveTargetBeepThreadId(appContext, threadId)
         val targetPeerName = _activePeerName.value.ifBlank {
             prefs.getString(KEY_LAST_PEER_NAME, "").orEmpty().ifBlank { "PTT channel" }
         }
@@ -637,6 +1032,33 @@ object LivePttSessionManager {
             onResult?.invoke(Result.failure(IllegalStateException("No active PTT channel to beep.")))
             return
         }
+
+        val rateLimitUid = resolveRateLimitUserId(appContext)
+        val cooldownSec = DirectMessageNotificationPrefs.pttBeepCooldownRemainingSeconds(
+            context = appContext,
+            uid = rateLimitUid,
+            threadId = targetThreadId
+        )
+        if (cooldownSec > 0) {
+            val mins = cooldownSec / 60
+            val secs = cooldownSec % 60
+            val waitText = if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
+            triggerPttHaptic(appContext)
+            _beepLimitVersion.value = System.currentTimeMillis()
+            onResult?.invoke(
+                Result.failure(
+                    IllegalStateException("Beep limit reached (5 every 3 min). Try again in $waitText.")
+                )
+            )
+            return
+        }
+
+        val remainingAfter = DirectMessageNotificationPrefs.recordSentPttBeep(
+            context = appContext,
+            uid = rateLimitUid,
+            threadId = targetThreadId
+        )
+        _beepLimitVersion.value = System.currentTimeMillis()
 
         triggerPttHaptic(appContext)
         if (!DirectMessageNotificationPrefs.isPttBeepSilenced(appContext)) {
@@ -652,8 +1074,9 @@ object LivePttSessionManager {
                 val db = FirebaseFirestore.getInstance(databaseId)
                 val senderName = cachedMyDisplayName.takeIf { it.isNotBlank() && it != "Member" }
                     ?: runCatching {
-                        db.collection("users").document(uid).get().await()
-                            .getString("displayName")?.trim()
+                        val snap = db.collection("users").document(uid).get().await()
+                        snap.getString("customDisplayName")?.trim()?.takeIf { it.isNotBlank() }
+                            ?: snap.getString("displayName")?.trim()
                     }.getOrNull()?.takeIf { it.isNotBlank() }
                     ?: Firebase.auth.currentUser?.displayName?.trim()?.takeIf { it.isNotBlank() }
                     ?: "Member"
@@ -668,7 +1091,7 @@ object LivePttSessionManager {
                         )
                     )
                     .await()
-                "Beep sent to $targetPeerName!"
+                "Beep & vibrate sent to $targetPeerName! ($remainingAfter/5 left)"
             }
             launch(Dispatchers.Main.immediate) {
                 onResult?.invoke(outcome)
@@ -719,6 +1142,13 @@ object LivePttSessionManager {
         context.applicationContext
             .getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
             .getString(KEY_LAST_PEER_NAME, "")
+            .orEmpty()
+    }.getOrDefault("")
+
+    fun getSavedLastThreadId(context: Context): String = runCatching {
+        context.applicationContext
+            .getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_THREAD_ID, "")
             .orEmpty()
     }.getOrDefault("")
 
@@ -878,7 +1308,7 @@ object LivePttSessionManager {
                 threadId = tid,
                 peerName = peer,
                 isTransmitting = _isTransmitting.value,
-                showFloatingOverlay = _isFloatingPttEnabled.value
+                showFloatingOverlay = shouldShowFloatingOverlayFor(tid)
             )
         }
     }
@@ -893,7 +1323,7 @@ object LivePttSessionManager {
                 threadId = tid,
                 peerName = peer,
                 isTransmitting = _isTransmitting.value,
-                showFloatingOverlay = _isFloatingPttEnabled.value
+                showFloatingOverlay = shouldShowFloatingOverlayFor(tid)
             )
         }
     }
@@ -923,12 +1353,13 @@ object LivePttSessionManager {
         saveLastSession(appContext, threadId, cleanPeer, myUserId, cachedMyDisplayName)
 
         if (_activeThreadId.value == threadId && (_isConnected.value || _isConnecting.value)) {
+            _isListenOnlyMode.value = false
             PrivateCallForegroundService.startPtt(
                 context = appContext,
                 threadId = threadId,
                 peerName = cleanPeer,
                 isTransmitting = _isTransmitting.value,
-                showFloatingOverlay = _isFloatingPttEnabled.value
+                showFloatingOverlay = shouldShowFloatingOverlayFor(threadId)
             )
             VoxPttWidgetProvider.requestUpdate(appContext)
             return
@@ -944,7 +1375,40 @@ object LivePttSessionManager {
         }
 
         scope.launch {
-            connectInternal(appContext, threadId, cleanPeer, myUserId, cachedMyDisplayName)
+            connectInternal(appContext, threadId, cleanPeer, myUserId, cachedMyDisplayName, listenOnly = false)
+        }
+    }
+
+    /**
+     * Connects to the DM's live PTT channel in Listen-Only mode (no microphone permission or
+     * broadcast capability needed), so users who do not have Live PTT enabled — including
+     * sub-accounts or users whose PTT broadcast is restricted by an admin — can choose to hear
+     * live incoming PTT audio.
+     */
+    fun ensureConnectedListenOnly(
+        context: Context,
+        threadId: String,
+        peerName: String,
+        myUserId: String,
+        myDisplayName: String
+    ) {
+        if (threadId.isBlank() || myUserId.isBlank()) return
+        if (_suppressedForCallThreadId.value == threadId) {
+            Log.d(TAG, "Listen-only PTT connect suppressed for $threadId while private voice/video call is active")
+            return
+        }
+        val appContext = context.applicationContext
+        cachedMyUserId = myUserId
+        cachedMyDisplayName = myDisplayName.ifBlank { "Member" }
+        val cleanPeer = peerName.ifBlank { "Private Chat" }
+        _activePeerName.value = cleanPeer
+
+        if (_activeThreadId.value == threadId && (_isConnected.value || _isConnecting.value)) {
+            return
+        }
+
+        scope.launch {
+            connectInternal(appContext, threadId, cleanPeer, myUserId, cachedMyDisplayName, listenOnly = true)
         }
     }
 
@@ -953,7 +1417,8 @@ object LivePttSessionManager {
         threadId: String,
         peerName: String,
         myUserId: String,
-        myDisplayName: String
+        myDisplayName: String,
+        listenOnly: Boolean = false
     ): Boolean {
         // Disconnect any previous thread cleanly
         if (_activeThreadId.value != null && _activeThreadId.value != threadId) {
@@ -1004,13 +1469,14 @@ object LivePttSessionManager {
             onSuccess = {
                 _isConnected.value = true
                 _isTransmitting.value = false
+                _isListenOnlyMode.value = listenOnly
                 manager.setAudioOutputLoudspeaker(_isLoudspeakerEnabled.value)
                 recomputeRemoteAudioMute()
                 manager.setMicEnabled(false) // Standby listen mode until PTT pressed
-                if (_isLockScreenDndEnabled.value) {
+                if (!listenOnly && _isLockScreenDndEnabled.value) {
                     syncSelfThreadListFieldInFirestore(appContext, threadId, "pttDndUserIds", true)
                 }
-                if (_isPttVoiceToTextEnabled.value) {
+                if (!listenOnly && _isPttVoiceToTextEnabled.value) {
                     syncSelfThreadListFieldInFirestore(appContext, threadId, "pttVoiceToTextUserIds", true)
                 }
                 PrivateCallForegroundService.startPtt(
@@ -1018,7 +1484,7 @@ object LivePttSessionManager {
                     threadId = threadId,
                     peerName = peerName,
                     isTransmitting = false,
-                    showFloatingOverlay = _isFloatingPttEnabled.value
+                    showFloatingOverlay = !listenOnly && shouldShowFloatingOverlayFor(threadId)
                 )
                 VoxPttWidgetProvider.requestUpdate(appContext)
                 true
@@ -1035,7 +1501,10 @@ object LivePttSessionManager {
 
     /**
      * Streams live audio when [transmitting] is true, and immediately mutes when false.
-     * Never writes an audio message into the chat history.
+     * When [forceVoiceToTextOnly] is true — or when the sender enabled PTT Voice-to-Text in the DM,
+     * or no other participant has Live PTT / Live Audio Listen-Only enabled — this captures
+     * Voice-to-Text ONLY and sends the transcribed text into the Private DM without transmitting
+     * live audio to anyone.
      */
     fun setTransmitting(
         context: Context,
@@ -1043,7 +1512,8 @@ object LivePttSessionManager {
         threadId: String? = _activeThreadId.value,
         peerName: String? = _activePeerName.value,
         myUserId: String = cachedMyUserId,
-        myDisplayName: String = cachedMyDisplayName
+        myDisplayName: String = cachedMyDisplayName,
+        forceVoiceToTextOnly: Boolean = false
     ) {
         val appContext = context.applicationContext
         val hasMicPermission = ContextCompat.checkSelfPermission(
@@ -1062,16 +1532,70 @@ object LivePttSessionManager {
             val name = myDisplayName.ifBlank { cachedMyDisplayName }
 
             if (transmitting) {
+                if (_isListenOnlyMode.value && !forceVoiceToTextOnly) {
+                    _limitReachedEvents.tryEmit("Live Audio is in listen-only mode for this chat.")
+                    return@launch
+                }
                 // Non-admin members cannot transmit while the Group DM Admin holds priority mic
                 val isGroupAdminForTarget = groupAdminThreadId == targetThreadId
                 if (!isGroupAdminForTarget && _blockedByGroupAdminThreadId.value == targetThreadId) {
                     _limitReachedEvents.tryEmit("Group DM Admin has priority mic — please wait until they finish speaking.")
                     return@launch
                 }
+                val policy = threadPttPolicyById[targetThreadId]
+                val voiceToTextOnly = forceVoiceToTextOnly ||
+                    _isPttVoiceToTextEnabled.value ||
+                    _isPttSilentMode.value ||
+                    (policy?.senderSelfVttOn == true) ||
+                    (policy != null && !policy.hasAnyLiveListener) ||
+                    (policy?.allOthersInDnd ?: allOtherRecipientsInDnd)
+
+                if (voiceToTextOnly) {
+                    // Voice-to-Text ONLY mode (Voice-to-Text ON, PTT Silent ON, or no live listener):
+                    // NEVER transmit live audio to anyone — transcribe and send as text to the PTT chat.
+                    if (uid.isNotBlank()) cachedMyUserId = uid
+                    if (name.isNotBlank()) cachedMyDisplayName = name
+                    if (_activeThreadId.value.isNullOrBlank()) {
+                        _activeThreadId.value = targetThreadId
+                        _activePeerName.value = targetPeer
+                    }
+                    liveKitManager?.setMicEnabled(false)
+                    if (!_isTransmitting.value && !_isPttSilentMode.value) {
+                        PttChirpSoundEngine.playKeyDown(_activePttChirp.value)
+                    }
+                    _isVoiceToTextOnlyTransmitting.value = true
+                    _isTransmitting.value = true
+                    _transmittingElapsedSec.value = 0
+                    startPttSpeechCapture(appContext, targetThreadId)
+                    transmitLimitJob?.cancel()
+                    val limitSec = if (isGroupAdminForTarget) 60 else _maxPttSeconds.value.coerceIn(5, 60)
+                    transmitLimitJob = scope.launch {
+                        for (elapsed in 1..limitSec) {
+                            delay(1_000L)
+                            if (!isActive || !_isTransmitting.value) return@launch
+                            _transmittingElapsedSec.value = elapsed
+                        }
+                        if (isActive && _isTransmitting.value) {
+                            _isTransmitting.value = false
+                            _isVoiceToTextOnlyTransmitting.value = false
+                            _transmittingElapsedSec.value = 0
+                            liveKitManager?.setMicEnabled(false)
+                            if (pttSpeechCapturing) {
+                                stopPttSpeechCaptureAndSend(appContext)
+                            }
+                            if (!_isPttSilentMode.value) {
+                                PttChirpSoundEngine.playKeyUp(_activePttChirp.value)
+                            }
+                            _completedPttThreadEvents.tryEmit(targetThreadId)
+                        }
+                    }
+                    return@launch
+                }
+
                 val ready = if (liveKitManager?.isConnected?.value == true && _activeThreadId.value == targetThreadId) {
                     true
                 } else if (uid.isNotBlank()) {
-                    connectInternal(appContext, targetThreadId, targetPeer, uid, name)
+                    connectInternal(appContext, targetThreadId, targetPeer, uid, name, listenOnly = false)
                 } else {
                     false
                 }
@@ -1079,29 +1603,24 @@ object LivePttSessionManager {
                 if (!_isTransmitting.value) {
                     PttChirpSoundEngine.playKeyDown(_activePttChirp.value)
                 }
+                _isVoiceToTextOnlyTransmitting.value = false
                 _isTransmitting.value = true
                 _transmittingElapsedSec.value = 0
                 onTransmittingStateChanged?.invoke(targetThreadId, true)
                 if (isGroupAdminForTarget) {
                     updateGroupAdminTalkingInFirestore(appContext, targetThreadId, true)
                 }
-                val shouldTranscribe = _isPttVoiceToTextEnabled.value || _threadRequiresVoiceToText.value
-                if (shouldTranscribe && allOtherRecipientsInDnd) {
-                    // All recipients have Do Not Disturb active: dedicate mic to Voice-to-Text
-                    liveKitManager?.setMicEnabled(false)
+                val shouldTranscribe = _isPttVoiceToTextEnabled.value || (policy?.anyNeedsVtt ?: _threadRequiresVoiceToText.value)
+                liveKitManager?.setMicEnabled(true)
+                if (shouldTranscribe) {
                     startPttSpeechCapture(appContext, targetThreadId)
-                } else {
-                    liveKitManager?.setMicEnabled(true)
-                    if (shouldTranscribe) {
-                        startPttSpeechCapture(appContext, targetThreadId)
-                    }
                 }
                 PrivateCallForegroundService.startPtt(
                     context = appContext,
                     threadId = targetThreadId,
                     peerName = targetPeer,
                     isTransmitting = true,
-                    showFloatingOverlay = _isFloatingPttEnabled.value
+                    showFloatingOverlay = shouldShowFloatingOverlayFor(targetThreadId)
                 )
                 VoxPttWidgetProvider.requestUpdate(appContext)
                 transmitLimitJob?.cancel()
@@ -1114,6 +1633,7 @@ object LivePttSessionManager {
                     }
                     if (isActive && _isTransmitting.value) {
                         _isTransmitting.value = false
+                        _isVoiceToTextOnlyTransmitting.value = false
                         _transmittingElapsedSec.value = 0
                         onTransmittingStateChanged?.invoke(targetThreadId, false)
                         if (isGroupAdminForTarget) {
@@ -1130,7 +1650,7 @@ object LivePttSessionManager {
                                 threadId = targetThreadId,
                                 peerName = targetPeer,
                                 isTransmitting = false,
-                                showFloatingOverlay = _isFloatingPttEnabled.value
+                                showFloatingOverlay = shouldShowFloatingOverlayFor(targetThreadId)
                             )
                         }
                         VoxPttWidgetProvider.requestUpdate(appContext)
@@ -1145,11 +1665,13 @@ object LivePttSessionManager {
                 }
             } else {
                 val wasTx = _isTransmitting.value
+                val wasVttOnly = _isVoiceToTextOnlyTransmitting.value
                 transmitLimitJob?.cancel()
                 transmitLimitJob = null
                 _isTransmitting.value = false
+                _isVoiceToTextOnlyTransmitting.value = false
                 _transmittingElapsedSec.value = 0
-                if (wasTx) {
+                if (wasTx && !wasVttOnly) {
                     onTransmittingStateChanged?.invoke(targetThreadId, false)
                     if (groupAdminThreadId == targetThreadId) {
                         updateGroupAdminTalkingInFirestore(appContext, targetThreadId, false)
@@ -1160,7 +1682,9 @@ object LivePttSessionManager {
                     stopPttSpeechCaptureAndSend(appContext)
                 }
                 if (wasTx) {
-                    PttChirpSoundEngine.playKeyUp(_activePttChirp.value)
+                    if (!_isPttSilentMode.value) {
+                        PttChirpSoundEngine.playKeyUp(_activePttChirp.value)
+                    }
                     _completedPttThreadEvents.tryEmit(targetThreadId)
                 }
                 if (_isConnected.value) {
@@ -1169,7 +1693,7 @@ object LivePttSessionManager {
                         threadId = targetThreadId,
                         peerName = targetPeer,
                         isTransmitting = false,
-                        showFloatingOverlay = _isFloatingPttEnabled.value
+                        showFloatingOverlay = shouldShowFloatingOverlayFor(targetThreadId)
                     )
                 }
                 VoxPttWidgetProvider.requestUpdate(appContext)
@@ -1211,6 +1735,8 @@ object LivePttSessionManager {
         cancelPttSpeechCapture()
         _isConnected.value = false
         _isConnecting.value = false
+        _isListenOnlyMode.value = false
+        _isVoiceToTextOnlyTransmitting.value = false
         _isBlockedByGroupAdminTalking.value = false
         _threadRequiresVoiceToText.value = false
         _threadDndActiveForMe.value = false
@@ -1218,6 +1744,8 @@ object LivePttSessionManager {
         _remoteSpeakingName.value = null
         _activeThreadId.value = null
         _activePeerName.value = ""
+        _floatingButtonDockedThreadId.value = null
+        _pendingFloatingClosePrompt.value = null
         if (stopService && PrivateCallForegroundService.isPttMode) {
             PrivateCallForegroundService.stop(appContext)
         } else if (stopService && PrivateCallForegroundService.activeThreadId == prevThread) {

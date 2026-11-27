@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -493,10 +494,12 @@ fun PriorityBreakInChirpDialog(
 /**
  * High-contrast Priority Break-In Chirp card pinned at the very top of ChatsHomeScreen.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PriorityChirpPinnedInboxCard(
     thread: DirectThread,
     onOpenThread: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isUrgent = thread.lastPriorityChirpPoints >= 2
@@ -510,7 +513,10 @@ fun PriorityChirpPinnedInboxCard(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 4.dp)
-            .clickable(onClick = onOpenThread)
+            .combinedClickable(
+                onClick = onOpenThread,
+                onLongClick = onLongClick
+            )
             .testTag("priority_chirp_inbox_card_${thread.id}")
     ) {
         Row(

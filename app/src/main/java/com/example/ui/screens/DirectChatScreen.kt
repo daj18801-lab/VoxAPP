@@ -14,6 +14,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -59,6 +65,8 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Login
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.AdminPanelSettings
@@ -72,12 +80,15 @@ import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.DoNotDisturbOn
 import androidx.compose.material.icons.rounded.Flag
+import androidx.compose.material.icons.rounded.Gavel
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.automirrored.rounded.VolumeDown
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.NotificationsActive
@@ -85,6 +96,7 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Podcasts
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Screenshot
@@ -173,6 +185,7 @@ import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.VoxStageNotificationState
 import com.example.ui.components.FullScreenPhotoDialog
 import com.example.ui.components.PresenceStatusDot
+import com.example.ui.components.DockedCirclePttButton
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TalkStreakBadge
@@ -283,9 +296,15 @@ fun DirectChatScreen(
     val pttElapsedSec by LivePttSessionManager.transmittingElapsedSec.collectAsStateWithLifecycle()
     val pttMaxSec by LivePttSessionManager.maxPttSeconds.collectAsStateWithLifecycle()
     val isFloatingPttEnabled by LivePttSessionManager.isFloatingPttEnabled.collectAsStateWithLifecycle()
+    val isLockScreenPttEnabled by LivePttSessionManager.isLockScreenPttEnabled.collectAsStateWithLifecycle()
+    val isVolumeDownPttEnabled by LivePttSessionManager.isVolumeDownPttEnabled.collectAsStateWithLifecycle()
+    val floatingDockedThreadId by LivePttSessionManager.floatingButtonDockedThreadId.collectAsStateWithLifecycle()
+    val activePttTheme by LivePttSessionManager.activePttTheme.collectAsStateWithLifecycle()
     val isGlobalPttVttEnabled by LivePttSessionManager.isPttVoiceToTextEnabled.collectAsStateWithLifecycle()
     val livePttTranscript by LivePttSessionManager.livePttTranscript.collectAsStateWithLifecycle()
     val remoteCallSpeakerName by viewModel.remoteCallSpeakerName.collectAsStateWithLifecycle()
+    val myEffectiveName = userProfile.effectiveDisplayName().ifBlank { "Member" }
+    val myDisplayedStaffTier = userProfile.displayedStaffTier(myStaffTier)
     val myMaxPttSeconds = userProfile.pttMaxDurationSeconds(myStaffTier)
     val isThisThreadLivePttConnected = pttActiveThreadId == viewModel.threadId && pttIsConnected
     val isThisThreadLivePttConnecting = pttActiveThreadId == viewModel.threadId && pttIsConnecting
@@ -343,12 +362,13 @@ fun DirectChatScreen(
                 val caption = composerText.trim()
                 composerText = ""
                 viewModel.sendMessage(
-                    senderName = userProfile.displayName,
+                    senderName = myEffectiveName,
                     senderTier = myStaffTier,
                     text = caption,
                     audioBase64 = note.audioBase64,
                     audioDurationSec = note.durationSec,
-                    hideSenderName = hideMyNameInGroup && ((threadState as? UiState.Success)?.data?.let { it.isGroup && !it.anonymousModeDisabled } == true)
+                    hideSenderName = hideMyNameInGroup && ((threadState as? UiState.Success)?.data?.let { it.isGroup && !it.anonymousModeDisabled } == true),
+                    displayedSenderTier = myDisplayedStaffTier
                 )
             } else {
                 snackbarHostState.showTopMessage("Recording was too short or could not be saved.")
@@ -427,14 +447,14 @@ fun DirectChatScreen(
                             threadId = activeThread.id,
                             peerName = activeThread.displayTitle(viewModel.currentUserId),
                             myUserId = viewModel.currentUserId,
-                            myDisplayName = userProfile.displayName
+                            myDisplayName = myEffectiveName
                         )
                     }
                     scope.launch {
                         snackbarHostState.showTopMessage("Microphone ready! Hold Push to Talk to stream live audio.")
                     }
                 }
-                else -> viewModel.toggleCallMic(userProfile.displayName)
+                else -> viewModel.toggleCallMic(myEffectiveName)
             }
         } else {
             scope.launch {
@@ -456,7 +476,7 @@ fun DirectChatScreen(
         pendingCameraAction = null
         if (granted) {
             when (action) {
-                "VIDEO_CALL" -> viewModel.toggleCallVideo(userProfile.displayName)
+                "VIDEO_CALL" -> viewModel.toggleCallVideo(myEffectiveName)
                 "SNAP_PHOTO" -> cameraSnapLauncher.launch(null)
             }
         } else {
@@ -491,7 +511,7 @@ fun DirectChatScreen(
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (granted) {
-            viewModel.toggleCallMic(userProfile.displayName)
+            viewModel.toggleCallMic(myEffectiveName)
         } else {
             pendingMicAction = "VOICE_CALL"
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -552,7 +572,7 @@ fun DirectChatScreen(
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         if (granted) {
-            viewModel.toggleCallVideo(userProfile.displayName)
+            viewModel.toggleCallVideo(myEffectiveName)
         } else {
             pendingCameraAction = "VIDEO_CALL"
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
@@ -630,18 +650,39 @@ fun DirectChatScreen(
     val isCompanyOwnerMonitor = thread?.isCompanySubOneOnOne() == true &&
         thread.companyOwnerId == viewModel.currentUserId &&
         !thread.participantIds.contains(viewModel.currentUserId)
+    val otherUid = if (isCompanyOwnerMonitor || isVoxOfficial) "" else thread?.otherUserId(viewModel.currentUserId).orEmpty()
+
+    LaunchedEffect(
+        thread?.id,
+        isInvisibleOwnerMode,
+        isCompanyOwnerMonitor,
+        userProfile.effectiveDisplayName(),
+        myStaffTier
+    ) {
+        viewModel.announceEnterIfNeeded(
+            thread = thread,
+            displayName = userProfile.effectiveDisplayName(),
+            displayedTier = userProfile.displayedStaffTier(myStaffTier),
+            isInvisible = isInvisibleOwnerMode || isCompanyOwnerMonitor || initialInvisibleOwnerMode
+        )
+    }
+    val nowMillis = rememberPresenceClockMillis()
+    val otherDirectoryEntry = remember(directoryEntries, otherUid) {
+        directoryEntries.firstOrNull { it.userId == otherUid }
+    }
     val otherName = when {
         isVoxOfficial -> "VOX"
         isCompanyOwnerMonitor && thread != null ->
             "${thread.userAName.ifBlank { "Employee 1" }} & ${thread.userBName.ifBlank { "Employee 2" }}"
+        !isGroup && otherDirectoryEntry != null && otherDirectoryEntry.effectiveDisplayName().isNotBlank() ->
+            otherDirectoryEntry.effectiveDisplayName()
         else -> thread?.displayTitle(viewModel.currentUserId) ?: "Private Chat"
     }
     val otherColorHex = thread?.otherColorHex(viewModel.currentUserId) ?: "#0088FF"
-    val otherTier = if (isGroup || isCompanyOwnerMonitor || isVoxOfficial) StaffTier.USER else (thread?.otherTier(viewModel.currentUserId) ?: StaffTier.USER)
-    val otherUid = if (isCompanyOwnerMonitor || isVoxOfficial) "" else thread?.otherUserId(viewModel.currentUserId).orEmpty()
-    val nowMillis = rememberPresenceClockMillis()
-    val otherDirectoryEntry = remember(directoryEntries, otherUid) {
-        directoryEntries.firstOrNull { it.userId == otherUid }
+    val otherTier = when {
+        isGroup || isCompanyOwnerMonitor || isVoxOfficial -> StaffTier.USER
+        otherDirectoryEntry != null -> otherDirectoryEntry.tierEnum()
+        else -> thread?.otherTier(viewModel.currentUserId) ?: StaffTier.USER
     }
     val otherDisplayedStatus = if (!isGroup) {
         otherDirectoryEntry?.displayedStatusFor(
@@ -661,8 +702,8 @@ fun DirectChatScreen(
     val isGroupSupport = isGroup && (thread?.isGroupSupport(viewModel.currentUserId) == true)
     val isGroupAdminOrAppAdmin = isGroup && (isGroupAdmin || myStaffTier == StaffTier.ADMIN)
     val isGroupDisabledByStaff = isGroup && (thread?.groupDisabled == true)
-    val isStaffModMonitor = isGroup && isAppStaff &&
-        (thread?.hasStaffAccessOpen() == true || thread?.participantIds?.contains(viewModel.currentUserId) == false)
+    val isStaffModMonitor = isAppStaff &&
+        (thread?.hasStaffAccessOpen() == true || (isGroup && thread?.participantIds?.contains(viewModel.currentUserId) == false))
     val canManageWorkOrders = isGroup && (thread?.canManageWorkOrders(viewModel.currentUserId, myStaffTier == StaffTier.ADMIN) == true)
     val canManageGroupDm = isGroup && (isGroupAdmin || isGroupSupport || isGroupSupervisor || isAppStaff)
     val requiresGroupPttSelection = isGroup && (thread?.requiresAdminPttSelection() == true)
@@ -671,7 +712,7 @@ fun DirectChatScreen(
     val amIBannedInGroup = isGroup && (thread?.isBannedInGroup(viewModel.currentUserId) == true)
     val amIBouncedInGroup = isGroup && (thread?.isBouncedInGroup(viewModel.currentUserId, nowMillis) == true)
     val amIMutedInGroup = isGroup && (thread?.isMutedInGroup(viewModel.currentUserId) == true)
-    val isMessagingDisabledByStaff = myStaffTier != StaffTier.ADMIN &&
+    val isMessagingDisabledByStaff =
         userProfile.isFeatureRestricted(com.example.data.RestrictableFeature.DM, nowMillis)
     val isPttDisabledByStaff = myStaffTier != StaffTier.ADMIN &&
         userProfile.isFeatureRestricted(com.example.data.RestrictableFeature.PTT, nowMillis)
@@ -690,16 +731,21 @@ fun DirectChatScreen(
         (otherPaidPass != null || (userProfile.dmPolicyEnum() == DmPolicy.PAID && thread?.isUserKicked(otherUid) != true))
     val isMyPttEnabled = thread?.isPttEnabledFor(viewModel.currentUserId) == true
     val isOtherPttEnabled = thread?.isOtherPttEnabled(viewModel.currentUserId) == true
+    val isMyLiveAudioListenOn = thread?.isPttListenOnlyEnabledFor(viewModel.currentUserId) == true
+    val hasOtherLiveListener = thread?.hasAnyLiveAudioListenerOtherThan(viewModel.currentUserId) == true
     val blockedByGroupAdminTalking = thread?.isBlockedByGroupAdminTalking(
         uid = viewModel.currentUserId,
         isAppAdmin = myStaffTier == StaffTier.ADMIN
     ) == true
-    val isMutualPttActive = !isVoxOfficial && !amIKicked && !isBlockedThread && !isGroupLockedOut && !amIMutedInGroup &&
+    val canMyAccountUsePtt = !isVoxOfficial && !amIKicked && !isBlockedThread && !isGroupLockedOut && !amIMutedInGroup &&
         !subPttDisabled && !subMicDisabled && !isPttDisabledByStaff && !(isGroupDisabledByStaff && !isAppStaff) &&
-        canUseGroupPtt && (
-            thread?.isMutualPttActive(viewModel.currentUserId) == true ||
-                (isGroupAdmin && isMyPttEnabled)
-            )
+        canUseGroupPtt
+    val canUseListenOnlyLiveAudio = !isVoxOfficial && !amIKicked && !isBlockedThread && !isGroupLockedOut &&
+        !(isGroupDisabledByStaff && !isAppStaff)
+    val isMutualPttActive = canMyAccountUsePtt && isMyPttEnabled && (
+        hasOtherLiveListener ||
+            (isGroupAdmin && isMyPttEnabled)
+        )
     val remoteVideoTrack = remoteVideoTracks.values.firstOrNull()
     val canSend = !isVoxOfficial && !amIKicked && !isBlockedThread && !isGroupLockedOut && !amIMutedInGroup &&
         !isMessagingDisabledByStaff && !subMsgDisabled && !(isGroupDisabledByStaff && !isAppStaff) &&
@@ -710,13 +756,48 @@ fun DirectChatScreen(
 
     val isMyPttVttOn = thread?.isPttVoiceToTextEnabledFor(viewModel.currentUserId) == true
     val isMyGroupDndOn = isGroup && (thread?.isPttDndEnabledFor(viewModel.currentUserId) == true)
-    val isAnyThreadVttActive = thread?.shouldAutoTranscribePttFrom(viewModel.currentUserId) == true || isGlobalPttVttEnabled
+    val isPttSilentMode by LivePttSessionManager.isPttSilentMode.collectAsStateWithLifecycle()
+    val isVttOnlyPttMode = isMyPttVttOn || isGlobalPttVttEnabled || isPttSilentMode || !hasOtherLiveListener
+    val isAnyThreadVttActive = thread?.shouldAutoTranscribePttFrom(viewModel.currentUserId) == true || isGlobalPttVttEnabled || isPttSilentMode
 
-    // Sync Group DM Admin role, talk-over lock state, and PTT Voice-to-Text / DND flags into LivePttSessionManager
+    val suppressTypingBroadcast = isInvisibleOwnerMode ||
+        (isGroup && (thread?.anonymousModeDisabled != true) && hideMyNameInGroup) ||
+        isMessagingDisabledByStaff || subMsgDisabled
+    LaunchedEffect(suppressTypingBroadcast) {
+        if (suppressTypingBroadcast) {
+            viewModel.clearTypingNow()
+        }
+    }
+    DisposableEffect(viewModel.threadId) {
+        onDispose {
+            viewModel.clearTypingNow(useExternalScope = true)
+        }
+    }
+    val hasRemoteTypingEntry = thread?.typingByUserId?.any { (uid, _) ->
+        uid.isNotBlank() && uid != viewModel.currentUserId
+    } == true
+    var typingClockMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(hasRemoteTypingEntry, thread?.typingByUserId) {
+        typingClockMs = System.currentTimeMillis()
+        if (!hasRemoteTypingEntry) return@LaunchedEffect
+        while (true) {
+            delay(1000L)
+            typingClockMs = System.currentTimeMillis()
+        }
+    }
+    val typingIndicatorLabel = thread?.formatTypingLabel(
+        myUid = viewModel.currentUserId,
+        nowMs = typingClockMs,
+        nameLookup = { uid -> directoryByUid[uid]?.effectiveDisplayName() }
+    )
+
+    // Sync Group DM Admin role, talk-over lock state, and PTT Voice-to-Text / DND / Listen-Only flags into LivePttSessionManager
     LaunchedEffect(
         thread?.id,
         isGroupAdmin,
         blockedByGroupAdminTalking,
+        thread?.pttEnabledUserIds,
+        thread?.pttListenOnlyUserIds,
         thread?.pttVoiceToTextUserIds,
         thread?.pttDndUserIds,
         pttActiveThreadId
@@ -764,7 +845,7 @@ fun DirectChatScreen(
     }
 
     // Android 14+ Screenshot Detection in Private Messages -> Notifies the other user
-    DisposableEffect(context, thread?.id, amIKicked, isBlockedThread, userProfile.displayName, myStaffTier) {
+    DisposableEffect(context, thread?.id, amIKicked, isBlockedThread, myEffectiveName, myStaffTier, myDisplayedStaffTier) {
         val activeThreadId = thread?.id
         val activity = context.findActivity()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
@@ -778,8 +859,9 @@ fun DirectChatScreen(
                 if (now - lastScreenshotNotifiedMs >= 3_000L) {
                     lastScreenshotNotifiedMs = now
                     viewModel.sendScreenshotNotice(
-                        userName = userProfile.displayName,
-                        senderTier = myStaffTier
+                        userName = myEffectiveName,
+                        senderTier = myStaffTier,
+                        displayedSenderTier = myDisplayedStaffTier
                     )
                 }
             }
@@ -796,9 +878,18 @@ fun DirectChatScreen(
         }
     }
 
-    LaunchedEffect(isMutualPttActive, isInCall, thread?.id, otherName, userProfile.displayName) {
-        val currentThread = thread
-        if (isMutualPttActive && !isInCall && currentThread != null && !(!myStaffTier.isAdmin() && userProfile.disableMic)) {
+    LaunchedEffect(
+        isMutualPttActive,
+        isMyLiveAudioListenOn,
+        canUseListenOnlyLiveAudio,
+        isVttOnlyPttMode,
+        isInCall,
+        thread?.id,
+        otherName,
+        myEffectiveName
+    ) {
+        val currentThread = thread ?: return@LaunchedEffect
+        if (isMutualPttActive && !isVttOnlyPttMode && !isInCall && !(!myStaffTier.isAdmin() && userProfile.disableMic)) {
             val micGranted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.RECORD_AUDIO
@@ -809,9 +900,22 @@ fun DirectChatScreen(
                     threadId = currentThread.id,
                     peerName = otherName,
                     myUserId = viewModel.currentUserId,
-                    myDisplayName = userProfile.effectiveDisplayName()
+                    myDisplayName = myEffectiveName
                 )
             }
+        } else if (canUseListenOnlyLiveAudio && isMyLiveAudioListenOn && !isInCall) {
+            LivePttSessionManager.ensureConnectedListenOnly(
+                context = context,
+                threadId = currentThread.id,
+                peerName = otherName,
+                myUserId = viewModel.currentUserId,
+                myDisplayName = myEffectiveName
+            )
+        } else if (LivePttSessionManager.activeThreadId.value == currentThread.id &&
+            LivePttSessionManager.isListenOnlyMode.value &&
+            !isMyLiveAudioListenOn
+        ) {
+            LivePttSessionManager.disconnect(context)
         }
     }
 
@@ -1212,21 +1316,61 @@ fun DirectChatScreen(
                                             }
                                         )
 
-                                        // Lock-Screen PTT Mode (moved here from the bottom!)
+                                        // Lock-Screen PTT ON/OFF Toggle (available in both Private DMs & Group DMs)
                                         DmTopDropdownChip(
-                                            icon = Icons.Rounded.Lock,
-                                            label = "Lock-Screen PTT Mode",
-                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                            testTag = "dm_open_lock_screen_ptt_button",
+                                            icon = if (isLockScreenPttEnabled) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
+                                            label = if (isLockScreenPttEnabled) "Lock-Screen PTT: ON" else "Lock-Screen PTT: OFF",
+                                            containerColor = if (isLockScreenPttEnabled) SnapBlue else MaterialTheme.colorScheme.surfaceVariant,
+                                            contentColor = if (isLockScreenPttEnabled) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            testTag = "dm_toggle_lock_screen_ptt_button",
                                             onClick = {
-                                                val lockIntent = Intent(
-                                                    context,
-                                                    com.example.media.LockScreenPttActivity::class.java
-                                                ).apply {
-                                                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                                val next = !isLockScreenPttEnabled
+                                                LivePttSessionManager.setLockScreenPttEnabled(context, next)
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage(
+                                                        if (next) "Lock-Screen PTT enabled — PTT controls can appear on your lock screen."
+                                                        else "Lock-Screen PTT turned off — PTT will not pop up on your lock screen."
+                                                    )
                                                 }
-                                                runCatching { context.startActivity(lockIntent) }
+                                            }
+                                        )
+
+                                        // Launch Lock-Screen PTT Mode (shown only when Lock-Screen PTT is ON)
+                                        if (isLockScreenPttEnabled) {
+                                            DmTopDropdownChip(
+                                                icon = Icons.Rounded.Lock,
+                                                label = "Open Lock-Screen PTT",
+                                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                testTag = "dm_open_lock_screen_ptt_button",
+                                                onClick = {
+                                                    val lockIntent = Intent(
+                                                        context,
+                                                        com.example.media.LockScreenPttActivity::class.java
+                                                    ).apply {
+                                                        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                                    }
+                                                    runCatching { context.startActivity(lockIntent) }
+                                                }
+                                            )
+                                        }
+
+                                        // Volume Down Key PTT ON/OFF Toggle (available in both Private DMs & Group DMs)
+                                        DmTopDropdownChip(
+                                            icon = if (isVolumeDownPttEnabled) Icons.AutoMirrored.Rounded.VolumeDown else Icons.Rounded.VolumeOff,
+                                            label = if (isVolumeDownPttEnabled) "Vol Down PTT: ON" else "Vol Down PTT: OFF",
+                                            containerColor = if (isVolumeDownPttEnabled) SnapBlue else MaterialTheme.colorScheme.surfaceVariant,
+                                            contentColor = if (isVolumeDownPttEnabled) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            testTag = "dm_toggle_volume_down_ptt_button",
+                                            onClick = {
+                                                val next = !isVolumeDownPttEnabled
+                                                LivePttSessionManager.setVolumeDownPttEnabled(context, next)
+                                                scope.launch {
+                                                    snackbarHostState.showTopMessage(
+                                                        if (next) "Volume Down key PTT enabled — hold Volume Down to talk."
+                                                        else "Volume Down key PTT turned off — volume button adjusts sound normally."
+                                                    )
+                                                }
                                             }
                                         )
 
@@ -1241,6 +1385,20 @@ fun DirectChatScreen(
                                                 viewModel.setPttVoiceToText(!isMyPttVttOn)
                                             }
                                         )
+
+                                        // Live Audio (Listen-Only Broadcast) toggle — lets users hear live PTT audio even if PTT is OFF, restricted, or on a sub-account
+                                        if (canUseListenOnlyLiveAudio) {
+                                            DmTopDropdownChip(
+                                                icon = Icons.Rounded.Podcasts,
+                                                label = if (isMyLiveAudioListenOn) "Live Audio: ON" else "Live Audio",
+                                                containerColor = if (isMyLiveAudioListenOn) SnapBlue else MaterialTheme.colorScheme.surfaceVariant,
+                                                contentColor = if (isMyLiveAudioListenOn) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                testTag = "dm_toggle_live_audio_listen_button",
+                                                onClick = {
+                                                    viewModel.setPttListenOnly(!isMyLiveAudioListenOn)
+                                                }
+                                            )
+                                        }
 
                                         // Group DM Do Not Disturb (incoming PTT audio converted to Voice-to-Text)
                                         if (isGroup) {
@@ -1270,21 +1428,6 @@ fun DirectChatScreen(
                                                         Uri.parse("package:${context.packageName}")
                                                     )
                                                     context.startActivity(intent)
-                                                }
-                                            )
-                                        }
-
-                                        // Home Screen PTT Widget shortcut
-                                        if (isMutualPttActive) {
-                                            DmTopDropdownChip(
-                                                icon = Icons.Rounded.RecordVoiceOver,
-                                                label = "Home PTT Widget",
-                                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                                contentColor = MaterialTheme.colorScheme.onSurface,
-                                                testTag = "dm_add_ptt_home_widget_button",
-                                                onClick = {
-                                                    val resultMsg = com.example.widget.VoxPttWidgetHelper.requestPinPttWidget(context)
-                                                    scope.launch { snackbarHostState.showTopMessage(resultMsg) }
                                                 }
                                             )
                                         }
@@ -1631,10 +1774,15 @@ fun DirectChatScreen(
                                 }
                             }
                         }
-                        if (isGroup && thread != null && thread.hasStaffAccessOpen()) {
+                        if (thread != null && thread.hasStaffAccessOpen() && (isGroup || isAppStaff)) {
                             val isStaffHere = isAppStaff
                             val isInvisibleStaff = isStaffHere && isInvisibleOwnerMode
-                            val bannerBg = if (isInvisibleStaff) Color(0xFF1A1033) else SafetyEmerald.copy(alpha = 0.16f)
+                            val isYouthSafetyPrivateDm = !isGroup && thread.reportStaffAccessOpen
+                            val bannerBg = when {
+                                isInvisibleStaff -> Color(0xFF1A1033)
+                                isYouthSafetyPrivateDm -> LiveCoral.copy(alpha = 0.14f)
+                                else -> SafetyEmerald.copy(alpha = 0.16f)
+                            }
                             val bannerFg = if (isInvisibleStaff) Color.White else MaterialTheme.colorScheme.onSurface
                             Column(
                                 modifier = Modifier
@@ -1651,27 +1799,39 @@ fun DirectChatScreen(
                                     Icon(
                                         imageVector = Icons.Rounded.SupportAgent,
                                         contentDescription = "VOX Staff Access Active",
-                                        tint = if (isInvisibleStaff) ModAmber else SafetyEmerald,
+                                        tint = when {
+                                            isInvisibleStaff -> ModAmber
+                                            isYouthSafetyPrivateDm -> LiveCoral
+                                            else -> SafetyEmerald
+                                        },
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             text = when {
+                                                isInvisibleStaff && isYouthSafetyPrivateDm -> "INVISIBLE YOUTH SAFETY MONITOR (Staff)"
                                                 isInvisibleStaff -> "INVISIBLE STAFF MODE (Admin / Support)"
+                                                isStaffHere && isYouthSafetyPrivateDm -> "YOUTH SAFETY MONITOR ACTIVE (Visible)"
                                                 isStaffHere -> "VOX STAFF MODERATION ACTIVE (Visible)"
                                                 thread.staffHelpRequested && thread.reportStaffAccessOpen -> "VOX Staff Help & Report Review Active"
                                                 thread.reportStaffAccessOpen -> "Reported Group DM · Staff Review Open"
                                                 else -> "VOX Staff Help Requested"
                                             },
                                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.ExtraBold),
-                                            color = if (isInvisibleStaff) ModAmber else SafetyEmerald
+                                            color = when {
+                                                isInvisibleStaff -> ModAmber
+                                                isYouthSafetyPrivateDm -> LiveCoral
+                                                else -> SafetyEmerald
+                                            }
                                         )
                                         Text(
                                             text = when {
+                                                isInvisibleStaff && isYouthSafetyPrivateDm ->
+                                                    thread.lastReportSummary.ifBlank { "Participants cannot see you. Monitoring 18+ / under-18 private DM invisibly." }
                                                 isInvisibleStaff -> "Members cannot see you. You can monitor or open Staff Controls."
                                                 thread.staffHelpReason.isNotBlank() -> thread.staffHelpReason
                                                 thread.lastReportSummary.isNotBlank() -> thread.lastReportSummary
-                                                else -> "Support Staff or App Admin can enter this Group DM (visible or invisible) to assist."
+                                                else -> "Support Staff or App Admin can enter this chat (visible or invisible) to monitor."
                                             },
                                             style = MaterialTheme.typography.labelSmall,
                                             color = bannerFg,
@@ -1724,21 +1884,23 @@ fun DirectChatScreen(
                                                 color = if (isInvisibleOwnerMode) ModAmber else SafetyEmerald
                                             )
                                         }
-                                        Button(
-                                            onClick = { showGroupAdminSheet = true },
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = LiveCoral,
-                                                contentColor = Color.White
-                                            ),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("staff_banner_controls_button")
-                                        ) {
-                                            Text(
-                                                text = "Staff Controls",
-                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                                            )
+                                        if (isGroup) {
+                                            Button(
+                                                onClick = { showGroupAdminSheet = true },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = LiveCoral,
+                                                    contentColor = Color.White
+                                                ),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("staff_banner_controls_button")
+                                            ) {
+                                                Text(
+                                                    text = "Staff Controls",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -2042,6 +2204,31 @@ fun DirectChatScreen(
                         .imePadding()
                 ) {
                     Column {
+                        AnimatedVisibility(
+                            visible = !typingIndicatorLabel.isNullOrBlank(),
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f))
+                                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                                    .testTag("dm_typing_indicator"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TypingIndicatorDots(color = MaterialTheme.colorScheme.primary)
+                                Text(
+                                    text = typingIndicatorLabel.orEmpty(),
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                         if ((isCompanyOwnerMonitor || isStaffModMonitor) && isInvisibleOwnerMode) {
@@ -2347,60 +2534,140 @@ fun DirectChatScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         }
 
-                        // Mutual Live Push-to-Talk Walkie-Talkie Strip (Live stream audio — never chat-log voice notes)
-                        if (isOtherPttEnabled && !isMyPttEnabled && canUseGroupPtt && thread != null) {
+                        // Live Push-to-Talk & Voice-to-Text / Listen-Only Live Audio Strip
+                        if (isOtherPttEnabled && !isMyPttEnabled && thread != null) {
+                            if (canMyAccountUsePtt && !isMyLiveAudioListenOn) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(SnapBlue.copy(alpha = 0.12f))
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                        .testTag("dm_ptt_invite_banner"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.RecordVoiceOver,
+                                        contentDescription = "Live Push to Talk invite",
+                                        tint = SnapBlue,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = "$otherName turned on Live Push-to-Talk. Enable to stream live audio (or toggle Live Audio to just listen).",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Button(
+                                        onClick = {
+                                            val micGranted = ContextCompat.checkSelfPermission(
+                                                context,
+                                                Manifest.permission.RECORD_AUDIO
+                                            ) == PackageManager.PERMISSION_GRANTED
+                                            if (!micGranted) {
+                                                pendingMicAction = "PTT"
+                                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            }
+                                            viewModel.setPttEnabled(true, isAdmin = myStaffTier == StaffTier.ADMIN)
+                                        },
+                                        shape = RoundedCornerShape(999.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = SafetyEmerald),
+                                        modifier = Modifier.testTag("dm_ptt_accept_button")
+                                    ) {
+                                        Text(
+                                            text = "Enable",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                            } else if (canUseListenOnlyLiveAudio) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            if (isMyLiveAudioListenOn) SnapBlue.copy(alpha = 0.14f)
+                                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                                        )
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                        .testTag("dm_live_audio_listen_banner"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Podcasts,
+                                        contentDescription = "Live Audio broadcast listen",
+                                        tint = if (isMyLiveAudioListenOn) SnapBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = when {
+                                            isMyLiveAudioListenOn && !thisThreadRemoteSpeaker.isNullOrBlank() ->
+                                                "LIVE AUDIO · $thisThreadRemoteSpeaker is speaking…"
+                                            isMyLiveAudioListenOn ->
+                                                "Live Audio Listening ON · Hearing $otherName's live PTT broadcasts"
+                                            else ->
+                                                "$otherName has PTT ON. Tap Live Audio to hear broadcasts (otherwise arrives as Voice-to-Text)."
+                                        },
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Button(
+                                        onClick = { viewModel.setPttListenOnly(!isMyLiveAudioListenOn) },
+                                        shape = RoundedCornerShape(999.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (isMyLiveAudioListenOn) MaterialTheme.colorScheme.surfaceVariant else SnapBlue
+                                        ),
+                                        modifier = Modifier.testTag("dm_live_audio_listen_banner_button")
+                                    ) {
+                                        Text(
+                                            text = if (isMyLiveAudioListenOn) "Turn Off" else "Live Audio",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = if (isMyLiveAudioListenOn) MaterialTheme.colorScheme.onSurface else Color.White
+                                        )
+                                    }
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                            }
+                        } else if (!isMyPttEnabled && isMyLiveAudioListenOn && canUseListenOnlyLiveAudio && thread != null) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .background(SnapBlue.copy(alpha = 0.12f))
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                                    .testTag("dm_ptt_invite_banner"),
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                                    .testTag("dm_live_audio_listening_strip"),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Rounded.RecordVoiceOver,
-                                    contentDescription = "Live Push to Talk invite",
+                                    imageVector = Icons.Rounded.Podcasts,
+                                    contentDescription = "Live Audio active",
                                     tint = SnapBlue,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(18.dp)
                                 )
                                 Text(
-                                    text = "$otherName turned on Live Push-to-Talk. Enable to stream live audio.",
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                    color = MaterialTheme.colorScheme.onSurface,
+                                    text = if (!thisThreadRemoteSpeaker.isNullOrBlank()) {
+                                        "LIVE AUDIO · $thisThreadRemoteSpeaker is speaking…"
+                                    } else {
+                                        "Live Audio ON · Ready to hear incoming PTT audio (listen-only)"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = SnapBlue,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
                                 )
-                                Button(
-                                    onClick = {
-                                        val micGranted = ContextCompat.checkSelfPermission(
-                                            context,
-                                            Manifest.permission.RECORD_AUDIO
-                                        ) == PackageManager.PERMISSION_GRANTED
-                                        if (!micGranted) {
-                                            pendingMicAction = "PTT"
-                                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                        }
-                                        viewModel.setPttEnabled(true, isAdmin = myStaffTier == StaffTier.ADMIN)
-                                    },
-                                    shape = RoundedCornerShape(999.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = SafetyEmerald),
-                                    modifier = Modifier.testTag("dm_ptt_accept_button")
-                                ) {
-                                    Text(
-                                        text = "Enable",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = Color.White
-                                    )
-                                }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
-                        } else if (isMyPttEnabled && thread != null) {
-                            val showBottomBigPttButton = isMutualPttActive && !isFloatingPttEnabled
-                            val showLiveVttTranscript = isMutualPttActive && isThisThreadTransmitting && livePttTranscript.isNotBlank()
+                        } else if (isMyPttEnabled && canMyAccountUsePtt && thread != null) {
+                            val showBottomBigPttButton = !isFloatingPttEnabled
+                            val showLiveVttTranscript = isThisThreadTransmitting && livePttTranscript.isNotBlank()
                             val showBottomPttSection =
-                                (isMutualPttActive && (blockedByGroupAdminTalking || showBottomBigPttButton || showLiveVttTranscript)) ||
-                                    !isMutualPttActive
+                                blockedByGroupAdminTalking || showBottomBigPttButton || showLiveVttTranscript || isVttOnlyPttMode
                             if (showBottomPttSection) {
                                 Column(
                                     modifier = Modifier
@@ -2408,215 +2675,224 @@ fun DirectChatScreen(
                                         .padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    if (isMutualPttActive) {
-                                        if (showLiveVttTranscript) {
-                                            Surface(
-                                                shape = RoundedCornerShape(10.dp),
-                                                color = SnapBlue.copy(alpha = 0.14f),
-                                                border = BorderStroke(1.dp, SnapBlue.copy(alpha = 0.45f)),
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .testTag("dm_ptt_live_transcript_bar")
+                                    if (showLiveVttTranscript) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = SnapBlue.copy(alpha = 0.14f),
+                                            border = BorderStroke(1.dp, SnapBlue.copy(alpha = 0.45f)),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("dm_ptt_live_transcript_bar")
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.Subtitles,
-                                                        contentDescription = "Transcribing PTT",
-                                                        tint = SnapBlue,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                    Text(
-                                                        text = "Voice-to-Text: \"$livePttTranscript\"",
-                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                                                        color = SnapBlue,
-                                                        maxLines = 2,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        if (blockedByGroupAdminTalking) {
-                                            Surface(
-                                                shape = RoundedCornerShape(10.dp),
-                                                color = LiveCoral.copy(alpha = 0.14f),
-                                                border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.5f)),
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .testTag("group_admin_talking_banner")
-                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Subtitles,
+                                                    contentDescription = "Transcribing PTT",
+                                                    tint = SnapBlue,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
                                                 Text(
-                                                    text = "Group DM Admin is speaking (Priority Mic) — your mic is muted until they finish.",
-                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                                    color = LiveCoral,
-                                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                                    text = "Voice-to-Text: \"$livePttTranscript\"",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                                    color = SnapBlue,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
                                                 )
                                             }
                                         }
-                                        // Big Hold-to-Talk button is ONLY shown when PTT is ON and Floating PTT is disabled
-                                        if (showBottomBigPttButton) {
-                                            Surface(
-                                                shape = RoundedCornerShape(14.dp),
-                                                color = when {
-                                                    blockedByGroupAdminTalking -> MaterialTheme.colorScheme.surfaceVariant
-                                                    isThisThreadTransmitting -> LiveCoral
-                                                    !thisThreadRemoteSpeaker.isNullOrBlank() -> SnapBlue
-                                                    isGroupAdmin -> ModAmber
-                                                    else -> SafetyEmerald
-                                                },
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .height(52.dp)
-                                                    .pointerInput(thread.id, otherName, userProfile.displayName, isInCall, blockedByGroupAdminTalking) {
-                                                        awaitEachGesture {
-                                                            awaitFirstDown(requireUnconsumed = false)
-                                                            if (blockedByGroupAdminTalking) {
-                                                                scope.launch {
-                                                                    snackbarHostState.showTopMessage("Group DM Admin has priority mic right now.")
-                                                                }
-                                                                waitForUpOrCancellation()
-                                                                return@awaitEachGesture
+                                    }
+                                    if (blockedByGroupAdminTalking) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = LiveCoral.copy(alpha = 0.14f),
+                                            border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.5f)),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("group_admin_talking_banner")
+                                        ) {
+                                            Text(
+                                                text = "Group DM Admin is speaking (Priority Mic) — your mic is muted until they finish.",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = LiveCoral,
+                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                            )
+                                        }
+                                    }
+                                    // Big Hold-to-Talk button is ONLY shown when PTT is ON and Floating PTT is disabled
+                                    if (showBottomBigPttButton) {
+                                        Surface(
+                                            shape = RoundedCornerShape(14.dp),
+                                            color = when {
+                                                blockedByGroupAdminTalking -> MaterialTheme.colorScheme.surfaceVariant
+                                                isThisThreadTransmitting -> LiveCoral
+                                                isVttOnlyPttMode -> SnapBlue
+                                                !thisThreadRemoteSpeaker.isNullOrBlank() -> SnapBlue
+                                                isGroupAdmin -> ModAmber
+                                                else -> SafetyEmerald
+                                            },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(52.dp)
+                                                .pointerInput(
+                                                    thread.id,
+                                                    otherName,
+                                                    myEffectiveName,
+                                                    isInCall,
+                                                    blockedByGroupAdminTalking,
+                                                    isVttOnlyPttMode
+                                                ) {
+                                                    awaitEachGesture {
+                                                        awaitFirstDown(requireUnconsumed = false)
+                                                        if (blockedByGroupAdminTalking) {
+                                                            scope.launch {
+                                                                snackbarHostState.showTopMessage("Group DM Admin has priority mic right now.")
                                                             }
-                                                            if (subPttDisabled || subMicDisabled) {
-                                                                scope.launch {
-                                                                    snackbarHostState.showTopMessage(
-                                                                        if (subPttDisabled) "Push-to-Talk has been disabled by your company owner."
-                                                                        else "Your microphone has been disabled by your company owner."
-                                                                    )
-                                                                }
-                                                                waitForUpOrCancellation()
-                                                                return@awaitEachGesture
-                                                            }
-                                                            if (!myStaffTier.isAdmin() && userProfile.disableMic) {
-                                                                scope.launch {
-                                                                    snackbarHostState.showTopMessage("Microphone access is disabled on your account.")
-                                                                }
-                                                                waitForUpOrCancellation()
-                                                                return@awaitEachGesture
-                                                            }
-                                                            val granted = ContextCompat.checkSelfPermission(
-                                                                context,
-                                                                Manifest.permission.RECORD_AUDIO
-                                                            ) == PackageManager.PERMISSION_GRANTED
-                                                            if (!granted) {
-                                                                pendingMicAction = "PTT"
-                                                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                                                waitForUpOrCancellation()
-                                                                return@awaitEachGesture
-                                                            }
-                                                            if (isInCall) {
-                                                                viewModel.setPttLiveMic(userProfile.effectiveDisplayName(), true)
-                                                                waitForUpOrCancellation()
-                                                                viewModel.setPttLiveMic(userProfile.effectiveDisplayName(), false)
-                                                            } else {
-                                                                LivePttSessionManager.setTransmitting(
-                                                                    context = context,
-                                                                    transmitting = true,
-                                                                    threadId = thread.id,
-                                                                    peerName = otherName,
-                                                                    myUserId = viewModel.currentUserId,
-                                                                    myDisplayName = userProfile.effectiveDisplayName()
-                                                                )
-                                                                waitForUpOrCancellation()
-                                                                LivePttSessionManager.setTransmitting(
-                                                                    context = context,
-                                                                    transmitting = false,
-                                                                    threadId = thread.id,
-                                                                    peerName = otherName,
-                                                                    myUserId = viewModel.currentUserId,
-                                                                    myDisplayName = userProfile.effectiveDisplayName()
+                                                            waitForUpOrCancellation()
+                                                            return@awaitEachGesture
+                                                        }
+                                                        if (subPttDisabled || subMicDisabled) {
+                                                            scope.launch {
+                                                                snackbarHostState.showTopMessage(
+                                                                    if (subPttDisabled) "Push-to-Talk has been disabled by your company owner."
+                                                                    else "Your microphone has been disabled by your company owner."
                                                                 )
                                                             }
+                                                            waitForUpOrCancellation()
+                                                            return@awaitEachGesture
+                                                        }
+                                                        if (!myStaffTier.isAdmin() && userProfile.disableMic) {
+                                                            scope.launch {
+                                                                snackbarHostState.showTopMessage("Microphone access is disabled on your account.")
+                                                            }
+                                                            waitForUpOrCancellation()
+                                                            return@awaitEachGesture
+                                                        }
+                                                        val granted = ContextCompat.checkSelfPermission(
+                                                            context,
+                                                            Manifest.permission.RECORD_AUDIO
+                                                        ) == PackageManager.PERMISSION_GRANTED
+                                                        if (!granted) {
+                                                            pendingMicAction = "PTT"
+                                                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                            waitForUpOrCancellation()
+                                                            return@awaitEachGesture
+                                                        }
+                                                        if (isInCall && !isVttOnlyPttMode) {
+                                                            viewModel.setPttLiveMic(myEffectiveName, true)
+                                                            waitForUpOrCancellation()
+                                                            viewModel.setPttLiveMic(myEffectiveName, false)
+                                                        } else {
+                                                            LivePttSessionManager.setTransmitting(
+                                                                context = context,
+                                                                transmitting = true,
+                                                                threadId = thread.id,
+                                                                peerName = otherName,
+                                                                myUserId = viewModel.currentUserId,
+                                                                myDisplayName = myEffectiveName,
+                                                                forceVoiceToTextOnly = isVttOnlyPttMode
+                                                            )
+                                                            waitForUpOrCancellation()
+                                                            LivePttSessionManager.setTransmitting(
+                                                                context = context,
+                                                                transmitting = false,
+                                                                threadId = thread.id,
+                                                                peerName = otherName,
+                                                                myUserId = viewModel.currentUserId,
+                                                                myDisplayName = myEffectiveName,
+                                                                forceVoiceToTextOnly = isVttOnlyPttMode
+                                                            )
                                                         }
                                                     }
-                                                    .testTag("dm_ptt_button")
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxSize()
-                                                        .padding(horizontal = 16.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.Center
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.RecordVoiceOver,
-                                                        contentDescription = "Live Push to Talk",
-                                                        tint = if (blockedByGroupAdminTalking) MaterialTheme.colorScheme.onSurfaceVariant else Color.White,
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        text = when {
-                                                            blockedByGroupAdminTalking ->
-                                                                "ADMIN SPEAKING · MIC YIELDED"
-                                                            isThisThreadTransmitting && isGroupAdmin ->
-                                                                "ADMIN PRIORITY MIC LIVE (${pttElapsedSec}s) · TALKING OVER GROUP"
-                                                            isThisThreadTransmitting ->
-                                                                "LIVE (${pttElapsedSec}s/${pttMaxSec}s) · $otherName…"
-                                                            isInCall && isMicActive ->
-                                                                "LIVE AUDIO STREAMING to $otherName…"
-                                                            isGroupAdmin ->
-                                                                "HOLD TO TALK OVER GROUP (ADMIN PRIORITY MIC)"
-                                                            !thisThreadRemoteSpeaker.isNullOrBlank() ->
-                                                                "$thisThreadRemoteSpeaker is streaming live audio…"
-                                                            isThisThreadLivePttConnecting ->
-                                                                "Connecting live Push-to-Talk channel…"
-                                                            isThisThreadLivePttConnected ->
-                                                                if (isAnyThreadVttActive) {
-                                                                    "HOLD TO TALK + TEXT (${myMaxPttSeconds}s) · $otherName"
-                                                                } else {
-                                                                    "HOLD TO TALK (${myMaxPttSeconds}s ${if (myMaxPttSeconds >= 60) "PRO" else "FREE"}) · $otherName"
-                                                                }
-                                                            else ->
-                                                                "HOLD TO STREAM (${myMaxPttSeconds}s ${if (myMaxPttSeconds >= 60) "PRO" else "FREE"}) · $otherName"
-                                                        },
-                                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                                        color = if (blockedByGroupAdminTalking) MaterialTheme.colorScheme.onSurfaceVariant else Color.White,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
                                                 }
+                                                .testTag("dm_ptt_button")
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .padding(horizontal = 16.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isVttOnlyPttMode) Icons.Rounded.Subtitles else Icons.Rounded.RecordVoiceOver,
+                                                    contentDescription = if (isVttOnlyPttMode) "Hold for Voice to Text" else "Live Push to Talk",
+                                                    tint = if (blockedByGroupAdminTalking) MaterialTheme.colorScheme.onSurfaceVariant else Color.White,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = when {
+                                                        blockedByGroupAdminTalking ->
+                                                            "ADMIN SPEAKING · MIC YIELDED"
+                                                        isThisThreadTransmitting && isVttOnlyPttMode ->
+                                                            "VOICE-TO-TEXT (${pttElapsedSec}s) · NO AUDIO SENT"
+                                                        isThisThreadTransmitting && isGroupAdmin ->
+                                                            "ADMIN PRIORITY MIC LIVE (${pttElapsedSec}s) · TALKING OVER GROUP"
+                                                        isThisThreadTransmitting ->
+                                                            "LIVE (${pttElapsedSec}s/${pttMaxSec}s) · $otherName…"
+                                                        isMyPttVttOn ->
+                                                            "HOLD TO TALK · VOICE-TO-TEXT ONLY"
+                                                        !hasOtherLiveListener ->
+                                                            "HOLD TO TALK · VOICE-TO-TEXT ($otherName PTT OFF)"
+                                                        isInCall && isMicActive ->
+                                                            "LIVE AUDIO STREAMING to $otherName…"
+                                                        isGroupAdmin ->
+                                                            "HOLD TO TALK OVER GROUP (ADMIN PRIORITY MIC)"
+                                                        !thisThreadRemoteSpeaker.isNullOrBlank() ->
+                                                            "$thisThreadRemoteSpeaker is streaming live audio…"
+                                                        isThisThreadLivePttConnecting ->
+                                                            "Connecting live Push-to-Talk channel…"
+                                                        isThisThreadLivePttConnected ->
+                                                            if (isAnyThreadVttActive) {
+                                                                "HOLD TO TALK + TEXT (${myMaxPttSeconds}s) · $otherName"
+                                                            } else {
+                                                                "HOLD TO TALK (${myMaxPttSeconds}s ${if (myMaxPttSeconds >= 60) "PRO" else "FREE"}) · $otherName"
+                                                            }
+                                                        else ->
+                                                            "HOLD TO STREAM (${myMaxPttSeconds}s ${if (myMaxPttSeconds >= 60) "PRO" else "FREE"}) · $otherName"
+                                                    },
+                                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                                    color = if (blockedByGroupAdminTalking) MaterialTheme.colorScheme.onSurfaceVariant else Color.White,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
                                             }
                                         }
-                                    } else {
-                                        // Only current user has PTT enabled so far — waiting on the other user
+                                    } else if (isVttOnlyPttMode) {
                                         Surface(
                                             shape = RoundedCornerShape(10.dp),
                                             color = MaterialTheme.colorScheme.surfaceVariant,
                                             border = BorderStroke(1.dp, SnapBlue.copy(alpha = 0.45f)),
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .clickable {
-                                                    scope.launch {
-                                                        snackbarHostState.showTopMessage(
-                                                            "Waiting for $otherName to also select Push-to-Talk for live audio streaming."
-                                                        )
-                                                    }
-                                                }
-                                                .testTag("dm_ptt_waiting_banner")
+                                                .testTag("dm_ptt_vtt_only_status_banner")
                                         ) {
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                    .padding(horizontal = 12.dp, vertical = 7.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 Icon(
-                                                    imageVector = Icons.Rounded.RecordVoiceOver,
-                                                    contentDescription = "Waiting for Push to Talk",
+                                                    imageVector = Icons.Rounded.Subtitles,
+                                                    contentDescription = "Voice-to-Text mode",
                                                     tint = SnapBlue,
                                                     modifier = Modifier.size(16.dp)
                                                 )
                                                 Text(
-                                                    text = "Live PTT ON · Waiting for $otherName to enable PTT",
+                                                    text = if (isMyPttVttOn) {
+                                                        "Voice-to-Text ON · PTT sends text to DM (no live audio broadcast)"
+                                                    } else {
+                                                        "$otherName has PTT OFF · PTT will send as Voice-to-Text until they enable PTT or Live Audio"
+                                                    },
                                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                                     color = MaterialTheme.colorScheme.onSurface,
-                                                    maxLines = 1,
+                                                    maxLines = 2,
                                                     overflow = TextOverflow.Ellipsis,
                                                     modifier = Modifier.weight(1f)
                                                 )
@@ -2897,7 +3173,14 @@ fun DirectChatScreen(
 
                             OutlinedTextField(
                                 value = composerText,
-                                onValueChange = { composerText = it.take(500) },
+                                onValueChange = { next ->
+                                    val clipped = next.take(500)
+                                    composerText = clipped
+                                    viewModel.onDraftTextChanged(
+                                        text = clipped,
+                                        suppressed = suppressTypingBroadcast
+                                    )
+                                },
                                 placeholder = {
                                     Text(
                                         if (draftSnapBase64.isNotBlank()) "Add a caption…"
@@ -2932,11 +3215,12 @@ fun DirectChatScreen(
                                                 composerText = ""
                                                 draftSnapBase64 = ""
                                                 viewModel.sendMessage(
-                                                    senderName = userProfile.displayName,
+                                                    senderName = myEffectiveName,
                                                     senderTier = myStaffTier,
                                                     text = toSend,
                                                     imageBase64 = snapToSend,
-                                                    hideSenderName = isGroup && (thread?.anonymousModeDisabled != true) && hideMyNameInGroup
+                                                    hideSenderName = isGroup && (thread?.anonymousModeDisabled != true) && hideMyNameInGroup,
+                                                    displayedSenderTier = myDisplayedStaffTier
                                                 )
                                             }
                                         },
@@ -2962,10 +3246,11 @@ fun DirectChatScreen(
                                     IconButton(
                                         onClick = {
                                             viewModel.sendMessage(
-                                                senderName = userProfile.displayName,
+                                                senderName = myEffectiveName,
                                                 senderTier = myStaffTier,
                                                 text = "👍",
-                                                hideSenderName = isGroup && (thread?.anonymousModeDisabled != true) && hideMyNameInGroup
+                                                hideSenderName = isGroup && (thread?.anonymousModeDisabled != true) && hideMyNameInGroup,
+                                                displayedSenderTier = myDisplayedStaffTier
                                             )
                                         },
                                         enabled = canSendThumbsUp,
@@ -3325,12 +3610,22 @@ fun DirectChatScreen(
                                 val latestMyMessageId = remember(visibleMessages, viewModel.currentUserId) {
                                     visibleMessages.lastOrNull { it.senderId == viewModel.currentUserId }?.id
                                 }
+                                val isDockedCirclePttShown = isMyPttEnabled &&
+                                    canMyAccountUsePtt &&
+                                    thread != null &&
+                                    isFloatingPttEnabled &&
+                                    floatingDockedThreadId == thread.id
                                 LazyColumn(
                                     state = listState,
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .widthIn(max = 760.dp),
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                                    contentPadding = PaddingValues(
+                                        start = 14.dp,
+                                        end = 14.dp,
+                                        top = 12.dp,
+                                        bottom = if (isDockedCirclePttShown) 92.dp else 12.dp
+                                    ),
                                     verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     items(visibleMessages, key = { it.id }) { msg ->
@@ -3375,6 +3670,99 @@ fun DirectChatScreen(
                                 }
                             }
                         }
+                    }
+
+                    // Docked 68.dp Circle PTT Button (bottom-right, directly above the 👍 thumb button)
+                    // Shown when user closed the floating PTT button while choosing to keep PTT stream open.
+                    // Hold to talk; Double-tap to reopen the floating PTT button.
+                    val dockedThread = thread
+                    if (dockedThread != null &&
+                        isMyPttEnabled &&
+                        canMyAccountUsePtt &&
+                        isFloatingPttEnabled &&
+                        floatingDockedThreadId == dockedThread.id &&
+                        !isGroupLockedOut &&
+                        !amIKicked &&
+                        !isBlockedThread
+                    ) {
+                        DockedCirclePttButton(
+                            peerName = otherName,
+                            isTransmitting = isThisThreadTransmitting,
+                            isVttOnlyMode = isVttOnlyPttMode,
+                            remoteSpeakerName = thisThreadRemoteSpeaker,
+                            blockedByGroupAdmin = blockedByGroupAdminTalking,
+                            pttTheme = activePttTheme,
+                            onSetTransmitting = { startTx ->
+                                if (startTx) {
+                                    if (blockedByGroupAdminTalking) {
+                                        scope.launch {
+                                            snackbarHostState.showTopMessage("Group DM Admin has priority mic right now.")
+                                        }
+                                        return@DockedCirclePttButton
+                                    }
+                                    if (subPttDisabled || subMicDisabled) {
+                                        scope.launch {
+                                            snackbarHostState.showTopMessage(
+                                                if (subPttDisabled) "Push-to-Talk has been disabled by your company owner."
+                                                else "Your microphone has been disabled by your company owner."
+                                            )
+                                        }
+                                        return@DockedCirclePttButton
+                                    }
+                                    if (!myStaffTier.isAdmin() && userProfile.disableMic) {
+                                        scope.launch {
+                                            snackbarHostState.showTopMessage("Microphone access is disabled on your account.")
+                                        }
+                                        return@DockedCirclePttButton
+                                    }
+                                    val granted = ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                    if (!granted) {
+                                        pendingMicAction = "PTT"
+                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                        return@DockedCirclePttButton
+                                    }
+                                    if (isInCall && !isVttOnlyPttMode) {
+                                        viewModel.setPttLiveMic(myEffectiveName, true)
+                                    } else {
+                                        LivePttSessionManager.setTransmitting(
+                                            context = context,
+                                            transmitting = true,
+                                            threadId = dockedThread.id,
+                                            peerName = otherName,
+                                            myUserId = viewModel.currentUserId,
+                                            myDisplayName = myEffectiveName,
+                                            forceVoiceToTextOnly = isVttOnlyPttMode
+                                        )
+                                    }
+                                } else {
+                                    if (isInCall && !isVttOnlyPttMode) {
+                                        viewModel.setPttLiveMic(myEffectiveName, false)
+                                    } else {
+                                        LivePttSessionManager.setTransmitting(
+                                            context = context,
+                                            transmitting = false,
+                                            threadId = dockedThread.id,
+                                            peerName = otherName,
+                                            myUserId = viewModel.currentUserId,
+                                            myDisplayName = myEffectiveName,
+                                            forceVoiceToTextOnly = isVttOnlyPttMode
+                                        )
+                                    }
+                                }
+                            },
+                            onDoubleTapReopenFloating = {
+                                LivePttSessionManager.reopenFloatingPttFromDock(context)
+                                scope.launch {
+                                    snackbarHostState.showTopMessage("Floating PTT button reopened.")
+                                }
+                            },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 6.dp, bottom = 6.dp)
+                        )
                     }
                 }
             }
@@ -3421,8 +3809,8 @@ fun DirectChatScreen(
                     ),
                     modifier = Modifier
                         .fillMaxHeight()
-                        .fillMaxWidth(0.84f)
-                        .widthIn(max = 360.dp)
+                        .fillMaxWidth(0.60f)
+                        .widthIn(min = 210.dp, max = 250.dp)
                         .testTag("dm_user_list_right_drawer")
                 ) {
                     Box(
@@ -3484,7 +3872,7 @@ fun DirectChatScreen(
                 viewModel.purchaseScrollingBanner(
                     bannerText = bannerText,
                     colorHex = colorHex,
-                    buyerName = userProfile.displayName,
+                    buyerName = myEffectiveName,
                     staffTier = myStaffTier,
                     onInsufficientPoints = onOpenBuyPoints,
                     onSuccess = { showDmBannerDialog = false }
@@ -3510,10 +3898,11 @@ fun DirectChatScreen(
             onToggleMyThreadOptIn = { optIn -> viewModel.setPriorityChirpOptIn(optIn) },
             onSendPriorityChirp = { msg, cost ->
                 viewModel.sendPriorityBreakInChirp(
-                    senderName = userProfile.displayName,
+                    senderName = myEffectiveName,
                     senderTier = myStaffTier,
                     messageText = msg,
                     pointsCost = cost,
+                    displayedSenderTier = myDisplayedStaffTier,
                     onInsufficientPoints = onOpenBuyPoints
                 )
             },
@@ -3588,8 +3977,15 @@ fun DirectChatScreen(
 
     if (showAddPersonSheet && thread != null) {
         val currentMemberIds = remember(thread.participantIds) { thread.participantIds.toSet() }
-        val candidates = remember(directoryEntries, currentMemberIds) {
-            directoryEntries.filter { it.userId !in currentMemberIds }
+        val viewerIsAdult18Plus = userProfile.isAdultViewer18Plus()
+        val candidates = remember(directoryEntries, currentMemberIds, viewerIsAdult18Plus, isAppStaff) {
+            directoryEntries.filter {
+                it.userId !in currentMemberIds &&
+                    it.isVisibleToViewer(
+                        viewerIsAdult18Plus = viewerIsAdult18Plus,
+                        viewerIsStaff = isAppStaff
+                    )
+            }
         }
         val groupOwnerUid = if (isGroup) thread.effectiveGroupAdminId() else viewModel.currentUserId
         val ownerTier = remember(groupOwnerUid, userProfile, myStaffTier, directoryEntries) {
@@ -3850,7 +4246,7 @@ fun DirectChatScreen(
                                 if (isCurrentlyPinned) {
                                     viewModel.unpinMessage()
                                 } else {
-                                    viewModel.pinMessage(targetMsg, userProfile.displayName)
+                                    viewModel.pinMessage(targetMsg, myEffectiveName)
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
@@ -3982,7 +4378,7 @@ fun DirectChatScreen(
                     onClick = {
                         isSubmittingReport = true
                         viewModel.reportMessage(
-                            reporterName = userProfile.displayName,
+                            reporterName = myEffectiveName,
                             message = reportingMsg,
                             category = selectedCategory,
                             details = reportDetails,
@@ -4076,10 +4472,11 @@ fun DirectChatScreen(
             isSending = isSending,
             onSendAlert = { alertTitle, alertMessage ->
                 viewModel.sendGroupUrgentAlert(
-                    senderName = userProfile.effectiveDisplayName(),
+                    senderName = myEffectiveName,
                     senderTier = myStaffTier,
                     title = alertTitle,
                     message = alertMessage,
+                    displayedSenderTier = myDisplayedStaffTier,
                     onSuccess = { showSendGroupAlertDialog = false }
                 )
             },
@@ -4504,10 +4901,43 @@ private fun SnapChatMessageBlock(
         return
     }
 
-    // Centered system banners for Screenshot alerts and Admin-to-Support handoffs
+    // Centered system banners for Screenshot alerts, PTT disconnect, Enter/Exit presence, Group mod & Support handoffs
     if (message.isSystemNotice()) {
         val isScreenshot = message.isScreenshotNotice()
-        val accent = if (isScreenshot) LiveCoral else MaterialTheme.colorScheme.primary
+        val lowerText = message.text.lowercase()
+        val isPttDisconnect = lowerText.contains("disconnected from push-to-talk")
+        val isEntered = lowerText.endsWith("entered the chat")
+        val isExited = lowerText.endsWith("exited the chat")
+        val isModNotice = lowerText.contains("was bounced") ||
+            lowerText.contains("was banned") ||
+            lowerText.contains("was unbanned") ||
+            lowerText.contains("was muted") ||
+            lowerText.contains("was unmuted") ||
+            lowerText.contains("bounce was removed")
+        val accent = when {
+            isScreenshot -> LiveCoral
+            isPttDisconnect -> ModAmber
+            isEntered -> SafetyEmerald
+            isExited -> MaterialTheme.colorScheme.onSurfaceVariant
+            isModNotice -> if (lowerText.contains("banned") || lowerText.contains("bounced")) LiveCoral else ModAmber
+            else -> MaterialTheme.colorScheme.primary
+        }
+        val noticeIcon = when {
+            isScreenshot -> Icons.Rounded.Screenshot
+            isPttDisconnect -> Icons.Rounded.RecordVoiceOver
+            isEntered -> Icons.AutoMirrored.Rounded.Login
+            isExited -> Icons.AutoMirrored.Rounded.Logout
+            isModNotice -> Icons.Rounded.Gavel
+            else -> Icons.Rounded.SupportAgent
+        }
+        val noticeDesc = when {
+            isScreenshot -> "Screenshot taken"
+            isPttDisconnect -> "Push-to-Talk disconnected"
+            isEntered -> "Entered chat"
+            isExited -> "Exited chat"
+            isModNotice -> "Chat moderation notice"
+            else -> "Support handoff"
+        }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -4519,8 +4949,13 @@ private fun SnapChatMessageBlock(
                 color = accent.copy(alpha = 0.12f),
                 border = BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
                 modifier = Modifier.testTag(
-                    if (isScreenshot) "dm_screenshot_notice_${message.id}"
-                    else "dm_support_handoff_notice_${message.id}"
+                    when {
+                        isScreenshot -> "dm_screenshot_notice_${message.id}"
+                        isPttDisconnect -> "dm_ptt_disconnect_notice_${message.id}"
+                        isEntered || isExited -> "dm_presence_notice_${message.id}"
+                        isModNotice -> "dm_mod_notice_${message.id}"
+                        else -> "dm_support_handoff_notice_${message.id}"
+                    }
                 )
             ) {
                 Row(
@@ -4529,8 +4964,8 @@ private fun SnapChatMessageBlock(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Icon(
-                        imageVector = if (isScreenshot) Icons.Rounded.Screenshot else Icons.Rounded.SupportAgent,
-                        contentDescription = if (isScreenshot) "Screenshot taken" else "Support handoff",
+                        imageVector = noticeIcon,
+                        contentDescription = noticeDesc,
                         tint = accent,
                         modifier = Modifier.size(15.dp)
                     )
@@ -4868,3 +5303,36 @@ private fun SnapChatMessageBlock(
         }
     }
 }
+
+@Composable
+private fun TypingIndicatorDots(
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "dm_typing_dots")
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        repeat(3) { index ->
+            val dotAlpha by transition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 480),
+                    repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = StartOffset(index * 160)
+                ),
+                label = "typing_dot_$index"
+            )
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(color.copy(alpha = dotAlpha))
+            )
+        }
+    }
+}
+

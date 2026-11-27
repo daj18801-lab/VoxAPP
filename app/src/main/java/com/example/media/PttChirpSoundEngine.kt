@@ -152,10 +152,13 @@ object PttChirpSoundEngine {
             ToneSegment(startFreqHz = 0.0, endFreqHz = 0.0, durationMs = 45, volume = 0.0),
             ToneSegment(startFreqHz = 2093.0, endFreqHz = 2093.0, durationMs = 115, volume = 0.46)
         )
-        playSegmentsAsync(segments)
+        playSegmentsAsync(segments, audioUsage = AudioAttributes.USAGE_NOTIFICATION)
     }
 
-    private fun playSegmentsAsync(segments: List<ToneSegment>) {
+    private fun playSegmentsAsync(
+        segments: List<ToneSegment>,
+        audioUsage: Int = AudioAttributes.USAGE_ASSISTANCE_SONIFICATION
+    ) {
         scope.launch {
             runCatching {
                 val totalSamples = segments.sumOf { (SAMPLE_RATE * it.durationMs) / 1000 }
@@ -206,7 +209,7 @@ object PttChirpSoundEngine {
                 val track = AudioTrack.Builder()
                     .setAudioAttributes(
                         AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                            .setUsage(audioUsage)
                             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                             .build()
                     )

@@ -196,9 +196,9 @@ fun DmUserListDrawerContent(
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp)
-            .padding(top = 14.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 12.dp)
+            .padding(top = 12.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -207,14 +207,16 @@ fun DmUserListDrawerContent(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (thread.isGroup) "Group Users (${members.size})" else "Chat Users (${members.size})",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
+                    text = if (thread.isGroup) "Users (${members.size})" else "Chat (${members.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.padding(top = 4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(top = 3.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -373,7 +375,7 @@ private fun DmUserListRow(
             .testTag("dm_user_list_row_${member.uid}")
     ) {
         Row(
-            modifier = Modifier.padding(10.dp),
+            modifier = Modifier.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             SpeakingAvatarCircle(
@@ -381,11 +383,11 @@ private fun DmUserListRow(
                 colorHex = member.colorHex,
                 speakingLevel = if (member.isOnMic) 0.85f else 0f,
                 micActive = member.isOnMic,
-                size = 40.dp,
+                size = 34.dp,
                 photoBase64 = member.photoBase64,
                 userId = member.uid
             )
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -395,7 +397,7 @@ private fun DmUserListRow(
                     Text(
                         text = if (member.isSelf) "${member.displayName} (You)" else member.displayName,
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = usernameColor(member.staffTier, isRoomLeader = isLeader, userId = member.uid),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

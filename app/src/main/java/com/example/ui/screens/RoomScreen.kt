@@ -6,8 +6,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
@@ -51,6 +53,8 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
@@ -337,118 +341,177 @@ fun RoomScreen(
                             staffCapabilities.tier,
                             isRoomLeader = isRoomAdmin
                         )
+                        val canToggleInvisibleInRoom = activeRoom.canEnterInvisibleInRoom(viewModel.currentUserId, staffCapabilities)
+                        val hasStatusDropdownItems = isRoomAudioMutedForPtt || isPttActive || isCurrentlyInvisible || canToggleInvisibleInRoom
+                        var showRoomStatusDropdown by remember { mutableStateOf(false) }
+
                         // Top Live Room Header Bar
                         RoomTopBar(
                             room = activeRoom,
                             participantCount = visibleParticipants.size.coerceAtLeast(activeRoom.participantCount.toInt()),
                             isMod = isMod,
                             canEditRoom = canEditRoom,
-                            canToggleInvisible = activeRoom.canEnterInvisibleInRoom(viewModel.currentUserId, staffCapabilities),
-                            isCurrentlyInvisible = isCurrentlyInvisible,
-                            invisibleAccent = invisibleTint,
+                            hasStatusDropdown = hasStatusDropdownItems,
+                            isStatusDropdownExpanded = showRoomStatusDropdown,
+                            statusIndicatorColor = when {
+                                isRoomAudioMutedForPtt || isPttActive -> ModAmber
+                                isCurrentlyInvisible -> invisibleTint
+                                else -> null
+                            },
+                            onToggleStatusDropdown = { showRoomStatusDropdown = !showRoomStatusDropdown },
                             onBack = { viewModel.leaveRoomAndExit(onExitRoom) },
                             onEditRoomName = { showEditRoomDialog = true },
-                            onToggleInvisible = { viewModel.toggleInRoomInvisible() },
                             onOpenParticipants = { showParticipants = true },
                             onOpenModCenter = { showModCenter = true }
                         )
 
-                        // Active PTT Room Audio Muted Banner
-                        if (isRoomAudioMutedForPtt) {
-                            Surface(
-                                color = ModAmber.copy(alpha = 0.16f),
+                        // Collapsible Top Status Dropdown (PTT Open + Invisible Mode / Hidden from room)
+                        AnimatedVisibility(
+                            visible = showRoomStatusDropdown && hasStatusDropdownItems,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut()
+                        ) {
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .testTag("room_ptt_audio_muted_banner")
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .testTag("room_status_dropdown_panel"),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f)
+                                // Active PTT Banner (hidden inside dropdown)
+                                if (isRoomAudioMutedForPtt || isPttActive) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = ModAmber.copy(alpha = 0.16f),
+                                        border = BorderStroke(1.dp, ModAmber.copy(alpha = 0.4f)),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("room_ptt_audio_muted_banner")
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Rounded.VolumeOff,
-                                            contentDescription = "Room audio muted while PTT is active",
-                                            tint = ModAmber,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = "PTT Active (${pttPeerName.ifBlank { "Private Chat" }}) · Room audio muted",
-                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                            color = ModAmber,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    TextButton(
-                                        onClick = {
-                                            LivePttSessionManager.disconnect(context)
-                                            viewModel.setRoomAudioMutedForPtt(false)
-                                        },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        modifier = Modifier.testTag("room_ptt_banner_close_ptt_button")
-                                    ) {
-                                        Text(
-                                            text = "Close PTT & Hear",
-                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                            color = ModAmber
-                                        )
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.AutoMirrored.Rounded.VolumeOff,
+                                                    contentDescription = "Room audio muted while PTT is active",
+                                                    tint = ModAmber,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = if (isRoomAudioMutedForPtt) {
+                                                        "PTT Active (${pttPeerName.ifBlank { "Private Chat" }}) · Room audio muted"
+                                                    } else {
+                                                        "PTT Open (${pttPeerName.ifBlank { "Private Chat" }})"
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = ModAmber,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            TextButton(
+                                                onClick = {
+                                                    LivePttSessionManager.endPttSessionAndDisableInThread(
+                                                        context = context,
+                                                        threadId = pttActiveThreadId,
+                                                        disconnectAllDmThreads = true,
+                                                        notifyDmUsers = true,
+                                                        senderDisplayNameOverride = userProfile.effectiveDisplayName(),
+                                                        senderTierOverride = userProfile.displayedStaffTier(staffCapabilities.tier)
+                                                    )
+                                                    viewModel.setRoomAudioMutedForPtt(false)
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                modifier = Modifier.testTag("room_ptt_banner_close_ptt_button")
+                                            ) {
+                                                Text(
+                                                    text = "Close PTT & Hear",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = ModAmber
+                                                )
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
 
-                        // Stealth Invisible Mode Banner (shown to the invisible Admin / Support / Room Admin)
-                        if (isCurrentlyInvisible) {
-                            Surface(
-                                color = invisibleTint.copy(alpha = 0.16f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f)
+                                // Stealth Invisible Mode / Hidden from room Banner & Toggle (hidden inside dropdown)
+                                if (isCurrentlyInvisible || canToggleInvisibleInRoom) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isCurrentlyInvisible) {
+                                            invisibleTint.copy(alpha = 0.16f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surface
+                                        },
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isCurrentlyInvisible) invisibleTint.copy(alpha = 0.45f)
+                                            else MaterialTheme.colorScheme.outlineVariant
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("room_invisible_mode_banner")
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.VisibilityOff,
-                                            contentDescription = "Invisible mode active",
-                                            tint = invisibleTint,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = when {
-                                                staffCapabilities.isAdmin ->
-                                                    "INVISIBLE MODE · Hidden from room (Admin can speak on mic anytime)"
-                                                isRoomAdmin && !staffCapabilities.isStaff ->
-                                                    "INVISIBLE MODE · Hidden from room users (App Admins & Support can see you)"
-                                                else ->
-                                                    "INVISIBLE MODE · Hidden from room (Go Visible to use mic)"
-                                            },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = invisibleTint
-                                        )
-                                    }
-                                    OutlinedButton(
-                                        onClick = { viewModel.toggleInRoomInvisible() },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        modifier = Modifier.testTag("go_visible_banner_button")
-                                    ) {
-                                        Text("Go Visible", style = MaterialTheme.typography.labelSmall)
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isCurrentlyInvisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                                    contentDescription = if (isCurrentlyInvisible) "Invisible mode active" else "Visible in room",
+                                                    tint = if (isCurrentlyInvisible) invisibleTint else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = if (isCurrentlyInvisible) {
+                                                        when {
+                                                            staffCapabilities.isAdmin ->
+                                                                "INVISIBLE MODE · Hidden from room (Admin can speak on mic anytime)"
+                                                            isRoomAdmin && !staffCapabilities.isStaff ->
+                                                                "INVISIBLE MODE · Hidden from room users (App Admins & Support can see you)"
+                                                            else ->
+                                                                "INVISIBLE MODE · Hidden from room (Go Visible to use mic)"
+                                                        }
+                                                    } else {
+                                                        "Visible in room · Switch to Invisible Mode to hide from room"
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (isCurrentlyInvisible) invisibleTint else MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            OutlinedButton(
+                                                onClick = { viewModel.toggleInRoomInvisible() },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                modifier = Modifier.testTag(
+                                                    if (isCurrentlyInvisible) "go_visible_banner_button" else "room_topbar_invisible_toggle"
+                                                )
+                                            ) {
+                                                Text(
+                                                    text = if (isCurrentlyInvisible) "Go Visible" else "Go Invisible",
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -665,8 +728,8 @@ fun RoomScreen(
                     ),
                     modifier = Modifier
                         .fillMaxHeight()
-                        .fillMaxWidth(0.84f)
-                        .widthIn(max = 360.dp)
+                        .fillMaxWidth(0.60f)
+                        .widthIn(min = 210.dp, max = 250.dp)
                         .testTag("room_user_list_right_drawer")
                 ) {
                     Box(
@@ -750,29 +813,33 @@ fun RoomScreen(
                     showEditRoomDialog = true
                 },
                 onUnmuteUser = { uid ->
-                    viewModel.toggleMuteParticipant(uid, "User", userProfile.displayName, mute = false)
+                    val actorDisplay = userProfile.effectiveDisplayName()
+                    viewModel.toggleMuteParticipant(uid, "User", actorDisplay, mute = false)
                 },
                 onUnbanUser = { uid ->
-                    viewModel.unbanUser(uid, userProfile.displayName)
+                    val actorDisplay = userProfile.effectiveDisplayName()
+                    viewModel.unbanUser(uid, actorDisplay)
                 },
                 onRemoveBounce = { uid, name ->
-                    viewModel.removeBounce(uid, name, userProfile.displayName)
+                    val actorDisplay = userProfile.effectiveDisplayName()
+                    viewModel.removeBounce(uid, name, actorDisplay)
                 },
                 onBanBouncedUser = { uid, name ->
+                    val actorDisplay = userProfile.effectiveDisplayName()
                     viewModel.kickOrBanUser(
                         targetUserId = uid,
                         targetName = name,
-                        actorName = userProfile.displayName,
+                        actorName = actorDisplay,
                         ban = true,
-                        reason = "Banned from room by ${userProfile.displayName}"
+                        reason = "Banned from room by $actorDisplay"
                     )
                 },
                 onUpdateRoomPinLock = { pinLocked, pinCode ->
-                    viewModel.updateRoomPinLock(pinLocked, pinCode, userProfile.displayName)
+                    viewModel.updateRoomPinLock(pinLocked, pinCode, userProfile.effectiveDisplayName())
                 },
                 onCloseRoom = {
                     showModCenter = false
-                    viewModel.closeRoomAsHostOrAdmin(userProfile.displayName, onExitRoom)
+                    viewModel.closeRoomAsHostOrAdmin(userProfile.effectiveDisplayName(), onExitRoom)
                 }
             )
         }
@@ -786,6 +853,7 @@ fun RoomScreen(
             onDismissRequest = { actionTarget = null },
             containerColor = MaterialTheme.colorScheme.surface
         ) {
+            val actorDisplay = userProfile.effectiveDisplayName()
             UserModerationActionSheet(
                 room = room,
                 currentUserId = viewModel.currentUserId,
@@ -799,7 +867,7 @@ fun RoomScreen(
                     viewModel.toggleMuteParticipant(
                         targetUserId = currentTarget.userId,
                         targetName = currentTarget.displayName,
-                        actorName = userProfile.displayName,
+                        actorName = actorDisplay,
                         mute = mute
                     )
                 },
@@ -807,7 +875,7 @@ fun RoomScreen(
                     viewModel.changeParticipantRole(
                         targetUserId = currentTarget.userId,
                         targetName = currentTarget.displayName,
-                        actorName = userProfile.displayName,
+                        actorName = actorDisplay,
                         newRole = newRole
                     )
                 },
@@ -815,26 +883,26 @@ fun RoomScreen(
                     viewModel.bounceUser(
                         targetUserId = currentTarget.userId,
                         targetName = currentTarget.displayName,
-                        actorName = userProfile.displayName,
-                        reason = "Bounced by ${userProfile.displayName}"
+                        actorName = actorDisplay,
+                        reason = "Bounced by $actorDisplay"
                     )
                 },
                 onKick = {
                     viewModel.kickOrBanUser(
                         targetUserId = currentTarget.userId,
                         targetName = currentTarget.displayName,
-                        actorName = userProfile.displayName,
+                        actorName = actorDisplay,
                         ban = false,
-                        reason = "Kicked by ${userProfile.displayName}"
+                        reason = "Kicked by $actorDisplay"
                     )
                 },
                 onBan = {
                     viewModel.kickOrBanUser(
                         targetUserId = currentTarget.userId,
                         targetName = currentTarget.displayName,
-                        actorName = userProfile.displayName,
+                        actorName = actorDisplay,
                         ban = true,
-                        reason = "Banned by ${userProfile.displayName}"
+                        reason = "Banned by $actorDisplay"
                     )
                 },
                 onSuspend = { suspendTarget = currentTarget },
@@ -901,13 +969,20 @@ fun RoomScreen(
                 Text(
                     text = "You have an active Push-to-Talk session (${pttPeerName.ifBlank { "Private Chat" }}). " +
                         "You cannot hear chat room audio while PTT is open. " +
-                        "Choose whether to close PTT so you can hear this room, or keep PTT open and enter with no room audio."
+                        "End your PTT session to disconnect your DM Push-to-Talk connections and notify your DM chat, or keep PTT open with no room audio."
                 )
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        LivePttSessionManager.disconnect(context)
+                        LivePttSessionManager.endPttSessionAndDisableInThread(
+                            context = context,
+                            threadId = pttActiveThreadId,
+                            disconnectAllDmThreads = true,
+                            notifyDmUsers = true,
+                            senderDisplayNameOverride = userProfile.effectiveDisplayName(),
+                            senderTierOverride = userProfile.displayedStaffTier(staffCapabilities.tier)
+                        )
                         viewModel.setRoomAudioMutedForPtt(false)
                         showPttConflictDialog = false
                     },
@@ -918,7 +993,7 @@ fun RoomScreen(
                     modifier = Modifier.testTag("room_ptt_conflict_close_ptt_button")
                 ) {
                     Text(
-                        text = "Close PTT & Hear Room",
+                        text = "Yes, End PTT & Hear Room",
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -932,7 +1007,7 @@ fun RoomScreen(
                     modifier = Modifier.testTag("room_ptt_conflict_keep_ptt_button")
                 ) {
                     Text(
-                        text = "Keep PTT (No Room Audio)",
+                        text = "No, Keep PTT",
                         fontWeight = FontWeight.SemiBold
                     )
                 }
@@ -1059,12 +1134,12 @@ private fun RoomTopBar(
     participantCount: Int,
     isMod: Boolean,
     canEditRoom: Boolean,
-    canToggleInvisible: Boolean,
-    isCurrentlyInvisible: Boolean,
-    invisibleAccent: Color,
+    hasStatusDropdown: Boolean,
+    isStatusDropdownExpanded: Boolean,
+    statusIndicatorColor: Color?,
+    onToggleStatusDropdown: () -> Unit,
     onBack: () -> Unit,
     onEditRoomName: () -> Unit,
-    onToggleInvisible: () -> Unit,
     onOpenParticipants: () -> Unit,
     onOpenModCenter: () -> Unit
 ) {
@@ -1165,17 +1240,50 @@ private fun RoomTopBar(
                 }
             }
 
-            if (canToggleInvisible) {
+            if (hasStatusDropdown) {
                 IconButton(
-                    onClick = onToggleInvisible,
-                    modifier = Modifier.testTag("room_topbar_invisible_toggle")
+                    onClick = onToggleStatusDropdown,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("room_topbar_status_dropdown_button")
                 ) {
-                    Icon(
-                        imageVector = if (isCurrentlyInvisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                        contentDescription = if (isCurrentlyInvisible) "Switch to visible" else "Switch to invisible",
-                        tint = if (isCurrentlyInvisible) invisibleAccent else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Box(contentAlignment = Alignment.Center) {
+                        Surface(
+                            shape = CircleShape,
+                            color = if (isStatusDropdownExpanded) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = if (isStatusDropdownExpanded) {
+                                        Icons.Rounded.KeyboardArrowUp
+                                    } else {
+                                        Icons.Rounded.KeyboardArrowDown
+                                    },
+                                    contentDescription = if (isStatusDropdownExpanded) {
+                                        "Hide PTT and invisible status"
+                                    } else {
+                                        "Show PTT and invisible status"
+                                    },
+                                    tint = if (isStatusDropdownExpanded) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                        if (!isStatusDropdownExpanded && statusIndicatorColor != null) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .size(9.dp)
+                                    .clip(CircleShape)
+                                    .background(statusIndicatorColor)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1571,20 +1679,37 @@ private fun ChatMessageBubble(
     val type = message.messageTypeEnum()
 
     if (type == MessageType.MOD_NOTICE || type == MessageType.JOIN_LEAVE) {
+        val lower = message.text.lowercase()
+        val isBanOrBounce = type == MessageType.MOD_NOTICE &&
+            (lower.contains("banned") || lower.contains("bounced") || lower.contains("kicked"))
+        val isJoin = type == MessageType.JOIN_LEAVE && lower.contains("joined")
+        val pillTint = when {
+            isBanOrBounce -> LiveCoral
+            type == MessageType.MOD_NOTICE -> ModAmber
+            isJoin -> SafetyEmerald
+            else -> MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        val pillBg = when {
+            isBanOrBounce -> LiveCoral.copy(alpha = 0.14f)
+            type == MessageType.MOD_NOTICE -> ModAmber.copy(alpha = 0.16f)
+            isJoin -> SafetyEmerald.copy(alpha = 0.12f)
+            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+        }
         Box(
             modifier = Modifier.fillMaxWidth(),
             contentAlignment = Alignment.Center
         ) {
             Surface(
                 shape = RoundedCornerShape(999.dp),
-                color = if (type == MessageType.MOD_NOTICE) ModAmber.copy(alpha = 0.16f)
-                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                color = pillBg,
+                border = BorderStroke(1.dp, pillTint.copy(alpha = 0.28f))
             ) {
                 Text(
                     text = message.text,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (type == MessageType.MOD_NOTICE) ModAmber
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = if (type == MessageType.MOD_NOTICE) FontWeight.Bold else FontWeight.SemiBold
+                    ),
+                    color = pillTint,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
                 )
             }
@@ -1797,7 +1922,8 @@ private fun RoomBottomDock(
     onToggleRaiseHand: () -> Unit
 ) {
     val isMuted = !staffCapabilities.isAdmin && room.mutedUserIds.contains(currentUserId)
-    val isMessagingDisabled = !staffCapabilities.isAdmin && userProfile.disableMessaging
+    val isMessagingDisabled = userProfile.disableMessaging ||
+        userProfile.isFeatureRestricted(com.example.data.RestrictableFeature.DM)
     val isChatBlocked = isMuted || isMessagingDisabled
     val micBlockedReason: String? = when {
         !staffCapabilities.isAdmin && room.adminMicPriorityActive -> "Admin on Mic"

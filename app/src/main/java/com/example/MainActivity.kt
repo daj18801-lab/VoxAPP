@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
@@ -48,9 +49,11 @@ import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PhonelinkRing
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -150,8 +153,10 @@ import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
 import com.example.security.DeviceBanManager
+import com.example.ui.components.SuspendedAccountLoginPopup
 import com.example.security.MessageSpamTracker
 import com.example.ui.components.FeatureRestrictedPlaceholder
+import com.example.ui.components.FloatingPttOverlayBubble
 import com.example.ui.components.LocalBusinessUserIds
 import com.example.ui.components.LocalCustomNameColors
 import com.example.ui.components.LocalProUserIds
@@ -173,6 +178,7 @@ import com.example.ui.screens.RoomScreen
 import com.example.ui.screens.SafetyScreen
 import com.example.ui.screens.UserProfileScreen
 import com.example.ui.screens.TrialVoxStageApp
+import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.VoxStageTheme
 import com.example.viewmodel.DirectChatViewModel
 import com.example.viewmodel.MainViewModel
@@ -281,7 +287,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN &&
+            DirectMessageNotificationPrefs.isVolumeDownPttEnabled(this)
+        ) {
             when (event.action) {
                 KeyEvent.ACTION_DOWN -> {
                     if (event.repeatCount == 0) {
@@ -302,6 +310,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        } else if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN && isVolumeDownPttHeld) {
+            releaseVolumeDownPttIfHeld()
         }
         return super.dispatchKeyEvent(event)
     }
@@ -375,6 +385,28 @@ fun VoxStageRoot(
     var trialNoticeMessage by remember { mutableStateOf<String?>(null) }
     var pendingAdminRelogin by remember { mutableStateOf(false) }
 
+    val rootLifecycleOwner = LocalLifecycleOwner.current
+    var showFirstOpenOverlayDialog by remember(context) {
+        mutableStateOf(
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                !Settings.canDrawOverlays(context) &&
+                !DirectMessageNotificationPrefs.hasPromptedOverlayOnFirstOpen(context)
+        )
+    }
+    DisposableEffect(rootLifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                Settings.canDrawOverlays(context)
+            ) {
+                DirectMessageNotificationPrefs.setPromptedOverlayOnFirstOpen(context, true)
+                showFirstOpenOverlayDialog = false
+            }
+        }
+        rootLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { rootLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     if (user == null) {
         LaunchedEffect(Unit) {
             (context as? ComponentActivity)?.enableEdgeToEdge(
@@ -421,6 +453,19 @@ fun VoxStageRoot(
                     }
                 )
             }
+            if (showFirstOpenOverlayDialog) {
+                FirstOpenOverlayPermissionDialog(
+                    onOpenSettings = {
+                        DirectMessageNotificationPrefs.setPromptedOverlayOnFirstOpen(context, true)
+                        showFirstOpenOverlayDialog = false
+                        openAlwaysOnTopSettings(context)
+                    },
+                    onDismiss = {
+                        DirectMessageNotificationPrefs.setPromptedOverlayOnFirstOpen(context, true)
+                        showFirstOpenOverlayDialog = false
+                    }
+                )
+            }
         }
     } else {
         val uid = user.uid
@@ -438,7 +483,88 @@ fun VoxStageRoot(
                 }
             )
         }
+        if (showFirstOpenOverlayDialog) {
+            VoxStageTheme(darkTheme = false) {
+                FirstOpenOverlayPermissionDialog(
+                    onOpenSettings = {
+                        DirectMessageNotificationPrefs.setPromptedOverlayOnFirstOpen(context, true)
+                        showFirstOpenOverlayDialog = false
+                        openAlwaysOnTopSettings(context)
+                    },
+                    onDismiss = {
+                        DirectMessageNotificationPrefs.setPromptedOverlayOnFirstOpen(context, true)
+                        showFirstOpenOverlayDialog = false
+                    }
+                )
+            }
+        }
     }
+}
+
+private fun openAlwaysOnTopSettings(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+    val pkgIntent = Intent(
+        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        Uri.parse("package:${context.packageName}")
+    ).apply {
+        if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val opened = runCatching {
+        context.startActivity(pkgIntent)
+    }.isSuccess
+    if (!opened) {
+        val fallback = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+            if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { context.startActivity(fallback) }
+    }
+}
+
+@Composable
+private fun FirstOpenOverlayPermissionDialog(
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("first_open_overlay_permission_dialog"),
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.Layers,
+                contentDescription = "Display over other apps",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "Allow Always On Top",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+            )
+        },
+        text = {
+            Text(
+                text = "Enable \"Display over other apps\" (Always on top) in your phone settings so VOX Floating Push-to-Talk and urgent alerts can stay accessible while you use other apps.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag("first_open_overlay_open_settings_button")
+            ) {
+                Text("Open Settings")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("first_open_overlay_not_now_button")
+            ) {
+                Text("Not Now")
+            }
+        }
+    )
 }
 
 @Composable
@@ -485,10 +611,21 @@ private fun AuthenticatedVoxStageApp(
     val friendships by mainViewModel.friendshipsState.collectAsStateWithLifecycle()
     val directoryEntries by mainViewModel.userDirectoryState.collectAsStateWithLifecycle()
     val isPublishingPost by mainViewModel.isPublishingPost.collectAsStateWithLifecycle()
+    val isWalletBusy by mainViewModel.isProcessingWallet.collectAsStateWithLifecycle()
     val mySubscriptions by mainViewModel.mySubscriptionsState.collectAsStateWithLifecycle()
+    val myTransactions by mainViewModel.myTransactionsState.collectAsStateWithLifecycle()
     val publicRoomsState by mainViewModel.publicRoomsState.collectAsStateWithLifecycle()
     val safetyReportsState by mainViewModel.safetyReportsState.collectAsStateWithLifecycle()
     val unreadAlerts by mainViewModel.unreadAlertsState.collectAsStateWithLifecycle()
+    val allAlerts by mainViewModel.allAlertsState.collectAsStateWithLifecycle()
+    val staffRoles by mainViewModel.staffRolesState.collectAsStateWithLifecycle()
+    val staffInvites by mainViewModel.staffInvitesState.collectAsStateWithLifecycle()
+    val appConfig by mainViewModel.appConfigState.collectAsStateWithLifecycle()
+    val officialVoxChatRoom by mainViewModel.officialVoxChatRoomState.collectAsStateWithLifecycle()
+    val refundReports by mainViewModel.refundReportsState.collectAsStateWithLifecycle()
+    val perkGrants by mainViewModel.perkGrantsState.collectAsStateWithLifecycle()
+    val allTransactions by mainViewModel.allTransactionsState.collectAsStateWithLifecycle()
+    val allCreatorSubscriptions by mainViewModel.allCreatorSubscriptionsState.collectAsStateWithLifecycle()
     val allUsers by mainViewModel.allUsersState.collectAsStateWithLifecycle()
     val appBroadcasts by mainViewModel.appBroadcastsState.collectAsStateWithLifecycle()
     val pendingRoomTransfer by mainViewModel.pendingRoomTransferState.collectAsStateWithLifecycle()
@@ -500,6 +637,8 @@ private fun AuthenticatedVoxStageApp(
     val allModerationFiles by mainViewModel.allModerationFilesState.collectAsStateWithLifecycle()
     val suspensionRequests by mainViewModel.suspensionRequestsState.collectAsStateWithLifecycle()
     val adminNotifications by mainViewModel.adminNotificationsState.collectAsStateWithLifecycle()
+    val allDeviceRecords by mainViewModel.allDeviceRecordsState.collectAsStateWithLifecycle()
+    val supportTickets by mainViewModel.supportTicketsState.collectAsStateWithLifecycle()
     val companySubAccounts by mainViewModel.companySubAccountsState.collectAsStateWithLifecycle()
     val myCompanySubAccount by mainViewModel.myCompanySubAccountState.collectAsStateWithLifecycle()
     val companySubAccountDms by mainViewModel.companySubAccountDmsState.collectAsStateWithLifecycle()
@@ -646,7 +785,16 @@ private fun AuthenticatedVoxStageApp(
     var incomingGroupUrgentAlertThread by remember { mutableStateOf<com.example.data.DirectThread?>(null) }
 
     val pttActiveThreadId by LivePttSessionManager.activeThreadId.collectAsStateWithLifecycle()
+    val pttPeerName by LivePttSessionManager.activePeerName.collectAsStateWithLifecycle()
+    val pttIsConnected by LivePttSessionManager.isConnected.collectAsStateWithLifecycle()
+    val pttIsConnecting by LivePttSessionManager.isConnecting.collectAsStateWithLifecycle()
+    val pttIsTransmitting by LivePttSessionManager.isTransmitting.collectAsStateWithLifecycle()
+    val pttRemoteSpeakerName by LivePttSessionManager.remoteSpeakingName.collectAsStateWithLifecycle()
+    val pttActiveTheme by LivePttSessionManager.activePttTheme.collectAsStateWithLifecycle()
+    val pttIsListenOnly by LivePttSessionManager.isListenOnlyMode.collectAsStateWithLifecycle()
     val pttFloatingEnabled by LivePttSessionManager.isFloatingPttEnabled.collectAsStateWithLifecycle()
+    val pttFloatingDockedThreadId by LivePttSessionManager.floatingButtonDockedThreadId.collectAsStateWithLifecycle()
+    val pendingFloatingClosePrompt by LivePttSessionManager.pendingFloatingClosePrompt.collectAsStateWithLifecycle()
     LaunchedEffect(context) {
         try {
             LivePttSessionManager.syncAudioPrefs(context)
@@ -655,11 +803,19 @@ private fun AuthenticatedVoxStageApp(
         }
     }
 
-    var dismissedInAppFloatingPttThreadId by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(pttFloatingEnabled, pttActiveThreadId) {
-        if (pttFloatingEnabled || pttActiveThreadId == null || pttActiveThreadId != dismissedInAppFloatingPttThreadId) {
-            dismissedInAppFloatingPttThreadId = null
+    var canDrawSystemOverlay by remember {
+        mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context))
+    }
+    val overlayCheckLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(overlayCheckLifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                canDrawSystemOverlay =
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+            }
         }
+        overlayCheckLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { overlayCheckLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     var dismissedNonUrgentAlertKeys by remember(currentUserId) {
@@ -784,15 +940,30 @@ private fun AuthenticatedVoxStageApp(
     val customNameColorsByUserId = remember(
         directoryEntries,
         realUserProfile?.customNameColorHex,
+        realUserProfile?.proMember,
+        realUserProfile?.proLifetime,
+        realUserProfile?.proExpiresAtMillis,
+        realUserProfile?.proTier,
+        realStaffCapabilities.isAdmin,
+        staffCapabilities.tier,
         currentUserId
     ) {
+        val nowMs = System.currentTimeMillis()
         buildMap {
             directoryEntries.forEach { entry ->
-                val hex = entry.customNameColorHex.trim()
-                if (hex.isNotBlank()) put(entry.userId, hex)
+                val hex = entry.customNameColorHex.trim().uppercase()
+                if (hex.isNotBlank()) {
+                    val isEntryAdmin = StaffTier.fromRaw(entry.staffTier) == StaffTier.ADMIN
+                    if (isEntryAdmin || (entry.canUseVipProNameColor(nowMs) && com.example.data.isAllowedVipProNameColorHex(hex))) {
+                        put(entry.userId, hex)
+                    }
+                }
             }
-            val myHex = realUserProfile?.customNameColorHex?.trim().orEmpty()
-            if (myHex.isNotBlank()) put(currentUserId, myHex) else remove(currentUserId)
+            val myHex = realUserProfile?.customNameColorHex?.trim()?.uppercase().orEmpty()
+            val canUseMyColor = realStaffCapabilities.isAdmin ||
+                (realUserProfile?.canChooseVipProNameColor(staffCapabilities.tier, nowMs) == true &&
+                    com.example.data.isAllowedVipProNameColorHex(myHex))
+            if (myHex.isNotBlank() && canUseMyColor) put(currentUserId, myHex) else remove(currentUserId)
         }
     }
 
@@ -872,11 +1043,31 @@ private fun AuthenticatedVoxStageApp(
     val unreadAdminNotificationsCount = remember(adminNotifications) {
         adminNotifications.count { !it.read }
     }
+    val pendingSuspensionAppealsCount = remember(supportTickets) {
+        supportTickets.count { it.isSuspensionAppeal() && it.staffResponse.isBlank() }
+    }
+    val pendingFlaggedDevicesCount = remember(allDeviceRecords, nowClockMs) {
+        allDeviceRecords.count { it.isPendingStaffReview() || it.isTimedSuspended(nowClockMs) }
+    }
+    val pendingDeletedAccountFilesCount = remember(allModerationFiles) {
+        allModerationFiles.count { it.deletedAccount && !it.deletedFileDecision.equals("KEPT", ignoreCase = true) }
+    }
+    val unreadStaffSafetyAlertsCount = remember(adminNotifications) {
+        adminNotifications.count {
+            !it.read && it.typeEnum() in setOf(
+                com.example.data.AdminNotificationType.ADULT_TO_MINOR_DM,
+                com.example.data.AdminNotificationType.BOUNCE_EVASION_DEVICE_SUSPENSION,
+                com.example.data.AdminNotificationType.AUTOMOD_ROOM_FLOOD_SUSPENSION,
+                com.example.data.AdminNotificationType.RETURNING_REPORTED_DEVICE,
+                com.example.data.AdminNotificationType.DELETED_ACCOUNT_WITH_REPORTS
+            )
+        }
+    }
     val safetyBadgeCount = when {
         staffCapabilities.isAdmin ->
-            openSafetyReportsCount + activeInvestigationsCount + pendingSuspensionRequestsCount + unreadAdminNotificationsCount + businessHelpThreads.size + unreadAlerts.size
+            openSafetyReportsCount + activeInvestigationsCount + pendingSuspensionRequestsCount + pendingSuspensionAppealsCount + unreadAdminNotificationsCount + pendingFlaggedDevicesCount + pendingDeletedAccountFilesCount + businessHelpThreads.size + unreadAlerts.size
         staffCapabilities.isStaff ->
-            openSafetyReportsCount + activeInvestigationsCount + businessHelpThreads.size + unreadAlerts.size
+            openSafetyReportsCount + activeInvestigationsCount + pendingSuspensionAppealsCount + unreadStaffSafetyAlertsCount + pendingFlaggedDevicesCount + businessHelpThreads.size + unreadAlerts.size
         else ->
             unreadAlerts.size + if (myModerationFile?.hasUnacknowledgedWarning() == true) 1 else 0
     }
@@ -935,13 +1126,52 @@ private fun AuthenticatedVoxStageApp(
     val isLoginFeatureRestricted = !realStaffCapabilities.isAdmin &&
         userProfile?.isFeatureRestricted(RestrictableFeature.LOGIN, nowClockMs) == true
 
+    LaunchedEffect(currentUserId, deviceHash, myModerationFile?.reportCount, realStaffCapabilities.isAdmin) {
+        val reports = myModerationFile?.reportCount ?: 0
+        if (!realStaffCapabilities.isAdmin && reports > 0) {
+            mainViewModel.syncReportedDeviceFlagIfNeeded(deviceHash, reports)
+        }
+    }
+
+    val isReturningDeviceFlagged = !realStaffCapabilities.isStaff &&
+        bannedDevice?.isFlaggedForUser(currentUserId) == true
+
+    LaunchedEffect(currentUserId, deviceHash, bannedDevice, realStaffCapabilities.isStaff, userProfile?.displayName) {
+        val dev = bannedDevice ?: return@LaunchedEffect
+        if (!realStaffCapabilities.isStaff && dev.isFlaggedForUser(currentUserId)) {
+            if (!dev.isPendingStaffReview() || dev.returningUserId != currentUserId) {
+                mainViewModel.flagReturningUserOnReportedDevice(
+                    deviceHash = deviceHash,
+                    existingRecord = dev
+                )
+            }
+        }
+    }
+
+    val isDeviceTimedSuspendedNow = !realStaffCapabilities.isAdmin &&
+        bannedDevice?.isTimedSuspended(nowClockMs) == true
+
     val isSuspendedNow = !realStaffCapabilities.isAdmin && (
         isDeviceBannedNow ||
+            isDeviceTimedSuspendedNow ||
             userProfile?.globallyBanned == true ||
             userProfile?.currentlySuspended(nowClockMs) == true ||
             myModerationFile?.isCurrentlySuspended(nowClockMs) == true ||
             isLoginFeatureRestricted
         )
+
+    // Youth Safety Discovery & Search Filter:
+    // 13-17 users are hidden from search and Discovery for 18+ non-staff users.
+    val viewerIsAdult18Plus = userProfile?.isAdultViewer18Plus() == true
+    val visibleDirectoryEntries = remember(directoryEntries, viewerIsAdult18Plus, staffCapabilities.isStaff, currentUserId) {
+        directoryEntries.filter { entry ->
+            entry.userId == currentUserId ||
+                entry.isVisibleToViewer(
+                    viewerIsAdult18Plus = viewerIsAdult18Plus,
+                    viewerIsStaff = staffCapabilities.isStaff
+                )
+        }
+    }
 
     LaunchedEffect(nightModeEnabled) {
         (context as? ComponentActivity)?.enableEdgeToEdge(
@@ -1103,47 +1333,78 @@ private fun AuthenticatedVoxStageApp(
         (!realStaffCapabilities.isAdmin &&
             userProfile?.isFeatureRestricted(RestrictableFeature.PTT, nowClockMs) == true)
 
-    LaunchedEffect(isSuspendedNow, isCompanySubAccountLockedOut, isSubPttBlocked) {
-        if (isSuspendedNow || isCompanySubAccountLockedOut || isSubPttBlocked) {
+    LaunchedEffect(isSuspendedNow, isCompanySubAccountLockedOut) {
+        if (isSuspendedNow || isCompanySubAccountLockedOut) {
             LivePttSessionManager.disconnect(context)
         }
     }
 
-    LaunchedEffect(directThreadsState, userProfile, staffCapabilities.isAdmin, isSuspendedNow, isSubPttBlocked, currentUserId) {
-        if (isSuspendedNow || isSubPttBlocked) {
+    LaunchedEffect(directThreadsState, userProfile, staffCapabilities.isAdmin, isSuspendedNow, isCompanySubAccountLockedOut, isSubPttBlocked, currentUserId) {
+        if (isSuspendedNow || isCompanySubAccountLockedOut) {
             LivePttSessionManager.disconnect(context)
             return@LaunchedEffect
+        }
+        val threads = (directThreadsState as? UiState.Success)?.data ?: return@LaunchedEffect
+        threads.forEach { thread ->
+            LivePttSessionManager.syncActiveThreadPttFlags(
+                context = context,
+                thread = thread,
+                currentUserId = currentUserId
+            )
         }
         val hasMicPermission = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (!hasMicPermission) {
-            return@LaunchedEffect
-        }
-        val threads = (directThreadsState as? UiState.Success)?.data ?: return@LaunchedEffect
         val micBlocked = (!staffCapabilities.isAdmin && userProfile?.disableMic == true) || isSubPttBlocked
         val activeTid = LivePttSessionManager.activeThreadId.value
-        val mutualThreads = threads.filter { thread ->
+        val myName = userProfile?.effectiveDisplayName()?.ifBlank { initialDisplayName } ?: initialDisplayName
+
+        val broadcastThreads = if (!micBlocked && hasMicPermission) {
+            threads.filter { thread ->
+                !thread.hasAnyBlock() &&
+                    !thread.isUserKicked(currentUserId) &&
+                    thread.isPttEnabledFor(currentUserId) &&
+                    thread.hasAnyLiveAudioListenerOtherThan(currentUserId) &&
+                    !thread.isPttVoiceToTextEnabledFor(currentUserId)
+            }
+        } else {
+            emptyList()
+        }
+        val targetBroadcastThread = broadcastThreads.firstOrNull { it.id == activeTid } ?: broadcastThreads.firstOrNull()
+
+        val listenOnlyThreads = threads.filter { thread ->
             !thread.hasAnyBlock() &&
                 !thread.isUserKicked(currentUserId) &&
-                thread.isMutualPttActive(currentUserId)
+                thread.isPttListenOnlyEnabledFor(currentUserId)
         }
-        val targetThread = mutualThreads.firstOrNull { it.id == activeTid } ?: mutualThreads.firstOrNull()
-        if (targetThread != null && !micBlocked) {
+        val targetListenOnlyThread = listenOnlyThreads.firstOrNull { it.id == activeTid } ?: listenOnlyThreads.firstOrNull()
+
+        if (targetBroadcastThread != null) {
             try {
-                val myName = userProfile?.displayName?.ifBlank { initialDisplayName } ?: initialDisplayName
                 LivePttSessionManager.ensureConnected(
                     context = context,
-                    threadId = targetThread.id,
-                    peerName = targetThread.displayTitle(currentUserId),
+                    threadId = targetBroadcastThread.id,
+                    peerName = targetBroadcastThread.displayTitle(currentUserId),
                     myUserId = currentUserId,
                     myDisplayName = myName.ifBlank { "Member" }
                 )
             } catch (e: Exception) {
                 Log.e("VoxStagePTT", "Auto PTT connect skipped after login", e)
             }
-        } else if (LivePttSessionManager.activeThreadId.value != null) {
+        } else if (targetListenOnlyThread != null) {
+            try {
+                LivePttSessionManager.ensureConnectedListenOnly(
+                    context = context,
+                    threadId = targetListenOnlyThread.id,
+                    peerName = targetListenOnlyThread.displayTitle(currentUserId),
+                    myUserId = currentUserId,
+                    myDisplayName = myName.ifBlank { "Member" }
+                )
+            } catch (e: Exception) {
+                Log.e("VoxStagePTT", "Auto Live Audio listen-only connect skipped", e)
+            }
+        } else if (LivePttSessionManager.activeThreadId.value != null && !LivePttSessionManager.isTransmitting.value) {
             LivePttSessionManager.disconnect(context)
         }
     }
@@ -1469,7 +1730,7 @@ private fun AuthenticatedVoxStageApp(
                                         staffCapabilities = staffCapabilities,
                                         directThreadsState = directThreadsState,
                                         friendships = friendships,
-                                        directoryEntries = directoryEntries,
+                                        directoryEntries = visibleDirectoryEntries,
                                         liveRoomsCount = liveRoomsCount,
                                         isPublishingPost = isPublishingPost,
                                         viewerIsAdultVerified = viewerIsAdultVerified,
@@ -1503,7 +1764,24 @@ private fun AuthenticatedVoxStageApp(
                                             navController.navigate(ROUTE_COMPANY_TEAM) { launchSingleTop = true }
                                         },
                                         onOpenWorkHub = { navigateToTopTab(ROUTE_WORK_HUB) },
-                                        onToggleDnd = mainViewModel::setDoNotDisturb
+                                        onToggleDnd = mainViewModel::setDoNotDisturb,
+                                        onAddUserToThread = { thread, candidate ->
+                                            mainViewModel.addUserToPrivateChat(thread, candidate) { newTid ->
+                                                navController.navigate("dm/$newTid")
+                                            }
+                                        },
+                                        onRemoveUserFromThread = { thread, targetUid, targetName ->
+                                            mainViewModel.removeUserFromDirectThread(context, thread, targetUid, targetName)
+                                        },
+                                        onRemoveDirectThread = { thread ->
+                                            mainViewModel.removeDirectThread(context, thread)
+                                        },
+                                        onConnectPttForThread = { thread ->
+                                            mainViewModel.connectPttForDirectThread(context, thread)
+                                        },
+                                        onDisconnectPttForThread = { thread ->
+                                            mainViewModel.disconnectPttForDirectThread(context, thread)
+                                        }
                                     )
                                 }
 
@@ -1637,7 +1915,7 @@ private fun AuthenticatedVoxStageApp(
                                     DiscoverUsersScreen(
                                         currentUserId = currentUserId,
                                         staffCapabilities = staffCapabilities,
-                                        directoryEntries = directoryEntries,
+                                        directoryEntries = visibleDirectoryEntries,
                                         friendships = friendships,
                                         recentPostsState = UiState.Success(emptyList<ProfilePost>()),
                                         myPointsBalance = userProfile?.pointsBalance ?: 0L,
@@ -1693,7 +1971,7 @@ private fun AuthenticatedVoxStageApp(
                                     FriendsScreen(
                                         currentUserId = currentUserId,
                                         friendships = friendships,
-                                        directoryEntries = directoryEntries,
+                                        directoryEntries = visibleDirectoryEntries,
                                         viewerIsStaff = staffCapabilities.isStaff,
                                         onSendFriendRequest = { _ -> },
                                         onAcceptFriendRequest = { _ -> },
@@ -1789,6 +2067,18 @@ private fun AuthenticatedVoxStageApp(
                                 composable(ROUTE_PROFILE) {
                                     var isUpdatingPhoto by remember { mutableStateOf(false) }
                                     var isProcessingWallet by remember { mutableStateOf(false) }
+                                    val acceptedFriendIds = remember(friendships, currentUserId) {
+                                        friendships
+                                            .filter { it.isAccepted() }
+                                            .mapNotNull { it.otherUserId(currentUserId).takeIf { id -> id.isNotBlank() } }
+                                            .toSet()
+                                    }
+                                    val liveRoomHostIds = remember(publicRoomsState) {
+                                        (publicRoomsState as? UiState.Success)?.data
+                                            .orEmpty()
+                                            .mapNotNull { it.hostId.takeIf { id -> id.isNotBlank() } }
+                                            .toSet()
+                                    }
 
 
                                     ProfileScreen(
@@ -1796,15 +2086,15 @@ private fun AuthenticatedVoxStageApp(
                                         userProfile = userProfile,
                                         userEmail = initialEmail,
                                         staffCapabilities = staffCapabilities,
-                                        friendsCount = friendships.count { it.isAccepted() },
+                                        friendsCount = acceptedFriendIds.size,
                                         myPostsState = UiState.Success(emptyList<ProfilePost>()),
                                         mySubscriptions = mySubscriptions,
-                                        myTransactions = emptyList<PointTransaction>(),
-                                        allTransactionsForAdmin = emptyList<PointTransaction>(),
+                                        myTransactions = myTransactions,
+                                        allTransactionsForAdmin = allTransactions,
                                         paidDmMembersForMe = emptyList<DmAccessPass>(),
                                         isPublishingPost = isPublishingPost,
                                         isUpdatingPhoto = isUpdatingPhoto,
-                                        isProcessingWallet = isProcessingWallet,
+                                        isProcessingWallet = isProcessingWallet || isWalletBusy,
                                         initialTabIndex = profileInitialTab,
                                         onUpdateProfilePhoto = { _ -> isUpdatingPhoto = false },
                                         onCreatePost = { text, imageBase64, locked, boostToTop, onInsufficientPoints, onPosted ->
@@ -1852,7 +2142,8 @@ private fun AuthenticatedVoxStageApp(
                                         onRequestAgeVerification = {},
                                         onSetDmPolicy = { _ -> },
                                         onKickPaidDmMember = { _, _ -> },
-                                        onSaveProfile = { _, _, _, _, _, _, _, _, _ -> },
+                                        onSaveProfile = mainViewModel::updateProfile,
+                                        onSelectVipProNameColor = mainViewModel::setVipProNameColor,
                                         onSignOut = {
                                             Firebase.auth.signOut()
                                         },
@@ -1876,41 +2167,114 @@ private fun AuthenticatedVoxStageApp(
                                             )
                                         },
                                         playBillingManager = playBillingManager,
-                                        userEmailVerified = initialEmailVerified
+                                        userEmailVerified = initialEmailVerified,
+                                        directoryEntries = visibleDirectoryEntries,
+                                        acceptedFriendIds = acceptedFriendIds,
+                                        liveRoomHostIds = liveRoomHostIds,
+                                        onGiftProPass = { targetUid, targetName, giftNote, onInsufficient, onGifted ->
+                                            mainViewModel.giftProPassToUser(
+                                                targetUserId = targetUid,
+                                                targetName = targetName,
+                                                giftNote = giftNote,
+                                                onInsufficientPoints = onInsufficient,
+                                                onGifted = onGifted
+                                            )
+                                        },
+                                        onDeleteAccount = { onCompleted, onError ->
+                                            val activeTid = LivePttSessionManager.activeThreadId.value
+                                            if (!activeTid.isNullOrBlank()) {
+                                                LivePttSessionManager.endPttSessionAndDisableInThread(context, activeTid)
+                                            }
+                                            mainViewModel.deleteOwnAccount(
+                                                deviceHash = deviceHash,
+                                                onCompleted = { hadReports ->
+                                                    onCompleted(hadReports)
+                                                    onRequestAdminRelogin()
+                                                },
+                                                onError = onError
+                                            )
+                                        }
                                     )
                                 }
 
                                 composable(ROUTE_SAFETY) {
                                     val liveRoomsList = (publicRoomsState as? UiState.Success)?.data.orEmpty()
+                                    val resolvedVoxRoom = officialVoxChatRoom
+                                        ?: liveRoomsList.firstOrNull { it.isOfficialVoxChatRoom() }
                                     SafetyScreen(
                                         reportsState = safetyReportsState,
                                         userProfile = userProfile,
                                         currentUserId = currentUserId,
                                         staffCapabilities = staffCapabilities,
-                                        staffRoles = emptyList(),
-                                        staffInvites = emptyList(),
+                                        staffRoles = staffRoles,
+                                        staffInvites = staffInvites,
                                         allUsers = allUsers,
-                                        allAlerts = unreadAlerts,
-                                        appConfig = AppConfig(),
+                                        allAlerts = if (staffCapabilities.isAdmin) allAlerts else unreadAlerts,
+                                        appConfig = appConfig,
                                         liveRooms = liveRoomsList,
-                                        onResolveReport = { _, _, _ -> },
-                                        onUnblockUser = { _ -> },
-                                        onAddStaffInvite = { _, _, _, _ -> },
-                                        onToggleSupportInviteInvisible = { _, _ -> },
-                                        onRemoveSupportInvite = { _ -> },
-                                        onToggleSupportRoleInvisible = { _, _, _ -> },
-                                        onSetUserStaffTier = { _, _, _, _ -> },
-                                        onAdminEditUser = { _, _, _, _, _, _, _, _, _, _, _, _, _, _ -> },
-                                        onSuspendUser = { _, _, _, _ -> },
-                                        onSendDirectAlert = { _, _, _, _, _ -> },
-                                        onAdminEditAlert = { _, _, _, _, _ -> },
-                                        onAdminDeleteAlert = { _ -> },
+                                        onResolveReport = { reportId, status, note, onFinished ->
+                                            mainViewModel.resolveReport(
+                                                reportId = reportId,
+                                                status = status,
+                                                note = note,
+                                                onFinished = onFinished
+                                            )
+                                        },
+                                        onUnblockUser = mainViewModel::unblockUser,
+                                        onAddStaffInvite = mainViewModel::addStaffInvite,
+                                        onToggleSupportInviteInvisible = mainViewModel::toggleSupportInviteInvisible,
+                                        onRemoveSupportInvite = mainViewModel::removeSupportInvite,
+                                        onToggleSupportRoleInvisible = mainViewModel::toggleSupportRoleInvisible,
+                                        onSetUserStaffTier = mainViewModel::setUserStaffTier,
+                                        onAdminEditUser = mainViewModel::adminEditUser,
+                                        onToggleUserMessagingDisabled = mainViewModel::setUserMessagingDisabled,
+                                        onSuspendUser = mainViewModel::suspendUser,
+                                        onSendDirectAlert = mainViewModel::sendDirectAlert,
+                                        onAdminEditAlert = mainViewModel::adminEditAlert,
+                                        onAdminDeleteAlert = mainViewModel::adminDeleteAlert,
+                                        onUpdateAppConfig = mainViewModel::updateAppConfig,
+                                        onSendUserToRoom = mainViewModel::sendUserToRoom,
                                         directoryEntries = directoryEntries,
+                                        onSendUserToSupportChat = mainViewModel::sendUserToSupportChat,
                                         appBroadcasts = appBroadcasts,
+                                        onSendAppBroadcast = mainViewModel::sendAppBroadcastToAllUsers,
+                                        onSendMassVoxDm = mainViewModel::sendMassVoxPrivateMessage,
+                                        onDeleteAppBroadcast = mainViewModel::deleteAppBroadcast,
                                         onBack = { navController.popBackStack() },
                                         moderationFiles = allModerationFiles,
+                                        onObserveUserFileNotes = mainViewModel::observeUserFileNotes,
+                                        onResolveInvestigation = mainViewModel::resolveUserInvestigation,
                                         suspensionRequests = suspensionRequests,
+                                        onSubmitSuspensionRequest = { uid, name, reason, onSubmitted ->
+                                            mainViewModel.submitSupportSuspensionRequest(
+                                                targetUserId = uid,
+                                                targetName = name,
+                                                reason = reason,
+                                                onSubmitted = onSubmitted
+                                            )
+                                        },
+                                        onAdminReviewSuspensionRequest = mainViewModel::adminReviewSuspensionRequest,
+                                        refundReports = refundReports,
+                                        perkGrants = perkGrants,
                                         adminNotifications = adminNotifications,
+                                        allTransactions = allTransactions,
+                                        allCreatorSubscriptions = allCreatorSubscriptions,
+                                        onIssueRefund = { uid, name, refundType, itemLabel, amountCents, txId, subId, reason, onIssued ->
+                                            mainViewModel.issueRefund(
+                                                targetUserId = uid,
+                                                targetName = name,
+                                                refundType = refundType,
+                                                itemLabel = itemLabel,
+                                                amountCents = amountCents,
+                                                transactionId = txId,
+                                                subscriptionId = subId,
+                                                reason = reason,
+                                                onIssued = onIssued
+                                            )
+                                        },
+                                        onAcknowledgeRefundReport = mainViewModel::acknowledgeRefundReport,
+                                        onMarkAdminNotificationRead = mainViewModel::markAdminNotificationRead,
+                                        onGrantAppPerk = mainViewModel::grantAppPerk,
                                         realStaffCapabilities = realStaffCapabilities,
                                         realUserProfile = realUserProfile,
                                         adminPreviewMode = adminPreviewMode,
@@ -1927,12 +2291,61 @@ private fun AuthenticatedVoxStageApp(
                                                 launchSingleTop = true
                                             }
                                         },
-                                        officialVoxChatRoom = liveRoomsList.firstOrNull { it.isOfficialVoxChatRoom() },
+                                        onEndBusinessHelp = mainViewModel::endBusinessStaffHelp,
+                                        onLoadUserProfileForRestrictions = mainViewModel::fetchUserProfileOnce,
+                                        onUpdateUserFeatureRestrictions = mainViewModel::updateUserFeatureRestrictions,
+                                        onRemoveUserFromBusinessAccount = { ownerId, uid, name, reportId ->
+                                            mainViewModel.staffRemoveUserFromBusinessAccount(
+                                                businessOwnerId = ownerId,
+                                                targetUserId = uid,
+                                                targetName = name,
+                                                reason = "Removed from Business Account following safety review",
+                                                reportId = reportId
+                                            )
+                                        },
+                                        onAdminBanReportedDevice = mainViewModel::adminBanReportedUserDevice,
+                                        onSubmitBusinessApprovalRequest = { uid, name, action, reason, onSubmitted ->
+                                            mainViewModel.submitSupportSuspensionRequest(
+                                                targetUserId = uid,
+                                                targetName = name,
+                                                reason = reason,
+                                                requestType = action.requestType,
+                                                isBusinessAccount = true,
+                                                onSubmitted = onSubmitted
+                                            )
+                                        },
+                                        onAdminRevokeBusinessAccount = mainViewModel::adminRevokeBusinessAccount,
+                                        officialVoxChatRoom = resolvedVoxRoom,
+                                        onUpdateOfficialVoxChat = mainViewModel::updateOfficialVoxChatControls,
                                         onOpenOfficialVoxChat = {
-                                            val voxRoom = liveRoomsList.firstOrNull { it.isOfficialVoxChatRoom() }
-                                            if (voxRoom != null) {
-                                                navController.navigate("room/${voxRoom.id}")
+                                            if (resolvedVoxRoom != null) {
+                                                navController.navigate("room/${resolvedVoxRoom.id}")
                                             }
+                                        },
+                                        supportTickets = supportTickets,
+                                        onReplyToSupportTicket = mainViewModel::respondToSupportTicket,
+                                        onAdminRemoveUserSuspension = { targetUid, targetName ->
+                                            mainViewModel.adminRemoveUserSuspension(
+                                                targetUserId = targetUid,
+                                                targetName = targetName
+                                            )
+                                        },
+                                        deviceRecords = allDeviceRecords,
+                                        onAdminResolveDeletedFile = mainViewModel::adminResolveDeletedAccountFile,
+                                        onStaffGrantFlaggedDeviceAccess = { devHash, returningName ->
+                                            mainViewModel.staffGrantFlaggedDeviceAccess(
+                                                deviceHash = devHash,
+                                                returningUserName = returningName
+                                            )
+                                        },
+                                        onStaffMarkFlaggedDeviceRestricted = mainViewModel::staffMarkFlaggedDeviceRestricted,
+                                        onStaffBanFlaggedReturningUser = mainViewModel::staffBanFlaggedReturningUser,
+                                        onStaffLiftDeviceSuspension = { devHash, targetUid, targetName ->
+                                            mainViewModel.staffLiftDeviceSuspension(
+                                                deviceHash = devHash,
+                                                targetUserId = targetUid,
+                                                targetName = targetName
+                                            )
                                         }
                                     )
                                 }
@@ -2040,7 +2453,7 @@ private fun AuthenticatedVoxStageApp(
                                             myPointsBalance = userProfile?.pointsBalance ?: 0L,
                                             activeSubscription = targetSub,
                                             viewerIsAdultVerified = viewerIsAdultVerified,
-                                            isProcessingWallet = false,
+                                            isProcessingWallet = isWalletBusy,
                                             onRequestAgeVerification = {},
                                             onBack = { navController.popBackStack() },
                                             onOpenUserProfile = ::openUserProfile,
@@ -2068,7 +2481,16 @@ private fun AuthenticatedVoxStageApp(
                                             onSubscribeCreator = { _, _ -> },
                                             onOpenBuyPoints = ::openProfileBuyPoints,
                                             supportStaffMembers = directoryEntries.filter { it.tierEnum().isStaff() },
-                                            viewerProfile = userProfile
+                                            viewerProfile = userProfile,
+                                            onGiftProPass = { targetUserId, targetName, giftNote, onInsufficient, onGifted ->
+                                                mainViewModel.giftProPassToUser(
+                                                    targetUserId = targetUserId,
+                                                    targetName = targetName,
+                                                    giftNote = giftNote,
+                                                    onInsufficientPoints = onInsufficient,
+                                                    onGifted = onGifted
+                                                )
+                                            }
                                         )
                                     }
                                 }
@@ -2270,34 +2692,193 @@ private fun AuthenticatedVoxStageApp(
                 }
 
                 if (isSuspendedNow) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.background)
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center
+                    val effectiveSuspensionReason = remember(
+                        userProfile?.suspensionReason,
+                        userProfile?.globallyBanned,
+                        myModerationFile?.suspensionReason,
+                        isDeviceBannedNow,
+                        isDeviceTimedSuspendedNow,
+                        bannedDevice?.reason,
+                        effectiveDeviceBanReason,
+                        isLoginFeatureRestricted
                     ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Text(
-                                text = "Account Access Restricted",
-                                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
-                            )
-                            Text(
-                                text = userProfile?.suspensionReason?.ifBlank {
-                                    "Your account access is currently restricted."
-                                } ?: "Your account access is currently restricted.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Button(onClick = onRequestAdminRelogin) {
-                                Text("Sign Out / Switch Account")
+                        listOfNotNull(
+                            bannedDevice?.reason?.trim()?.takeIf { isDeviceTimedSuspendedNow && it.isNotBlank() },
+                            userProfile?.suspensionReason?.trim()?.takeIf { it.isNotBlank() },
+                            myModerationFile?.suspensionReason?.trim()?.takeIf { it.isNotBlank() },
+                            effectiveDeviceBanReason?.trim()?.takeIf { isDeviceBannedNow && it.isNotBlank() },
+                            if (isLoginFeatureRestricted) "Login access is currently suspended by Staff/Admin." else null,
+                            if (userProfile?.globallyBanned == true) "Your account has been globally banned by an Administrator." else null
+                        ).firstOrNull() ?: "Your account is currently suspended."
+                    }
+                    val remainingSuspensionText = remember(
+                        userProfile?.suspendedUntilMillis,
+                        myModerationFile?.suspendedUntilMillis,
+                        bannedDevice?.suspendedUntilMillis,
+                        nowClockMs
+                    ) {
+                        val untilMs = maxOf(
+                            userProfile?.suspendedUntilMillis ?: 0L,
+                            myModerationFile?.suspendedUntilMillis ?: 0L,
+                            bannedDevice?.suspendedUntilMillis ?: 0L
+                        )
+                        if (untilMs > nowClockMs) {
+                            val remMin = ((untilMs - nowClockMs) / 60_000L).coerceAtLeast(1L)
+                            when {
+                                remMin >= 1440L -> "${remMin / 1440L}d ${(remMin % 1440L) / 60L}h"
+                                remMin >= 60L -> "${remMin / 60L}h ${remMin % 60L}m"
+                                else -> "${remMin}m"
                             }
+                        } else if (myModerationFile?.suspendedUntilInvestigationResolved == true) {
+                            "Pending Staff/Admin Review"
+                        } else {
+                            null
                         }
                     }
+                    val activeSuspensionKey = remember(
+                        userProfile?.suspendedUntilMillis,
+                        userProfile?.globallyBanned,
+                        myModerationFile?.suspendedUntilMillis,
+                        bannedDevice?.suspendedUntilMillis,
+                        isDeviceBannedNow,
+                        nowClockMs
+                    ) {
+                        val untilMs = maxOf(
+                            userProfile?.suspendedUntilMillis ?: 0L,
+                            myModerationFile?.suspendedUntilMillis ?: 0L,
+                            bannedDevice?.suspendedUntilMillis ?: 0L
+                        )
+                        when {
+                            untilMs > nowClockMs -> untilMs.toString()
+                            userProfile?.globallyBanned == true || isDeviceBannedNow -> "permanent"
+                            else -> "active"
+                        }
+                    }
+                    val expectedAppealDocId = remember(currentUserId, activeSuspensionKey) {
+                        val safeKey = activeSuspensionKey.filter { it.isLetterOrDigit() || it == '_' }.take(32).ifBlank { "active" }
+                        "susp_appeal_${currentUserId}_$safeKey".take(120)
+                    }
+                    val matchingSuspensionAppeal = remember(supportTickets, expectedAppealDocId, currentUserId) {
+                        supportTickets.firstOrNull { it.id == expectedAppealDocId }
+                            ?: supportTickets.firstOrNull {
+                                it.requesterId == currentUserId && it.isSuspensionAppeal()
+                            }
+                    }
+                    SuspendedAccountLoginPopup(
+                        suspensionReason = effectiveSuspensionReason,
+                        remainingTimeLabel = remainingSuspensionText,
+                        existingAppeal = matchingSuspensionAppeal,
+                        onSubmitReviewMessage = { reviewMsg, onFinished ->
+                            mainViewModel.submitSuspensionReviewAppeal(
+                                suspensionKey = activeSuspensionKey,
+                                suspensionReason = effectiveSuspensionReason,
+                                reviewMessage = reviewMsg,
+                                onFinished = onFinished
+                            )
+                        },
+                        onSignOut = onRequestAdminRelogin
+                    )
+                } else if (isReturningDeviceFlagged) {
+                    val flaggedRecord = bannedDevice
+                    if (flaggedRecord != null) {
+                        com.example.ui.components.ReturningReportedDeviceLockOverlay(
+                            deviceRecord = flaggedRecord,
+                            onSignOut = onRequestAdminRelogin
+                        )
+                    }
+                }
+
+                // In-app floating PTT bubble fallback when system overlay permission isn't granted yet
+                val showInAppFloatingBubble = !canDrawSystemOverlay &&
+                    pttFloatingEnabled &&
+                    !pttIsListenOnly &&
+                    !pttActiveThreadId.isNullOrBlank() &&
+                    (pttIsConnected || pttIsConnecting) &&
+                    pttFloatingDockedThreadId != pttActiveThreadId
+                if (showInAppFloatingBubble) {
+                    val activeTid = pttActiveThreadId.orEmpty()
+                    FloatingPttOverlayBubble(
+                        peerName = pttPeerName.ifBlank { "Private Chat" },
+                        isTransmitting = pttIsTransmitting,
+                        remoteSpeakerName = pttRemoteSpeakerName,
+                        onSetTransmitting = { tx ->
+                            LivePttSessionManager.setTransmitting(
+                                context = context,
+                                transmitting = tx,
+                                threadId = activeTid,
+                                peerName = pttPeerName
+                            )
+                        },
+                        onOpenChat = {
+                            if (activeTid.isNotBlank()) {
+                                navController.navigate(dmRoute(activeTid)) {
+                                    launchSingleTop = true
+                                }
+                            }
+                        },
+                        onDismiss = {
+                            LivePttSessionManager.setTransmitting(context, false)
+                            LivePttSessionManager.requestFloatingPttClosePrompt(activeTid, pttPeerName)
+                        },
+                        pttTheme = pttActiveTheme,
+                        modifier = Modifier.align(Alignment.BottomEnd)
+                    )
+                }
+
+                // Close Floating PTT Confirmation Dialog (End PTT Stream vs Keep Open & Dock Circle in DM)
+                val closePttPrompt = pendingFloatingClosePrompt
+                if (closePttPrompt != null) {
+                    AlertDialog(
+                        onDismissRequest = { LivePttSessionManager.dismissFloatingPttClosePrompt() },
+                        modifier = Modifier.testTag("floating_ptt_close_confirm_dialog"),
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Rounded.RecordVoiceOver,
+                                contentDescription = null,
+                                tint = LiveCoral,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        },
+                        title = { Text("Close PTT Stream?") },
+                        text = {
+                            Text(
+                                text = "Do you want to end the live Push-to-Talk stream with ${closePttPrompt.peerName}, or keep it open with a circle PTT button inside the Private DM? (Double-tap the circle button anytime to reopen floating PTT.)",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    LivePttSessionManager.endPttSessionAndDisableInThread(context, closePttPrompt.threadId)
+                                    scope.launch {
+                                        snackbarHostState.showTopMessage("Push-to-Talk stream ended.")
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = LiveCoral,
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier.testTag("floating_ptt_confirm_end_button")
+                            ) {
+                                Text("Yes, End PTT")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    LivePttSessionManager.dockFloatingPttToDm(context, closePttPrompt.threadId)
+                                    scope.launch {
+                                        snackbarHostState.showTopMessage(
+                                            "PTT stays open — circle PTT button docked in Private DM. Double-tap it to reopen floating PTT."
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.testTag("floating_ptt_confirm_keep_button")
+                            ) {
+                                Text("No, Keep Open")
+                            }
+                        }
+                    )
                 }
 
                 TopSnackbarOverlay(

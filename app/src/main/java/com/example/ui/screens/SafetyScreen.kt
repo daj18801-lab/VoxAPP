@@ -94,6 +94,7 @@ import com.example.data.AppBroadcast
 import com.example.data.AppConfig
 import com.example.data.AdminPreviewMode
 import com.example.data.AppPerkType
+import com.example.data.BannedDevice
 import com.example.data.BusinessApprovalAction
 import com.example.data.ChatRoom
 import com.example.data.CreatorSubscription
@@ -112,6 +113,8 @@ import com.example.data.StaffCapabilities
 import com.example.data.StaffInvite
 import com.example.data.StaffRole
 import com.example.data.StaffTier
+import com.example.data.SupportTicket
+import com.example.data.SupportTicketStatus
 import com.example.data.SuspensionRequest
 import com.example.data.SuspensionRequestStatus
 import com.example.data.UiState
@@ -124,7 +127,9 @@ import com.example.ui.components.AdminReviewSuspensionRequestDialog
 import com.example.ui.components.AdminSandboxControlCard
 import com.example.ui.components.AppPerkGrantsSection
 import com.example.ui.components.BusinessAccountBadge
+import com.example.ui.components.DeletedAccountsReportsCard
 import com.example.ui.components.FeatureRestrictionsDialog
+import com.example.ui.components.FlaggedReturningDevicesCard
 import com.example.ui.components.GrantAppPerkDialog
 import com.example.ui.components.IssueRefundDialog
 import com.example.ui.components.PendingSuspensionRequestsCard
@@ -136,6 +141,7 @@ import com.example.ui.components.ResolveInvestigationDialog
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.SupportRequestSuspensionCard
 import com.example.ui.components.SupportStaffPerkAuditSection
+import com.example.ui.components.SuspensionAppealsAndActiveCard
 import com.example.ui.components.UserFileNotesDialog
 import com.example.ui.components.UserModerationFilesCard
 import com.example.ui.components.formatTimestampShort
@@ -163,7 +169,7 @@ fun SafetyScreen(
     allAlerts: List<UserAlert>,
     appConfig: AppConfig = AppConfig(),
     liveRooms: List<ChatRoom> = emptyList(),
-    onResolveReport: (reportId: String, status: ReportStatus, note: String) -> Unit,
+    onResolveReport: (reportId: String, status: ReportStatus, note: String, onFinished: (Boolean) -> Unit) -> Unit,
     onUnblockUser: (String) -> Unit,
     onAddStaffInvite: (email: String, displayName: String, staffTier: StaffTier, canEnterInvisible: Boolean) -> Unit,
     onToggleSupportInviteInvisible: (inviteId: String, allow: Boolean) -> Unit,
@@ -301,7 +307,21 @@ fun SafetyScreen(
         roomPinCode: String,
         onSaved: () -> Unit
     ) -> Unit = { _, _, _, _, _ -> },
-    onOpenOfficialVoxChat: () -> Unit = {}
+    onOpenOfficialVoxChat: () -> Unit = {},
+    supportTickets: List<SupportTicket> = emptyList(),
+    onReplyToSupportTicket: (
+        ticketId: String,
+        status: SupportTicketStatus,
+        staffResponse: String,
+        onUpdated: () -> Unit
+    ) -> Unit = { _, _, _, _ -> },
+    onAdminRemoveUserSuspension: (targetUserId: String, targetName: String) -> Unit = { _, _ -> },
+    deviceRecords: List<BannedDevice> = emptyList(),
+    onAdminResolveDeletedFile: (targetUserId: String, targetName: String, deviceHash: String, keepFile: Boolean) -> Unit = { _, _, _, _ -> },
+    onStaffGrantFlaggedDeviceAccess: (deviceHash: String, returningUserName: String) -> Unit = { _, _ -> },
+    onStaffMarkFlaggedDeviceRestricted: (deviceHash: String, returningUserName: String, note: String) -> Unit = { _, _, _ -> },
+    onStaffBanFlaggedReturningUser: (deviceHash: String, targetUserId: String, targetName: String, reason: String) -> Unit = { _, _, _, _ -> },
+    onStaffLiftDeviceSuspension: (deviceHash: String, targetUserId: String, targetName: String) -> Unit = { _, _, _ -> }
 ) {
     val reports = (reportsState as? UiState.Success)?.data.orEmpty()
     val openCount = reports.count { it.statusEnum() == ReportStatus.OPEN }
@@ -321,6 +341,8 @@ fun SafetyScreen(
 
     var adminConsoleTab by remember { mutableIntStateOf(0) }
     var supportConsoleTab by remember { mutableIntStateOf(0) }
+    var reportQueueFilter by remember { mutableIntStateOf(0) } // 0 = Open, 1 = Resolved, 2 = All
+    var resolvingReportIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var inviteEmail by remember { mutableStateOf("") }
     var inviteName by remember { mutableStateOf("") }
     var inviteTier by remember { mutableStateOf(StaffTier.SUPPORT) }
@@ -368,6 +390,7 @@ fun SafetyScreen(
     var confirmRemoveBizUserReport by remember { mutableStateOf<SafetyReport?>(null) }
     var confirmBanDeviceReport by remember { mutableStateOf<SafetyReport?>(null) }
     var featureRestrictionsTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var restrictingFlaggedDevice by remember { mutableStateOf<BannedDevice?>(null) }
     var loadedRestrictionProfile by remember { mutableStateOf<UserProfile?>(null) }
     var isLoadingRestrictionProfile by remember { mutableStateOf(false) }
 
@@ -497,8 +520,8 @@ fun SafetyScreen(
                 }
             }
 
-            if (realStaffCapabilities.isAdmin) {
-                item(key = "admin_sandbox_control") {
+            if (realStaffCapabilities.isAdmin && !staffCapabilities.isAdmin) {
+                item(key = "admin_sandbox_control_preview_banner") {
                     AdminSandboxControlCard(
                         realProfile = realUserProfile,
                         previewMode = adminPreviewMode,
@@ -510,6 +533,22 @@ fun SafetyScreen(
 
             // Full Admin Command Console (only visible to Main App Owner Administrator)
             if (staffCapabilities.isAdmin) {
+                val pendingSuspCount = suspensionRequests.count { it.statusEnum() == SuspensionRequestStatus.PENDING }
+                val activeInvCount = moderationFiles.count { !it.deletedAccount && (it.investigationActive || it.suspendedUntilInvestigationResolved) }
+                val pendingFlaggedDevCount = deviceRecords.count { it.isPendingStaffReview() }
+                val pendingDeletedFilesCount = moderationFiles.count { it.deletedAccount && !it.deletedFileDecision.equals("KEPT", ignoreCase = true) }
+                val reportsTabBadge = openCount + businessHelpThreads.size + pendingSuspCount + activeInvCount + pendingFlaggedDevCount + pendingDeletedFilesCount
+                val alertsTabBadge = adminNotifications.count { !it.read }
+                val bizTabBadge = businessAccounts.size
+                val adminTabs = listOf(
+                    Triple(0, "Users", "admin_tab_users") to (Icons.Rounded.ManageAccounts to 0),
+                    Triple(1, "Reports", "admin_tab_reports") to (Icons.Rounded.Flag to reportsTabBadge),
+                    Triple(2, "Staff", "admin_tab_support") to (Icons.Rounded.SupportAgent to staffRoles.size),
+                    Triple(3, "Alerts", "admin_tab_alerts") to (Icons.Rounded.NotificationsActive to alertsTabBadge),
+                    Triple(4, "Billing", "admin_tab_billing") to (Icons.Rounded.Verified to 0),
+                    Triple(5, "Biz", "admin_tab_business") to (Icons.Rounded.Business to bizTabBadge),
+                    Triple(6, "App", "admin_tab_app_config") to (Icons.Rounded.Tune to 0)
+                )
                 item(key = "admin_console_header") {
                     Surface(
                         shape = RoundedCornerShape(18.dp),
@@ -519,7 +558,7 @@ fun SafetyScreen(
                     ) {
                         Column(
                             modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -531,53 +570,55 @@ fun SafetyScreen(
                                     tint = usernameColor(StaffTier.ADMIN),
                                     modifier = Modifier.size(22.dp)
                                 )
-                                Text(
-                                    text = "App Owner Admin Console",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = usernameColor(StaffTier.ADMIN)
-                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "App Owner Admin Console",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = usernameColor(StaffTier.ADMIN)
+                                    )
+                                    Text(
+                                        text = "Swipe tabs below to switch between sections",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
 
-                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                                SegmentedButton(
-                                    selected = adminConsoleTab == 0,
-                                    onClick = { adminConsoleTab = 0 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 5),
-                                    modifier = Modifier.testTag("admin_tab_support")
-                                ) {
-                                    Text("Staff", maxLines = 1)
-                                }
-                                SegmentedButton(
-                                    selected = adminConsoleTab == 1,
-                                    onClick = { adminConsoleTab = 1 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 5),
-                                    modifier = Modifier.testTag("admin_tab_users")
-                                ) {
-                                    Text("Users", maxLines = 1)
-                                }
-                                SegmentedButton(
-                                    selected = adminConsoleTab == 4,
-                                    onClick = { adminConsoleTab = 4 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 2, count = 5),
-                                    modifier = Modifier.testTag("admin_tab_business")
-                                ) {
-                                    Text("Biz", maxLines = 1)
-                                }
-                                SegmentedButton(
-                                    selected = adminConsoleTab == 2,
-                                    onClick = { adminConsoleTab = 2 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 3, count = 5),
-                                    modifier = Modifier.testTag("admin_tab_alerts")
-                                ) {
-                                    Text("Alerts", maxLines = 1)
-                                }
-                                SegmentedButton(
-                                    selected = adminConsoleTab == 3,
-                                    onClick = { adminConsoleTab = 3 },
-                                    shape = SegmentedButtonDefaults.itemShape(index = 4, count = 5),
-                                    modifier = Modifier.testTag("admin_tab_app_config")
-                                ) {
-                                    Text("App", maxLines = 1)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                adminTabs.forEach { (tabMeta, iconAndBadge) ->
+                                    val (tabIndex, label, tag) = tabMeta
+                                    val (icon, badgeCount) = iconAndBadge
+                                    val selected = adminConsoleTab == tabIndex
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = { adminConsoleTab = tabIndex },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = icon,
+                                                contentDescription = label,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = if (badgeCount > 0) "$label ($badgeCount)" else label,
+                                                maxLines = 1,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(999.dp),
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = usernameColor(StaffTier.ADMIN),
+                                            selectedLabelColor = Color.White,
+                                            selectedLeadingIconColor = Color.White
+                                        ),
+                                        modifier = Modifier.testTag(tag)
+                                    )
                                 }
                             }
                         }
@@ -585,7 +626,7 @@ fun SafetyScreen(
                 }
 
                 when (adminConsoleTab) {
-                    0 -> {
+                    2 -> {
                         item(key = "add_support_card") {
                             Surface(
                                 shape = RoundedCornerShape(18.dp),
@@ -945,7 +986,7 @@ fun SafetyScreen(
                         }
                     }
 
-                    1 -> {
+                    0 -> {
                         item(key = "user_search") {
                             OutlinedTextField(
                                 value = userSearch,
@@ -965,6 +1006,9 @@ fun SafetyScreen(
                             } else {
                                 staffTierByUid[user.userId] ?: StaffTier.USER
                             }
+                            val isOwnerTarget = staffRoles.any {
+                                it.userId == user.userId && it.email.equals("daj18801@gmail.com", ignoreCase = true)
+                            }
                             AdminUserDirectoryCard(
                                 profile = user,
                                 directoryEntry = directoryByUid[user.userId],
@@ -972,6 +1016,7 @@ fun SafetyScreen(
                                 tier = userTier,
                                 isBusinessAccount = user.isBusinessAccount(userTier, nowMillis),
                                 isSelf = user.userId == currentUserId,
+                                isPrimaryOwner = isOwnerTarget,
                                 staffPerkGrants = if (userTier == StaffTier.SUPPORT) perkGrants else emptyList(),
                                 onEdit = { userBeingEdited = user },
                                 onSuspend = { userBeingSuspended = user },
@@ -1007,9 +1052,31 @@ fun SafetyScreen(
                                 }
                             )
                         }
+
+                        item(key = "admin_users_messaging_controls_section") {
+                            StaffMessagingControlsCard(
+                                directoryEntries = directoryEntries,
+                                allUsers = allUsers,
+                                currentUserId = currentUserId,
+                                isAdmin = true,
+                                nowMillis = nowMillis,
+                                onOpenFeatureRestrictions = { uid, name ->
+                                    featureRestrictionsTarget = uid to name
+                                },
+                                onRequestBusinessAdminApproval = { entry ->
+                                    supportBusinessApprovalTarget = entry to BusinessApprovalAction.EDIT
+                                }
+                            )
+                        }
                     }
 
-                    2 -> {
+                    3 -> {
+                        item(key = "admin_notifications_section") {
+                            AdminNotificationsCard(
+                                notifications = adminNotifications,
+                                onMarkRead = onMarkAdminNotificationRead
+                            )
+                        }
                         item(key = "admin_send_app_broadcast_card") {
                             Surface(
                                 shape = RoundedCornerShape(18.dp),
@@ -1141,6 +1208,156 @@ fun SafetyScreen(
                                         )
                                     }
                                 }
+                            }
+                        }
+
+                        if (appBroadcasts.isNotEmpty()) {
+                            item(key = "admin_broadcasts_header") {
+                                Text(
+                                    text = "Sent App-Wide Messages (${appBroadcasts.size})",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onBackground
+                                )
+                            }
+                            items(appBroadcasts, key = { "bcast_${it.id}" }) { bcast ->
+                                val severityColor = when (bcast.severityEnum()) {
+                                    AlertSeverity.URGENT -> LiveCoral
+                                    AlertSeverity.WARNING -> ModAmber
+                                    AlertSeverity.INFO -> MaterialTheme.colorScheme.primary
+                                }
+                                Card(
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                    border = BorderStroke(1.dp, severityColor.copy(alpha = 0.4f)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("admin_broadcast_card_${bcast.id}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalAlignment = Alignment.Top,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    color = severityColor.copy(alpha = 0.16f)
+                                                ) {
+                                                    Text(
+                                                        text = bcast.severityEnum().name,
+                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                        color = severityColor,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                                Text(
+                                                    text = "ALL USERS",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                            Text(
+                                                text = bcast.title,
+                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = bcast.message,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "Sent by ${bcast.senderName} · ${formatTimestampShort(bcast.createdAt)}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteAppBroadcast(bcast.id) },
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .testTag("admin_delete_broadcast_${bcast.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Delete,
+                                                contentDescription = "Delete app broadcast",
+                                                tint = LiveCoral
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        item(key = "admin_direct_alerts_header") {
+                            Text(
+                                text = "Direct User Alerts (${allAlerts.size})",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                        }
+
+                        if (allAlerts.isEmpty()) {
+                            item(key = "alerts_empty") {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "No direct user alerts sent yet. Send individual alerts from any room or the Users tab above.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(16.dp)
+                                    )
+                                }
+                            }
+                        } else {
+                            items(allAlerts, key = { "alert_${it.id}" }) { alert ->
+                                AdminAlertHistoryCard(
+                                    alert = alert,
+                                    onEdit = { alertBeingEdited = alert },
+                                    onDelete = { onAdminDeleteAlert(alert.id) }
+                                )
+                            }
+                        }
+                    }
+
+                    4 -> {
+                        item(key = "admin_billing_refunds_section") {
+                            RefundsManagementSection(
+                                isAdmin = true,
+                                isSupport = false,
+                                refundReports = refundReports,
+                                onOpenIssueRefund = { showIssueRefundDialog = true },
+                                onAcknowledgeReport = onAcknowledgeRefundReport
+                            )
+                        }
+                        item(key = "admin_billing_perks_section") {
+                            AppPerkGrantsSection(
+                                perkGrants = perkGrants,
+                                onOpenGrantPerk = { showGrantPerkDialog = true }
+                            )
+                        }
+                    }
+
+                    6 -> {
+                        if (realStaffCapabilities.isAdmin) {
+                            item(key = "admin_sandbox_control") {
+                                AdminSandboxControlCard(
+                                    realProfile = realUserProfile,
+                                    previewMode = adminPreviewMode,
+                                    onSelectPreviewMode = onSelectAdminPreviewMode,
+                                    onSaveCustomIdentity = onSaveAdminCustomIdentity
+                                )
                             }
                         }
 
@@ -1427,127 +1644,6 @@ fun SafetyScreen(
                             }
                         }
 
-                        if (appBroadcasts.isNotEmpty()) {
-                            item(key = "admin_broadcasts_header") {
-                                Text(
-                                    text = "Sent App-Wide Messages (${appBroadcasts.size})",
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = MaterialTheme.colorScheme.onBackground
-                                )
-                            }
-                            items(appBroadcasts, key = { "bcast_${it.id}" }) { bcast ->
-                                val severityColor = when (bcast.severityEnum()) {
-                                    AlertSeverity.URGENT -> LiveCoral
-                                    AlertSeverity.WARNING -> ModAmber
-                                    AlertSeverity.INFO -> MaterialTheme.colorScheme.primary
-                                }
-                                Card(
-                                    shape = RoundedCornerShape(16.dp),
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                    border = BorderStroke(1.dp, severityColor.copy(alpha = 0.4f)),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("admin_broadcast_card_${bcast.id}")
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(14.dp),
-                                        verticalAlignment = Alignment.Top,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Column(
-                                            modifier = Modifier.weight(1f),
-                                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Surface(
-                                                    shape = RoundedCornerShape(999.dp),
-                                                    color = severityColor.copy(alpha = 0.16f)
-                                                ) {
-                                                    Text(
-                                                        text = bcast.severityEnum().name,
-                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
-                                                        color = severityColor,
-                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                                    )
-                                                }
-                                                Text(
-                                                    text = "ALL USERS",
-                                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                                    color = MaterialTheme.colorScheme.primary
-                                                )
-                                            }
-                                            Text(
-                                                text = bcast.title,
-                                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            )
-                                            Text(
-                                                text = bcast.message,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            Text(
-                                                text = "Sent by ${bcast.senderName} · ${formatTimestampShort(bcast.createdAt)}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                        IconButton(
-                                            onClick = { onDeleteAppBroadcast(bcast.id) },
-                                            modifier = Modifier
-                                                .size(48.dp)
-                                                .testTag("admin_delete_broadcast_${bcast.id}")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.Delete,
-                                                contentDescription = "Delete app broadcast",
-                                                tint = LiveCoral
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        item(key = "admin_direct_alerts_header") {
-                            Text(
-                                text = "Direct User Alerts (${allAlerts.size})",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
-                        }
-
-                        if (allAlerts.isEmpty()) {
-                            item(key = "alerts_empty") {
-                                Surface(
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = MaterialTheme.colorScheme.surface,
-                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = "No direct user alerts sent yet. Send individual alerts from any room or the Users tab above.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(16.dp)
-                                    )
-                                }
-                            }
-                        } else {
-                            items(allAlerts, key = { "alert_${it.id}" }) { alert ->
-                                AdminAlertHistoryCard(
-                                    alert = alert,
-                                    onEdit = { alertBeingEdited = alert },
-                                    onDelete = { onAdminDeleteAlert(alert.id) }
-                                )
-                            }
-                        }
-                    }
-
-                    3 -> {
                         item(key = "admin_app_banner_and_trial_card") {
                             Surface(
                                 shape = RoundedCornerShape(18.dp),
@@ -1665,7 +1761,7 @@ fun SafetyScreen(
                         }
                     }
 
-                    4 -> {
+                    5 -> {
                         item(key = "admin_business_tab_header") {
                             BusinessAccountsTabHeaderCard(
                                 businessCount = businessAccounts.size,
@@ -1865,20 +1961,12 @@ fun SafetyScreen(
                 }
             }
 
-            // Staff-only Support Suspension Requests, Refunds, App Perks & Admin Alerts
-            if (staffCapabilities.isStaff && (staffCapabilities.isAdmin || supportConsoleTab == 0)) {
-                if (staffCapabilities.isAdmin) {
-                    item(key = "admin_notifications_section") {
-                        AdminNotificationsCard(
-                            notifications = adminNotifications,
-                            onMarkRead = onMarkAdminNotificationRead
-                        )
-                    }
-                }
+            // Support Staff tools (for Admins, these sections are organized under the Reports, Billing, Users & Alerts tabs)
+            if (staffCapabilities.isSupport && !staffCapabilities.isAdmin && supportConsoleTab == 0) {
                 item(key = "staff_refunds_section") {
                     RefundsManagementSection(
-                        isAdmin = staffCapabilities.isAdmin,
-                        isSupport = staffCapabilities.isSupport,
+                        isAdmin = false,
+                        isSupport = true,
                         refundReports = refundReports,
                         onOpenIssueRefund = { showIssueRefundDialog = true },
                         onAcknowledgeReport = onAcknowledgeRefundReport
@@ -1893,31 +1981,29 @@ fun SafetyScreen(
                 item(key = "staff_suspension_requests_queue") {
                     PendingSuspensionRequestsCard(
                         requests = suspensionRequests,
-                        isAdmin = staffCapabilities.isAdmin,
+                        isAdmin = false,
                         onReviewRequest = { req -> reviewingSuspensionRequest = req }
                     )
                 }
-                if (staffCapabilities.isSupport) {
-                    item(key = "support_request_suspension_section") {
-                        SupportRequestSuspensionCard(
-                            directoryEntries = directoryEntries,
-                            currentUserId = currentUserId,
-                            onSelectTarget = { entry ->
-                                if (entry.isBusinessAccount() && !staffCapabilities.isAdmin) {
-                                    supportBusinessApprovalTarget = entry to BusinessApprovalAction.SUSPEND
-                                } else {
-                                    supportRequestTarget = entry
-                                }
+                item(key = "support_request_suspension_section") {
+                    SupportRequestSuspensionCard(
+                        directoryEntries = directoryEntries,
+                        currentUserId = currentUserId,
+                        onSelectTarget = { entry ->
+                            if (entry.isBusinessAccount()) {
+                                supportBusinessApprovalTarget = entry to BusinessApprovalAction.SUSPEND
+                            } else {
+                                supportRequestTarget = entry
                             }
-                        )
-                    }
+                        }
+                    )
                 }
                 item(key = "staff_messaging_controls_section") {
                     StaffMessagingControlsCard(
                         directoryEntries = directoryEntries,
                         allUsers = allUsers,
                         currentUserId = currentUserId,
-                        isAdmin = staffCapabilities.isAdmin,
+                        isAdmin = false,
                         nowMillis = nowMillis,
                         onOpenFeatureRestrictions = { uid, name ->
                             featureRestrictionsTarget = uid to name
@@ -1927,85 +2013,241 @@ fun SafetyScreen(
                         }
                     )
                 }
+                item(key = "staff_suspension_appeals_section") {
+                    SuspensionAppealsAndActiveCard(
+                        allUsers = allUsers,
+                        moderationFiles = moderationFiles,
+                        supportTickets = supportTickets,
+                        isAdmin = false,
+                        nowMillis = nowMillis,
+                        onReplyToAppeal = onReplyToSupportTicket,
+                        onAdminRemoveSuspension = onAdminRemoveUserSuspension
+                    )
+                }
+                item(key = "staff_safety_alerts_section") {
+                    val staffSafetyAlerts = remember(adminNotifications) {
+                        adminNotifications.filter { notif ->
+                            notif.typeEnum() in setOf(
+                                com.example.data.AdminNotificationType.ADULT_TO_MINOR_DM,
+                                com.example.data.AdminNotificationType.BOUNCE_EVASION_DEVICE_SUSPENSION,
+                                com.example.data.AdminNotificationType.AUTOMOD_ROOM_FLOOD_SUSPENSION,
+                                com.example.data.AdminNotificationType.RETURNING_REPORTED_DEVICE,
+                                com.example.data.AdminNotificationType.DELETED_ACCOUNT_WITH_REPORTS
+                            )
+                        }
+                    }
+                    if (staffSafetyAlerts.isNotEmpty()) {
+                        AdminNotificationsCard(
+                            notifications = staffSafetyAlerts,
+                            onMarkRead = onMarkAdminNotificationRead
+                        )
+                    }
+                }
+                item(key = "staff_flagged_returning_devices_section") {
+                    FlaggedReturningDevicesCard(
+                        deviceRecords = deviceRecords,
+                        nowMillis = nowMillis,
+                        onGrantAccess = { dev ->
+                            onStaffGrantFlaggedDeviceAccess(dev.deviceHash, dev.returningUserName.ifBlank { "Returning User" })
+                        },
+                        onDisableAppFeatures = { dev ->
+                            restrictingFlaggedDevice = dev
+                            featureRestrictionsTarget = dev.returningUserId to dev.returningUserName.ifBlank { "Returning User" }
+                        },
+                        onBanUser = { dev, reason ->
+                            onStaffBanFlaggedReturningUser(
+                                dev.deviceHash,
+                                dev.returningUserId,
+                                dev.returningUserName.ifBlank { "Returning User" },
+                                reason
+                            )
+                        },
+                        onLiftDeviceSuspension = { dev ->
+                            onStaffLiftDeviceSuspension(
+                                dev.deviceHash,
+                                dev.returningUserId.ifBlank { dev.bannedUserId },
+                                dev.returningUserName.ifBlank { dev.bannedUserName.ifBlank { "User" } }
+                            )
+                        }
+                    )
+                }
+                item(key = "staff_deleted_accounts_reports_section") {
+                    DeletedAccountsReportsCard(
+                        moderationFiles = moderationFiles,
+                        allReports = reports,
+                        isAdmin = false,
+                        onInspectFile = { file -> inspectingModerationFile = file },
+                        onKeepFile = {},
+                        onDeleteFile = {}
+                    )
+                }
                 item(key = "staff_moderation_files_section") {
                     UserModerationFilesCard(
-                        moderationFiles = moderationFiles,
+                        moderationFiles = moderationFiles.filter { !it.deletedAccount },
                         nowMillis = nowMillis,
-                        isAdmin = staffCapabilities.isAdmin,
+                        isAdmin = false,
                         onInspectFile = { file -> inspectingModerationFile = file },
                         onResolveFile = { file -> resolvingModerationFile = file }
                     )
                 }
             }
 
-            item(key = "stats_row") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    SafetyMetricCard(
-                        label = "Open Reports",
-                        value = "$openCount",
-                        accent = if (openCount > 0) ModAmber else SafetyEmerald,
-                        modifier = Modifier.weight(1f)
+            // Admin Reports tab (tab 1) — Flagged Returning Devices, Deleted Accounts/Reports, Active Suspensions, Appeals & Moderation Files
+            if (staffCapabilities.isAdmin && adminConsoleTab == 1) {
+                item(key = "admin_reports_flagged_returning_devices") {
+                    FlaggedReturningDevicesCard(
+                        deviceRecords = deviceRecords,
+                        nowMillis = nowMillis,
+                        onGrantAccess = { dev ->
+                            onStaffGrantFlaggedDeviceAccess(dev.deviceHash, dev.returningUserName.ifBlank { "Returning User" })
+                        },
+                        onDisableAppFeatures = { dev ->
+                            restrictingFlaggedDevice = dev
+                            featureRestrictionsTarget = dev.returningUserId to dev.returningUserName.ifBlank { "Returning User" }
+                        },
+                        onBanUser = { dev, reason ->
+                            onStaffBanFlaggedReturningUser(
+                                dev.deviceHash,
+                                dev.returningUserId,
+                                dev.returningUserName.ifBlank { "Returning User" },
+                                reason
+                            )
+                        },
+                        onLiftDeviceSuspension = { dev ->
+                            onStaffLiftDeviceSuspension(
+                                dev.deviceHash,
+                                dev.returningUserId.ifBlank { dev.bannedUserId },
+                                dev.returningUserName.ifBlank { dev.bannedUserName.ifBlank { "User" } }
+                            )
+                        }
                     )
-                    SafetyMetricCard(
-                        label = "Resolved",
-                        value = "$resolvedCount",
-                        accent = VoiceCyan,
-                        modifier = Modifier.weight(1f)
+                }
+                item(key = "admin_reports_deleted_accounts_files") {
+                    DeletedAccountsReportsCard(
+                        moderationFiles = moderationFiles,
+                        allReports = reports,
+                        isAdmin = true,
+                        onInspectFile = { file -> inspectingModerationFile = file },
+                        onKeepFile = { file ->
+                            onAdminResolveDeletedFile(
+                                file.userId,
+                                file.targetName.ifBlank { "Deleted User" },
+                                file.deletedDeviceHash,
+                                true
+                            )
+                        },
+                        onDeleteFile = { file ->
+                            onAdminResolveDeletedFile(
+                                file.userId,
+                                file.targetName.ifBlank { "Deleted User" },
+                                file.deletedDeviceHash,
+                                false
+                            )
+                        }
                     )
-                    SafetyMetricCard(
-                        label = "Blocked",
-                        value = "${blockedUsers.size}",
-                        accent = LiveCoral,
-                        modifier = Modifier.weight(1f)
+                }
+                item(key = "admin_reports_suspension_appeals_and_active") {
+                    SuspensionAppealsAndActiveCard(
+                        allUsers = allUsers,
+                        moderationFiles = moderationFiles,
+                        supportTickets = supportTickets,
+                        isAdmin = true,
+                        nowMillis = nowMillis,
+                        onReplyToAppeal = onReplyToSupportTicket,
+                        onAdminRemoveSuspension = onAdminRemoveUserSuspension
+                    )
+                }
+                item(key = "admin_reports_suspension_requests_queue") {
+                    PendingSuspensionRequestsCard(
+                        requests = suspensionRequests,
+                        isAdmin = true,
+                        onReviewRequest = { req -> reviewingSuspensionRequest = req }
+                    )
+                }
+                item(key = "admin_reports_moderation_files_section") {
+                    UserModerationFilesCard(
+                        moderationFiles = moderationFiles.filter { !it.deletedAccount },
+                        nowMillis = nowMillis,
+                        isAdmin = true,
+                        onInspectFile = { file -> inspectingModerationFile = file },
+                        onResolveFile = { file -> resolvingModerationFile = file }
                     )
                 }
             }
 
-            item(key = "guidelines_banner") {
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = SafetyEmerald.copy(alpha = 0.12f),
-                    border = BorderStroke(1.dp, SafetyEmerald.copy(alpha = 0.35f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            if (!staffCapabilities.isAdmin || adminConsoleTab == 1) {
+                item(key = "stats_row") {
                     Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(SafetyEmerald.copy(alpha = 0.2f)),
-                            contentAlignment = Alignment.Center
+                        SafetyMetricCard(
+                            label = "Open Reports",
+                            value = "$openCount",
+                            accent = if (openCount > 0) ModAmber else SafetyEmerald,
+                            modifier = Modifier.weight(1f)
+                        )
+                        SafetyMetricCard(
+                            label = "Resolved",
+                            value = "$resolvedCount",
+                            accent = VoiceCyan,
+                            modifier = Modifier.weight(1f)
+                        )
+                        SafetyMetricCard(
+                            label = "Blocked",
+                            value = "${blockedUsers.size}",
+                            accent = LiveCoral,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+
+            if (!staffCapabilities.isAdmin || adminConsoleTab == 6) {
+                item(key = "guidelines_banner") {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = SafetyEmerald.copy(alpha = 0.12f),
+                        border = BorderStroke(1.dp, SafetyEmerald.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.VerifiedUser,
-                                contentDescription = "Active protection",
-                                tint = SafetyEmerald,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Role-Coded Moderation Hierarchy",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = SafetyEmerald
-                            )
-                            Text(
-                                text = "Admins (Red) · Support Staff (Green) · Business (Bold Gold) · Pro (Blue) · Room Admins/Co-Admins (Purple). Report limit: up to 3 different users, 1 report per user per hour.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(SafetyEmerald.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.VerifiedUser,
+                                    contentDescription = "Active protection",
+                                    tint = SafetyEmerald,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Role-Coded Moderation Hierarchy",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = SafetyEmerald
+                                )
+                                Text(
+                                    text = "Admins (Red) · Support Staff (Green) · Business (Bold Gold) · Pro (Blue) · Room Admins/Co-Admins (Purple). Report limit: up to 3 different users, 1 report per user per hour.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                     }
                 }
             }
 
+            if (!staffCapabilities.isAdmin || adminConsoleTab == 1) {
             if (staffCapabilities.isStaff && businessHelpThreads.isNotEmpty()) {
                 item(key = "business_help_heading") {
                     Row(
@@ -2014,12 +2256,12 @@ fun SafetyScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.SupportAgent,
-                            contentDescription = "Group DM Help & Reported Groups",
+                            contentDescription = "Staff DM Monitoring and Help Queue",
                             tint = SafetyEmerald,
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = "Group DM Help & Reported Groups (${businessHelpThreads.size})",
+                            text = "Staff DM Monitoring & Help Queue (${businessHelpThreads.size})",
                             style = MaterialTheme.typography.titleLarge,
                             color = SafetyEmerald
                         )
@@ -2029,8 +2271,9 @@ fun SafetyScreen(
                     val isReported = bizThread.reportStaffAccessOpen
                     val isHelp = bizThread.staffHelpRequested
                     val isBiz = bizThread.isCompanyThread()
+                    val isPrivateYouthSafetyDm = !bizThread.isGroup && isReported
                     val cardAccent = when {
-                        bizThread.groupDisabled -> LiveCoral
+                        isPrivateYouthSafetyDm || bizThread.groupDisabled -> LiveCoral
                         isReported -> ModAmber
                         else -> SafetyEmerald
                     }
@@ -2050,14 +2293,31 @@ fun SafetyScreen(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = bizThread.groupName.ifBlank {
-                                        if (isBiz) "Business Group DM" else "Group DM (${bizThread.participantIds.size} members)"
+                                    text = when {
+                                        isPrivateYouthSafetyDm ->
+                                            "Private DM: ${bizThread.userAName.ifBlank { "User A" }} & ${bizThread.userBName.ifBlank { "User B" }}"
+                                        bizThread.groupName.isNotBlank() -> bizThread.groupName
+                                        isBiz -> "Business Group DM"
+                                        else -> "Group DM (${bizThread.participantIds.size} members)"
                                     },
                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
                                     color = MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.weight(1f)
                                 )
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (isPrivateYouthSafetyDm) {
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = LiveCoral.copy(alpha = 0.22f)
+                                        ) {
+                                            Text(
+                                                text = "18+ / <18 ALERT",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = LiveCoral,
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
                                     if (isHelp) {
                                         Surface(
                                             shape = RoundedCornerShape(8.dp),
@@ -2071,7 +2331,7 @@ fun SafetyScreen(
                                             )
                                         }
                                     }
-                                    if (isReported) {
+                                    if (isReported && !isPrivateYouthSafetyDm) {
                                         Surface(
                                             shape = RoundedCornerShape(8.dp),
                                             color = ModAmber.copy(alpha = 0.22f)
@@ -2108,14 +2368,18 @@ fun SafetyScreen(
                             }
                             if (bizThread.lastReportSummary.isNotBlank()) {
                                 Text(
-                                    text = "Report: ${bizThread.lastReportSummary}",
+                                    text = if (isPrivateYouthSafetyDm) bizThread.lastReportSummary else "Report: ${bizThread.lastReportSummary}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = ModAmber
+                                    color = if (isPrivateYouthSafetyDm) LiveCoral else ModAmber
                                 )
                             }
                             if (bizThread.staffHelpReason.isBlank() && bizThread.lastReportSummary.isBlank()) {
                                 Text(
-                                    text = "Staff access is open for this Group DM. Enter visibly or invisibly to edit, mute, remove, ban, or disable the group.",
+                                    text = if (isPrivateYouthSafetyDm) {
+                                        "Youth Safety monitoring open. Enter visibly or invisibly to monitor this private DM."
+                                    } else {
+                                        "Staff access is open for this Group DM. Enter visibly or invisibly to edit, mute, remove, ban, or disable the group."
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
@@ -2168,20 +2432,45 @@ fun SafetyScreen(
             }
 
             item(key = "reports_heading") {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Flag,
-                        contentDescription = null,
-                        tint = ModAmber,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Text(
-                        text = "Safety Reports Queue",
-                        style = MaterialTheme.typography.titleLarge
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Flag,
+                            contentDescription = null,
+                            tint = ModAmber,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = "Safety Reports Queue",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = reportQueueFilter == 0,
+                            onClick = { reportQueueFilter = 0 },
+                            label = { Text("Open ($openCount)") },
+                            modifier = Modifier.testTag("reports_filter_open")
+                        )
+                        FilterChip(
+                            selected = reportQueueFilter == 1,
+                            onClick = { reportQueueFilter = 1 },
+                            label = { Text("Resolved ($resolvedCount)") },
+                            modifier = Modifier.testTag("reports_filter_resolved")
+                        )
+                        FilterChip(
+                            selected = reportQueueFilter == 2,
+                            onClick = { reportQueueFilter = 2 },
+                            label = { Text("All (${reports.size})") },
+                            modifier = Modifier.testTag("reports_filter_all")
+                        )
+                    }
                 }
             }
 
@@ -2217,7 +2506,12 @@ fun SafetyScreen(
                 }
 
                 is UiState.Success -> {
-                    if (reports.isEmpty()) {
+                    val displayedReports = when (reportQueueFilter) {
+                        0 -> reports.filter { it.statusEnum() == ReportStatus.OPEN }
+                        1 -> reports.filter { it.statusEnum() != ReportStatus.OPEN }
+                        else -> reports
+                    }
+                    if (displayedReports.isEmpty()) {
                         item(key = "reports_empty") {
                             Surface(
                                 shape = RoundedCornerShape(18.dp),
@@ -2237,12 +2531,20 @@ fun SafetyScreen(
                                     )
                                     Spacer(modifier = Modifier.height(10.dp))
                                     Text(
-                                        text = stringResource(R.string.empty_reports_title),
+                                        text = when (reportQueueFilter) {
+                                            0 -> if (resolvedCount > 0) "No Open Safety Reports" else stringResource(R.string.empty_reports_title)
+                                            1 -> "No Resolved Reports Yet"
+                                            else -> stringResource(R.string.empty_reports_title)
+                                        },
                                         style = MaterialTheme.typography.titleMedium
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = stringResource(R.string.empty_reports_subtitle),
+                                        text = when (reportQueueFilter) {
+                                            0 -> if (resolvedCount > 0) "$resolvedCount resolved report(s) moved to the Resolved tab." else stringResource(R.string.empty_reports_subtitle)
+                                            1 -> "Resolved and dismissed safety reports will appear here."
+                                            else -> stringResource(R.string.empty_reports_subtitle)
+                                        },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -2250,7 +2552,7 @@ fun SafetyScreen(
                             }
                         }
                     } else {
-                        items(reports, key = { it.id }) { report ->
+                        items(displayedReports, key = { it.id }) { report ->
                             val targetDir = directoryByUid[report.targetUserId]
                             val targetUserProfile = allUsers.firstOrNull { it.userId == report.targetUserId }
                             val targetMessagingDisabled = targetUserProfile?.disableMessaging
@@ -2265,10 +2567,12 @@ fun SafetyScreen(
                             val bizOwnerId = report.businessOwnerIdFromReport()
                             val supportBlockedByBusinessPolicy = !staffCapabilities.isAdmin &&
                                 (targetIsBusiness || (isBizReport && report.targetUserId == bizOwnerId))
+                            val isResolvingThisReport = report.id in resolvingReportIds
                             SafetyReportCard(
                                 report = report,
-                                isHostOrAdmin = report.roomHostId == currentUserId || staffCapabilities.isAdmin,
+                                isHostOrAdmin = report.roomHostId == currentUserId || staffCapabilities.isStaff,
                                 isAdminViewer = staffCapabilities.isAdmin,
+                                isResolving = isResolvingThisReport,
                                 targetIsBusinessAccount = targetIsBusiness,
                                 canToggleMessaging = staffCapabilities.isAdmin && !targetIsAdmin && report.targetUserId != currentUserId,
                                 targetMessagingDisabled = targetMessagingDisabled,
@@ -2308,10 +2612,28 @@ fun SafetyScreen(
                                 },
                                 onBanDevice = { confirmBanDeviceReport = report },
                                 onResolve = {
-                                    onResolveReport(report.id, ReportStatus.RESOLVED, "Reviewed and action taken")
+                                    if (!isResolvingThisReport) {
+                                        resolvingReportIds = resolvingReportIds + report.id
+                                        onResolveReport(
+                                            report.id,
+                                            ReportStatus.RESOLVED,
+                                            "Reviewed and action taken"
+                                        ) {
+                                            resolvingReportIds = resolvingReportIds - report.id
+                                        }
+                                    }
                                 },
                                 onDismiss = {
-                                    onResolveReport(report.id, ReportStatus.DISMISSED, "Reviewed — no violation found")
+                                    if (!isResolvingThisReport) {
+                                        resolvingReportIds = resolvingReportIds + report.id
+                                        onResolveReport(
+                                            report.id,
+                                            ReportStatus.DISMISSED,
+                                            "Reviewed — no violation found"
+                                        ) {
+                                            resolvingReportIds = resolvingReportIds - report.id
+                                        }
+                                    }
                                 }
                             )
                         }
@@ -2389,6 +2711,7 @@ fun SafetyScreen(
                         }
                     }
                 }
+            }
             }
 
             item(key = "bottom_pad") {
@@ -3055,6 +3378,7 @@ fun SafetyScreen(
     }
 
     featureRestrictionsTarget?.let { (targetUid, targetName) ->
+        val pendingFlaggedDev = restrictingFlaggedDevice
         FeatureRestrictionsDialog(
             targetName = targetName,
             targetProfile = loadedRestrictionProfile ?: profileByUid[targetUid],
@@ -3068,10 +3392,21 @@ fun SafetyScreen(
                     featureSuspensions,
                     reason
                 ) {
+                    if (pendingFlaggedDev != null && pendingFlaggedDev.returningUserId == targetUid) {
+                        onStaffMarkFlaggedDeviceRestricted(
+                            pendingFlaggedDev.deviceHash,
+                            targetName,
+                            reason.ifBlank { "Restricted app features applied after staff review." }
+                        )
+                    }
+                    restrictingFlaggedDevice = null
                     featureRestrictionsTarget = null
                 }
             },
-            onDismiss = { featureRestrictionsTarget = null }
+            onDismiss = {
+                restrictingFlaggedDevice = null
+                featureRestrictionsTarget = null
+            }
         )
     }
 }
@@ -3084,6 +3419,7 @@ private fun AdminUserDirectoryCard(
     tier: StaffTier,
     isBusinessAccount: Boolean = false,
     isSelf: Boolean,
+    isPrimaryOwner: Boolean = false,
     staffPerkGrants: List<PerkGrant> = emptyList(),
     onEdit: () -> Unit,
     onSuspend: () -> Unit,
@@ -3243,7 +3579,7 @@ private fun AdminUserDirectoryCard(
                             color = usernameColor(StaffTier.SUPPORT)
                         )
                     }
-                    if (tier != StaffTier.ADMIN) {
+                    if (!isPrimaryOwner) {
                         OutlinedButton(onClick = onSuspend, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)) {
                             Icon(Icons.Rounded.Timer, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -3825,6 +4161,7 @@ private fun SafetyReportCard(
     report: SafetyReport,
     isHostOrAdmin: Boolean,
     isAdminViewer: Boolean = false,
+    isResolving: Boolean = false,
     targetIsBusinessAccount: Boolean = false,
     canToggleMessaging: Boolean = false,
     targetMessagingDisabled: Boolean = false,
@@ -4090,6 +4427,7 @@ private fun SafetyReportCard(
                 ) {
                     OutlinedButton(
                         onClick = onDismiss,
+                        enabled = !isResolving,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("dismiss_report_${report.id}")
@@ -4098,6 +4436,7 @@ private fun SafetyReportCard(
                     }
                     Button(
                         onClick = onResolve,
+                        enabled = !isResolving,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = SafetyEmerald,
                             contentColor = Color(0xFF00261A)
@@ -4106,7 +4445,17 @@ private fun SafetyReportCard(
                             .weight(1f)
                             .testTag("resolve_report_${report.id}")
                     ) {
-                        Text(if (isHostOrAdmin) "Resolve" else "Mark Resolved")
+                        if (isResolving) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = Color(0xFF00261A)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Resolving...")
+                        } else {
+                            Text(if (isHostOrAdmin) "Resolve" else "Mark Resolved")
+                        }
                     }
                 }
             }

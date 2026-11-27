@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -91,17 +92,21 @@ object DirectMessageNotificationPrefs {
     private const val KEY_FLOATING_PTT_ENABLED = "ptt_floating_overlay_enabled"
     private const val KEY_PTT_VOICE_TO_TEXT_ENABLED = "ptt_voice_to_text_enabled"
     private const val KEY_LOCK_SCREEN_DND_ENABLED = "ptt_lock_screen_dnd_enabled"
+    private const val KEY_OVERLAY_FIRST_OPEN_PROMPTED = "overlay_first_open_prompted"
     private const val KEY_SEEDED_PREFIX = "dm_seeded_"
     private const val KEY_LAST_NOTIFIED_PREFIX = "dm_last_"
     private const val KEY_LAST_FRIEND_ALERT_PREFIX = "dm_last_alert_"
     private const val KEY_LAST_GROUP_ALERT_PREFIX = "dm_last_group_alert_"
     private const val KEY_LAST_PRIORITY_CHIRP_PREFIX = "dm_last_priority_chirp_"
     private const val KEY_LAST_PTT_BEEP_PREFIX = "dm_last_ptt_beep_"
+    private const val KEY_SENT_PTT_BEEP_HISTORY_PREFIX = "dm_sent_ptt_beep_history_"
     private const val KEY_LAST_SENT_ALERT_PREFIX = "dm_last_sent_alert_"
     private const val KEY_DISMISSED_BROADCASTS_PREFIX = "dismissed_app_broadcasts_"
     private const val KEY_DISMISSED_NON_URGENT_ALERTS_PREFIX = "dismissed_non_urgent_alerts_"
 
     const val FRIEND_ALERT_COOLDOWN_MS = 5 * 60 * 1000L
+    const val PTT_BEEP_MAX_PER_WINDOW = 5
+    const val PTT_BEEP_WINDOW_MS = 3 * 60 * 1000L
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -190,6 +195,13 @@ object DirectMessageNotificationPrefs {
         prefs(context).edit().putBoolean(KEY_PTT_VOICE_TO_TEXT_ENABLED, enabled).apply()
     }
 
+    fun hasPromptedOverlayOnFirstOpen(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_OVERLAY_FIRST_OPEN_PROMPTED, false)
+
+    fun setPromptedOverlayOnFirstOpen(context: Context, prompted: Boolean) {
+        prefs(context).edit().putBoolean(KEY_OVERLAY_FIRST_OPEN_PROMPTED, prompted).apply()
+    }
+
     fun isLockScreenDndEnabled(context: Context): Boolean =
         prefs(context).getBoolean(KEY_LOCK_SCREEN_DND_ENABLED, false)
 
@@ -266,6 +278,60 @@ object DirectMessageNotificationPrefs {
 
     fun setLastPttBeepMillis(context: Context, uid: String, threadId: String, beepMillis: Long) {
         prefs(context).edit().putLong("${KEY_LAST_PTT_BEEP_PREFIX}${uid}_$threadId", beepMillis).apply()
+    }
+
+    fun getRecentSentPttBeepTimestamps(
+        context: Context,
+        uid: String,
+        threadId: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): List<Long> {
+        val raw = prefs(context)
+            .getString("${KEY_SENT_PTT_BEEP_HISTORY_PREFIX}${uid}_$threadId", "")
+            .orEmpty()
+        if (raw.isBlank()) return emptyList()
+        val cutoff = nowMs - PTT_BEEP_WINDOW_MS
+        return raw.split(",")
+            .mapNotNull { it.trim().toLongOrNull() }
+            .filter { it > cutoff && it <= nowMs + 60_000L }
+            .sorted()
+    }
+
+    fun remainingPttBeepsInWindow(
+        context: Context,
+        uid: String,
+        threadId: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): Int {
+        val recent = getRecentSentPttBeepTimestamps(context, uid, threadId, nowMs)
+        return (PTT_BEEP_MAX_PER_WINDOW - recent.size).coerceAtLeast(0)
+    }
+
+    fun pttBeepCooldownRemainingSeconds(
+        context: Context,
+        uid: String,
+        threadId: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): Int {
+        val recent = getRecentSentPttBeepTimestamps(context, uid, threadId, nowMs)
+        if (recent.size < PTT_BEEP_MAX_PER_WINDOW) return 0
+        val oldestActive = recent[recent.size - PTT_BEEP_MAX_PER_WINDOW]
+        val remainingMs = (oldestActive + PTT_BEEP_WINDOW_MS) - nowMs
+        return if (remainingMs <= 0L) 0 else ((remainingMs + 999L) / 1000L).toInt()
+    }
+
+    fun recordSentPttBeep(
+        context: Context,
+        uid: String,
+        threadId: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): Int {
+        val recent = getRecentSentPttBeepTimestamps(context, uid, threadId, nowMs)
+        val updated = (recent + nowMs).takeLast(PTT_BEEP_MAX_PER_WINDOW)
+        prefs(context).edit()
+            .putString("${KEY_SENT_PTT_BEEP_HISTORY_PREFIX}${uid}_$threadId", updated.joinToString(","))
+            .apply()
+        return (PTT_BEEP_MAX_PER_WINDOW - updated.size).coerceAtLeast(0)
     }
 
     fun getLastAlertSentAtMillis(context: Context, uid: String): Long =
@@ -355,6 +421,7 @@ object DirectMessageNotificationHelper {
     private const val GROUP_ALERT_FRESHNESS_WINDOW_MS = 20 * 60 * 1000L
 
     private val ALERT_VIBRATION_PATTERN = longArrayOf(0L, 420L, 180L, 420L, 180L, 620L)
+    private val BEEP_VIBRATION_PATTERN = longArrayOf(0L, 240L, 110L, 300L)
 
     private val _inAppPopupEvents = MutableSharedFlow<DirectThread>(extraBufferCapacity = 8)
     val inAppPopupEvents: SharedFlow<DirectThread> = _inAppPopupEvents.asSharedFlow()
@@ -860,10 +927,82 @@ object DirectMessageNotificationHelper {
             timestampMillis = thread.lastBeepAtMillis
         )
 
-        // Beep tone breaks through PTT Silent Mode, unless the user explicitly enabled Silence Beep
+        // Always vibrate the peer's phone on incoming PTT Beep, and play the beep tone unless silenced
+        vibrateBeepPattern(context)
         if (!DirectMessageNotificationPrefs.isPttBeepSilenced(context)) {
             PttChirpSoundEngine.playPttAttentionBeep()
-            LivePttSessionManager.triggerPttHaptic(context)
+        }
+
+        // If the recipient's app is backgrounded or screen is locked, also post a brief high-priority
+        // beep notification so Android reliably delivers the phone vibration & alert on the lock screen.
+        if (!VoxStageNotificationState.isAppInForeground) {
+            val canNotify = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            if (canNotify) {
+                ensureChannel(context)
+                val tapIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra(EXTRA_DM_THREAD_ID, thread.id)
+                }
+                val notifId = 8600 + (thread.id.hashCode() and 0x0FFF)
+                val pendingIntent = PendingIntent.getActivity(
+                    context,
+                    notifId,
+                    tapIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val notification = NotificationCompat.Builder(context, CHANNEL_ID_FRIEND_ALERT)
+                    .setSmallIcon(R.drawable.ic_stat_message)
+                    .setColor(0xFFF59E0B.toInt())
+                    .setContentTitle("📡 PTT Beep · $senderName")
+                    .setContentText("$senderName beeped you on $channelName")
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setVibrate(BEEP_VIBRATION_PATTERN)
+                    .setSilent(DirectMessageNotificationPrefs.isPttBeepSilenced(context))
+                    .setTimeoutAfter(12_000L)
+                    .setAutoCancel(true)
+                    .setContentIntent(pendingIntent)
+                    .build()
+                try {
+                    NotificationManagerCompat.from(context).notify(notifId, notification)
+                } catch (sec: SecurityException) {
+                    Log.w(TAG, "Missing POST_NOTIFICATIONS permission for PTT beep alert", sec)
+                }
+            }
+        }
+    }
+
+    private fun vibrateBeepPattern(context: Context) {
+        runCatching {
+            val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                VibrationEffect.createWaveform(BEEP_VIBRATION_PATTERN, -1)
+            } else {
+                null
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && effect != null) {
+                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                val attrs = VibrationAttributes.Builder()
+                    .setUsage(VibrationAttributes.USAGE_COMMUNICATION_REQUEST)
+                    .build()
+                vm?.defaultVibrator?.vibrate(effect, attrs)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && effect != null) {
+                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vm?.defaultVibrator?.vibrate(effect)
+            } else {
+                @Suppress("DEPRECATION")
+                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && effect != null) {
+                    vibrator?.vibrate(effect)
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(BEEP_VIBRATION_PATTERN, -1)
+                }
+            }
         }
     }
 

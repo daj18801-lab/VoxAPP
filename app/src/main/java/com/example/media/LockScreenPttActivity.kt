@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -38,6 +39,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -48,6 +50,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CheckCircle
@@ -76,8 +79,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.Alignment
@@ -157,6 +162,7 @@ class LockScreenPttActivity : ComponentActivity() {
         isPreviewLaunch = intent?.getBooleanExtra(EXTRA_PREVIEW_MODE, false) == true
         showRecentDm = DirectMessageNotificationPrefs.isLockScreenRecentDmEnabled(this)
         DirectMessageNotificationHelper.ensureRecentDmLoaded(this)
+        refreshRecentDmFromFirestoreIfNeeded()
         LivePttSessionManager.syncAudioPrefs(this)
 
         setContent {
@@ -218,7 +224,41 @@ class LockScreenPttActivity : ComponentActivity() {
         isPreviewLaunch = intent.getBooleanExtra(EXTRA_PREVIEW_MODE, false) == true
         showRecentDm = DirectMessageNotificationPrefs.isLockScreenRecentDmEnabled(this)
         DirectMessageNotificationHelper.ensureRecentDmLoaded(this)
+        refreshRecentDmFromFirestoreIfNeeded()
         LivePttSessionManager.syncAudioPrefs(this)
+    }
+
+    private fun refreshRecentDmFromFirestoreIfNeeded() {
+        val appContext = applicationContext
+        activityScope.launch(Dispatchers.IO) {
+            runCatching {
+                val uid = Firebase.auth.currentUser?.uid ?: return@runCatching
+                val databaseId = appContext.getString(R.string.firestore_database_id)
+                val db = FirebaseFirestore.getInstance(databaseId)
+                val snap = db.collection("directThreads")
+                    .whereArrayContains("participantIds", uid)
+                    .get()
+                    .await()
+                val latestIncoming = snap.documents
+                    .mapNotNull { it.toObject(DirectThread::class.java) }
+                    .filter { thread ->
+                        thread.id.isNotBlank() &&
+                            thread.lastMessageSenderId.isNotBlank() &&
+                            thread.lastMessageSenderId != uid &&
+                            thread.lastMessageText.isNotBlank() &&
+                            !thread.hasAnyBlock() &&
+                            !thread.isUserKicked(uid)
+                    }
+                    .maxByOrNull { it.updatedAt?.toDate()?.time ?: 0L }
+                if (latestIncoming != null) {
+                    DirectMessageNotificationHelper.updateRecentDmFromThread(
+                        context = appContext,
+                        thread = latestIncoming,
+                        currentUserId = uid
+                    )
+                }
+            }
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -483,15 +523,33 @@ class LockScreenPttActivity : ComponentActivity() {
                 }
 
                 val profileSnap = runCatching { db.collection("users").document(uid).get().await() }.getOrNull()
-                if (profileSnap?.getBoolean("messagingDisabled") == true) {
+                if (profileSnap?.getBoolean("disableMessaging") == true ||
+                    profileSnap?.getBoolean("messagingDisabled") == true
+                ) {
                     throw IllegalStateException("Messaging is currently disabled on your account.")
                 }
                 val staffSnap = runCatching { db.collection("staffRoles").document(uid).get().await() }.getOrNull()
-                val senderName = profileSnap?.getString("displayName")?.trim()
-                    ?.ifBlank { null }
+                val senderName = profileSnap?.getString("customDisplayName")?.trim()?.ifBlank { null }
+                    ?: profileSnap?.getString("displayName")?.trim()?.ifBlank { null }
                     ?: Firebase.auth.currentUser?.displayName?.trim()?.ifBlank { null }
                     ?: "Member"
-                val senderTier = StaffTier.fromRaw(staffSnap?.getString("staffTier"))
+                val realTier = StaffTier.fromRaw(staffSnap?.getString("staffTier"))
+                val senderTier = when (profileSnap?.getString("customMembershipTier")?.trim()?.uppercase()) {
+                    "ADMIN" -> StaffTier.ADMIN
+                    "SUPPORT" -> StaffTier.SUPPORT
+                    "FREE", "PRO", "VIP_PRO", "BUSINESS" -> StaffTier.USER
+                    else -> realTier
+                }
+
+                val quotedSnippet = targetDm.messageText
+                    .replace("\n", " ")
+                    .trim()
+                    .let { if (it.length > 80) "${it.take(80)}…" else it }
+                val formattedReplyText = if (quotedSnippet.isNotBlank()) {
+                    "↩️ Re: \"$quotedSnippet\"\n🎙️ $cleanText".take(500)
+                } else {
+                    "🎙️ $cleanText".take(500)
+                }
 
                 val msgRef = threadRef.collection("messages").document()
                 val msgPayload = mapOf(
@@ -500,7 +558,7 @@ class LockScreenPttActivity : ComponentActivity() {
                     "senderId" to uid,
                     "senderName" to senderName.take(40),
                     "senderTier" to senderTier.name,
-                    "text" to cleanText,
+                    "text" to formattedReplyText,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
                 val unreadRecipients = thread.participantIds.filter { it != uid }
@@ -509,7 +567,7 @@ class LockScreenPttActivity : ComponentActivity() {
                 batch.update(
                     threadRef,
                     mapOf(
-                        "lastMessageText" to cleanText.take(300),
+                        "lastMessageText" to formattedReplyText.take(300),
                         "lastMessageSenderId" to uid,
                         "unreadByUserIds" to unreadRecipients,
                         "updatedAt" to FieldValue.serverTimestamp()
@@ -576,15 +634,41 @@ private fun LockScreenPttContent(
     val isBeepSilenced by LivePttSessionManager.isBeepSilenced.collectAsStateWithLifecycle()
     val isPttVoiceToTextEnabled by LivePttSessionManager.isPttVoiceToTextEnabled.collectAsStateWithLifecycle()
     val isLockScreenDndEnabled by LivePttSessionManager.isLockScreenDndEnabled.collectAsStateWithLifecycle()
+    val isVolumeDownPttEnabled by LivePttSessionManager.isVolumeDownPttEnabled.collectAsStateWithLifecycle()
     val threadRequiresVoiceToText by LivePttSessionManager.threadRequiresVoiceToText.collectAsStateWithLifecycle()
     val threadDndActiveForMe by LivePttSessionManager.threadDndActiveForMe.collectAsStateWithLifecycle()
     val livePttTranscript by LivePttSessionManager.livePttTranscript.collectAsStateWithLifecycle()
     val lastPttTranscriptFeedback by LivePttSessionManager.lastPttTranscriptFeedback.collectAsStateWithLifecycle()
     val lastIncomingBeep by LivePttSessionManager.lastIncomingBeep.collectAsStateWithLifecycle()
+    val beepLimitVersion by LivePttSessionManager.beepLimitVersion.collectAsStateWithLifecycle()
     val recentDm by DirectMessageNotificationHelper.recentDmForLockScreen.collectAsStateWithLifecycle()
+
+    val effectivePttThreadId = activeThreadId?.takeIf { it.isNotBlank() }
+        ?: remember(activeThreadId) {
+            LivePttSessionManager.getSavedLastThreadId(context).takeIf { it.isNotBlank() }
+        }
+    val effectivePeerName = peerName.ifBlank {
+        remember(activeThreadId) { LivePttSessionManager.getSavedLastPeerName(context) }
+    }
 
     val isDndEffectivelyOn = isLockScreenDndEnabled || threadDndActiveForMe
     val isVttEffectivelyOn = isPttVoiceToTextEnabled || threadRequiresVoiceToText
+
+    var remainingBeeps by remember {
+        mutableIntStateOf(LivePttSessionManager.getRemainingPttBeeps(context, effectivePttThreadId))
+    }
+    var beepCooldownSec by remember {
+        mutableIntStateOf(LivePttSessionManager.getPttBeepCooldownSeconds(context, effectivePttThreadId))
+    }
+
+    LaunchedEffect(beepLimitVersion, effectivePttThreadId) {
+        while (true) {
+            remainingBeeps = LivePttSessionManager.getRemainingPttBeeps(context, effectivePttThreadId)
+            beepCooldownSec = LivePttSessionManager.getPttBeepCooldownSeconds(context, effectivePttThreadId)
+            if (beepCooldownSec <= 0) break
+            delay(1_000L)
+        }
+    }
 
     var beepFeedbackText by remember { mutableStateOf<String?>(null) }
     var beepFeedbackIsError by remember { mutableStateOf(false) }
@@ -623,20 +707,23 @@ private fun LockScreenPttContent(
     }
 
     val voiceReplyModeActive = showRecentDm && isDmReplySelected && recentDm != null && recentDm?.voxOfficial != true
-    val standbyColor = if (voiceReplyModeActive) {
-        Color(0xFF0EA5E9)
-    } else {
-        parseHexOrFallback(activeTheme.standbyColorHex, Color(0xFF10B981))
+    val isLocalPttVttOnlyMode = !voiceReplyModeActive && (isPttVoiceToTextEnabled || isPttSilentMode)
+    val standbyColor = when {
+        voiceReplyModeActive -> Color(0xFF0EA5E9)
+        isPttSilentMode -> Color(0xFFF97316)
+        isPttVoiceToTextEnabled -> Color(0xFF10B981)
+        else -> parseHexOrFallback(activeTheme.standbyColorHex, Color(0xFF10B981))
     }
-    val liveColor = if (voiceReplyModeActive) {
-        Color(0xFF6366F1)
-    } else {
-        parseHexOrFallback(activeTheme.liveColorHex, Color(0xFFEF4444))
+    val liveColor = when {
+        voiceReplyModeActive -> Color(0xFF6366F1)
+        isLocalPttVttOnlyMode -> Color(0xFF0EA5E9)
+        else -> parseHexOrFallback(activeTheme.liveColorHex, Color(0xFFEF4444))
     }
-    val ringColor = if (voiceReplyModeActive) {
-        Color(0xFF38BDF8)
-    } else {
-        parseHexOrFallback(activeTheme.ringGlowHex, Color(0xFF34D399))
+    val ringColor = when {
+        voiceReplyModeActive -> Color(0xFF38BDF8)
+        isPttSilentMode -> Color(0xFFFB923C)
+        isPttVoiceToTextEnabled -> Color(0xFF34D399)
+        else -> parseHexOrFallback(activeTheme.ringGlowHex, Color(0xFF34D399))
     }
     val isActiveAction = if (voiceReplyModeActive) isDictating else isTransmitting
     val activeCoreColor = if (isActiveAction) liveColor else standbyColor
@@ -667,7 +754,7 @@ private fun LockScreenPttContent(
             .statusBarsPadding()
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 18.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Top Header with Privacy Toggle (Show/Hide Recent DM) & Close
@@ -681,7 +768,7 @@ private fun LockScreenPttContent(
                 color = Color.White.copy(alpha = 0.10f)
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -747,7 +834,7 @@ private fun LockScreenPttContent(
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(8.dp))
 
         // Recent DM Preview & Voice-to-Text Reply Selector Area
         if (showRecentDm) {
@@ -763,7 +850,7 @@ private fun LockScreenPttContent(
             )
         } else {
             Surface(
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(14.dp),
                 color = Color.White.copy(alpha = 0.06f),
                 border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
                 modifier = Modifier
@@ -772,19 +859,19 @@ private fun LockScreenPttContent(
                     .testTag("lock_screen_recent_dm_hidden_banner")
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Filled.VisibilityOff,
                         contentDescription = null,
                         tint = Color.White.copy(alpha = 0.65f),
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                     Text(
                         text = "Recent DM preview hidden • Tap to show on lock screen",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelMedium,
                         color = Color.White.copy(alpha = 0.72f),
                         modifier = Modifier.weight(1f)
                     )
@@ -792,38 +879,39 @@ private fun LockScreenPttContent(
             }
         }
 
-        Spacer(Modifier.height(22.dp))
+        Spacer(Modifier.height(10.dp))
 
         // Active Channel / Reply Target Header
         Text(
             text = if (voiceReplyModeActive && recentDm != null) {
                 "Reply to ${recentDm!!.senderName}"
             } else {
-                peerName.ifBlank { "Private Walkie Channel" }
+                effectivePeerName.ifBlank { "Private Walkie Channel" }
             },
-            style = MaterialTheme.typography.headlineSmall,
+            style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.ExtraBold,
             color = Color.White,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
 
         val statusText = when {
-            voiceReplyModeActive && isSendingReply -> "SENDING VOICE-TO-TEXT…"
-            voiceReplyModeActive && isDictating -> "LISTENING • Release PTT to send"
-            voiceReplyModeActive -> "VOICE-TO-TEXT READY • Hold PTT to reply"
+            voiceReplyModeActive && isSendingReply -> "SENDING VOICE-TO-TEXT REPLY…"
+            voiceReplyModeActive && isDictating -> "LISTENING • Release or tap PTT to send"
+            voiceReplyModeActive -> "VOICE-TO-TEXT REPLY • Press or hold PTT"
+            isTransmitting && isPttSilentMode -> "PTT SILENT • Voice-to-Text ${elapsedSec}s"
+            isTransmitting && isPttVoiceToTextEnabled -> "VOICE-TO-TEXT ONLY • Listening ${elapsedSec}s"
             isTransmitting && isVttEffectivelyOn -> "ON AIR + VOICE-TO-TEXT • ${elapsedSec}s / ${maxSec}s"
             isTransmitting -> "ON AIR • ${elapsedSec}s / ${maxSec}s"
+            isPttSilentMode -> "PTT SILENT • No audio, PTT → Text"
+            isPttVoiceToTextEnabled -> "VOICE-TO-TEXT ONLY • No live audio"
             isDndEffectivelyOn -> "DO NOT DISTURB • Incoming PTT → Text"
-            isPttSilentMode -> if (isBeepSilenced) {
-                "PTT SILENT • Alerts still active"
-            } else {
-                "PTT SILENT • Alerts & Beeps active"
-            }
             !remoteSpeakingName.isNullOrBlank() -> "$remoteSpeakingName is talking…"
             isConnected && isVttEffectivelyOn -> "LIVE + VOICE-TO-TEXT • ${if (isLoudspeakerEnabled) "Loudspeaker" else "Phone Speaker"}"
             isConnected -> "LIVE STANDBY • ${if (isLoudspeakerEnabled) "Loudspeaker" else "Phone Speaker"}"
-            !activeThreadId.isNullOrBlank() -> "Connecting walkie channel…"
+            !effectivePttThreadId.isNullOrBlank() -> "Connecting walkie channel…"
             else -> "Select Recent DM above to reply by voice"
         }
 
@@ -839,14 +927,14 @@ private fun LockScreenPttContent(
             }
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (isSendingReply) {
                     CircularProgressIndicator(
                         color = Color(0xFF38BDF8),
                         strokeWidth = 2.dp,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                 } else {
                     Icon(
@@ -857,29 +945,37 @@ private fun LockScreenPttContent(
                         },
                         contentDescription = null,
                         tint = if (isActiveAction) liveColor else ringColor,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
                 Text(
                     text = statusText,
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
             }
         }
 
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(10.dp))
 
-        // Giant Lock-Screen Hold-to-Talk / Voice-to-Text Reply Button
+        val latestVoiceReplyMode by rememberUpdatedState(voiceReplyModeActive)
+        val latestRecentDm by rememberUpdatedState(recentDm)
+        val latestIsDictating by rememberUpdatedState(isDictating)
+        val latestIsLocalVttOnly by rememberUpdatedState(isLocalPttVttOnlyMode)
+        val latestIsTransmitting by rememberUpdatedState(isTransmitting)
+        val latestPttThreadId by rememberUpdatedState(effectivePttThreadId)
+        val latestPeerName by rememberUpdatedState(effectivePeerName)
+
+        // Compact Lock-Screen Hold-to-Talk / Voice-to-Text Reply Button
         Box(
             contentAlignment = Alignment.Center,
-            modifier = Modifier.size(224.dp)
+            modifier = Modifier.size(156.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .size(210.dp)
+                    .size(148.dp)
                     .scale(pulseScale)
                     .clip(CircleShape)
                     .background(
@@ -895,7 +991,7 @@ private fun LockScreenPttContent(
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(178.dp)
+                    .size(128.dp)
                     .clip(CircleShape)
                     .background(
                         Brush.verticalGradient(
@@ -906,24 +1002,80 @@ private fun LockScreenPttContent(
                         )
                     )
                     .border(
-                        width = 4.dp,
+                        width = 3.5.dp,
                         color = if (isActiveAction) Color.White else ringColor,
                         shape = CircleShape
                     )
                     .testTag("lock_screen_ptt_hold_button")
-                    .pointerInput(activeThreadId, voiceReplyModeActive, recentDm?.threadId) {
+                    .pointerInput(Unit) {
                         awaitEachGesture {
                             awaitFirstDown(requireUnconsumed = false)
                             LivePttSessionManager.triggerPttHaptic(context)
-                            val targetDm = recentDm
-                            if (voiceReplyModeActive && targetDm != null) {
-                                onStartVoiceToTextReply(targetDm)
+                            val downAtMs = SystemClock.elapsedRealtime()
+                            val targetDm = latestRecentDm
+                            val targetPttTid = latestPttThreadId
+
+                            if (latestVoiceReplyMode && targetDm != null) {
+                                // Recent DM Tap-to-Reply mode: voice-to-text reply to THAT message (never transmits PTT audio).
+                                // Supports both hold-to-speak (hold >= 400ms & release) and quick tap-to-speak.
+                                if (latestIsDictating) {
+                                    onStopVoiceToTextReply()
+                                    waitForUpOrCancellation()
+                                } else {
+                                    onStartVoiceToTextReply(targetDm)
+                                    waitForUpOrCancellation()
+                                    val heldMs = SystemClock.elapsedRealtime() - downAtMs
+                                    if (heldMs >= 400L) {
+                                        onStopVoiceToTextReply()
+                                    }
+                                }
+                            } else if (latestIsLocalVttOnly && !targetPttTid.isNullOrBlank()) {
+                                // Voice-to-Text ON or PTT Silent ON: NEVER transmit live audio — send voice-to-text to PTT peer.
+                                // Supports both hold-to-speak and quick tap-to-speak.
+                                if (latestIsTransmitting) {
+                                    LivePttSessionManager.setTransmitting(
+                                        context = context,
+                                        transmitting = false,
+                                        threadId = targetPttTid,
+                                        peerName = latestPeerName,
+                                        forceVoiceToTextOnly = true
+                                    )
+                                    waitForUpOrCancellation()
+                                } else {
+                                    LivePttSessionManager.setTransmitting(
+                                        context = context,
+                                        transmitting = true,
+                                        threadId = targetPttTid,
+                                        peerName = latestPeerName,
+                                        forceVoiceToTextOnly = true
+                                    )
+                                    waitForUpOrCancellation()
+                                    val heldMs = SystemClock.elapsedRealtime() - downAtMs
+                                    if (heldMs >= 400L) {
+                                        LivePttSessionManager.setTransmitting(
+                                            context = context,
+                                            transmitting = false,
+                                            threadId = targetPttTid,
+                                            peerName = latestPeerName,
+                                            forceVoiceToTextOnly = true
+                                        )
+                                    }
+                                }
+                            } else if (!targetPttTid.isNullOrBlank()) {
+                                // Standard Live PTT audio: strict press-and-hold
+                                LivePttSessionManager.setTransmitting(
+                                    context = context,
+                                    transmitting = true,
+                                    threadId = targetPttTid,
+                                    peerName = latestPeerName
+                                )
                                 waitForUpOrCancellation()
-                                onStopVoiceToTextReply()
-                            } else if (!activeThreadId.isNullOrBlank()) {
-                                LivePttSessionManager.setTransmitting(context, true)
-                                waitForUpOrCancellation()
-                                LivePttSessionManager.setTransmitting(context, false)
+                                LivePttSessionManager.setTransmitting(
+                                    context = context,
+                                    transmitting = false,
+                                    threadId = targetPttTid,
+                                    peerName = latestPeerName
+                                )
                             } else {
                                 waitForUpOrCancellation()
                             }
@@ -935,34 +1087,40 @@ private fun LockScreenPttContent(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Icon(
-                        imageVector = if (voiceReplyModeActive) Icons.Filled.RecordVoiceOver else Icons.Filled.Mic,
-                        contentDescription = if (voiceReplyModeActive) {
-                            "Hold PTT to send voice-to-text DM reply"
-                        } else {
-                            "Hold to talk on lock screen"
+                        imageVector = when {
+                            voiceReplyModeActive -> Icons.Filled.RecordVoiceOver
+                            isLocalPttVttOnlyMode -> Icons.Filled.Subtitles
+                            else -> Icons.Filled.Mic
+                        },
+                        contentDescription = when {
+                            voiceReplyModeActive -> "Press or hold PTT to send voice-to-text DM reply"
+                            isLocalPttVttOnlyMode -> "Press or hold PTT to send voice-to-text without live audio"
+                            else -> "Hold to talk on lock screen"
                         },
                         tint = Color.White,
-                        modifier = Modifier.size(58.dp)
+                        modifier = Modifier.size(38.dp)
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         text = when {
                             voiceReplyModeActive && isSendingReply -> "SENDING…"
                             voiceReplyModeActive && isDictating -> "LISTENING"
-                            voiceReplyModeActive -> "HOLD TO REPLY"
+                            voiceReplyModeActive -> "PRESS TO REPLY"
+                            isLocalPttVttOnlyMode && isTransmitting -> "LISTENING"
+                            isLocalPttVttOnlyMode -> "VOICE TO TEXT"
                             isTransmitting -> "TALKING"
                             else -> "HOLD TO TALK"
                         },
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White,
-                        letterSpacing = 1.sp
+                        letterSpacing = 0.8.sp
                     )
                 }
             }
         }
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(10.dp))
 
         // Live PTT Voice-to-Text transcript & sent confirmation pill
         AnimatedVisibility(
@@ -1039,28 +1197,32 @@ private fun LockScreenPttContent(
             }
         }
 
-        // Lock-Screen Quick Controls: Beep, Speaker Toggle, PTT Silent Mode, Silence Beep
+        // Lock-Screen Quick Controls: Beep, Speaker Toggle, PTT Silent Mode, Silence Beep, Voice-to-Text, DND
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 LockScreenQuickControlButton(
-                    title = "Beep",
-                    subtitle = "Ping group / peer",
+                    title = if (beepCooldownSec > 0) "Beep Limit" else "Beep",
+                    subtitle = if (beepCooldownSec > 0) {
+                        "Wait ${formatBeepCooldown(beepCooldownSec)} (0/5)"
+                    } else {
+                        "Beep & vibrate ($remainingBeeps/5)"
+                    },
                     icon = Icons.Filled.NotificationsActive,
-                    isActive = false,
-                    accentColor = Color(0xFFF59E0B),
+                    isActive = beepCooldownSec > 0,
+                    accentColor = if (beepCooldownSec > 0) Color(0xFFEF4444) else Color(0xFFF59E0B),
                     modifier = Modifier
                         .weight(1f)
                         .testTag("lock_screen_ptt_beep_button"),
                     onClick = {
                         LivePttSessionManager.sendPttBeep(
                             context = context,
-                            threadId = activeThreadId
+                            threadId = effectivePttThreadId
                         ) { result ->
                             result.onSuccess { msg ->
                                 beepFeedbackIsError = false
@@ -1090,14 +1252,14 @@ private fun LockScreenPttContent(
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 LockScreenQuickControlButton(
                     title = if (isPttSilentMode) "PTT Silent ON" else "PTT Silent",
                     subtitle = if (isPttSilentMode) {
-                        if (isBeepSilenced) "Alerts still come in" else "Alerts & beeps on"
+                        "No audio • PTT → Text"
                     } else {
-                        "Mute PTT voice"
+                        "Silent + PTT → Text"
                     },
                     icon = if (isPttSilentMode) {
                         Icons.AutoMirrored.Filled.VolumeOff
@@ -1129,14 +1291,14 @@ private fun LockScreenPttContent(
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 LockScreenQuickControlButton(
                     title = if (isPttVoiceToTextEnabled) "Voice-to-Text ON" else "Voice-to-Text",
                     subtitle = if (isPttVoiceToTextEnabled) {
-                        "PTT also sends text"
+                        "No audio • Sends text"
                     } else {
-                        "Send PTT as text too"
+                        "PTT sends text only"
                     },
                     icon = Icons.Filled.Subtitles,
                     isActive = isPttVoiceToTextEnabled,
@@ -1162,21 +1324,51 @@ private fun LockScreenPttContent(
                     onClick = { LivePttSessionManager.toggleLockScreenDnd(context) }
                 )
             }
+            LockScreenQuickControlButton(
+                title = if (isVolumeDownPttEnabled) "Volume Down Key PTT: ON" else "Volume Down Key PTT: OFF",
+                subtitle = if (isVolumeDownPttEnabled) {
+                    "Hold Volume Down to talk • Tap to turn off"
+                } else {
+                    "Off — Volume Down adjusts sound normally"
+                },
+                icon = if (isVolumeDownPttEnabled) {
+                    Icons.AutoMirrored.Filled.VolumeDown
+                } else {
+                    Icons.AutoMirrored.Filled.VolumeOff
+                },
+                isActive = isVolumeDownPttEnabled,
+                accentColor = Color(0xFF38BDF8),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("lock_screen_volume_down_ptt_toggle"),
+                onClick = { LivePttSessionManager.toggleVolumeDownPtt(context) }
+            )
         }
 
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(6.dp))
         Text(
-            text = if (voiceReplyModeActive) {
-                "Hold the button above — or hold Volume Down — to dictate your reply. Release to send as text without unlocking."
-            } else {
-                "Turn on Voice-to-Text so your PTT also posts as text, or enable Do Not Disturb so all incoming PTT arrives as voice-to-text."
+            text = when {
+                voiceReplyModeActive -> "Press or hold PTT to reply to the selected DM as voice-to-text (no live audio)."
+                isPttSilentMode -> "PTT Silent is ON — live audio is off; pressing PTT sends voice-to-text instead."
+                isPttVoiceToTextEnabled -> "Voice-to-Text is ON — pressing PTT sends a text message without transmitting audio."
+                !isVolumeDownPttEnabled -> "Hold PTT button to talk (Volume Down PTT is OFF). Beep pings peer (5 per 3 min)."
+                else -> "Hold PTT or Volume Down to talk. Beep pings & vibrates peer (5 per 3 min)."
             },
-            style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.72f),
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.68f),
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 8.dp)
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 6.dp)
         )
     }
+}
+
+private fun formatBeepCooldown(totalSec: Int): String {
+    val safe = totalSec.coerceAtLeast(0)
+    val mins = safe / 60
+    val secs = safe % 60
+    return if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
 }
 
 @Composable
@@ -1191,24 +1383,24 @@ private fun LockScreenQuickControlButton(
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(12.dp),
         color = if (isActive) accentColor.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.09f),
         border = BorderStroke(
             width = if (isActive) 1.5.dp else 1.dp,
             color = if (isActive) accentColor else Color.White.copy(alpha = 0.16f)
         ),
-        modifier = modifier
+        modifier = modifier.heightIn(min = 48.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 12.dp),
+                .padding(horizontal = 9.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(28.dp)
                     .clip(CircleShape)
                     .background(
                         if (isActive) accentColor.copy(alpha = 0.30f) else accentColor.copy(alpha = 0.16f)
@@ -1219,13 +1411,13 @@ private fun LockScreenQuickControlButton(
                     imageVector = icon,
                     contentDescription = title,
                     tint = if (isActive) Color.White else accentColor,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(16.dp)
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,
                     maxLines = 1,
@@ -1233,7 +1425,7 @@ private fun LockScreenQuickControlButton(
                 )
                 Text(
                     text = subtitle,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
                     color = Color.White.copy(alpha = 0.72f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -1266,7 +1458,7 @@ private fun LockScreenRecentDmCard(
     }
 
     Surface(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(14.dp),
         color = containerColor,
         border = BorderStroke(if (isSelected) 2.dp else 1.dp, borderColor),
         modifier = Modifier
@@ -1283,8 +1475,8 @@ private fun LockScreenRecentDmCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1293,20 +1485,20 @@ private fun LockScreenRecentDmCard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Filled.MarkChatUnread,
                         contentDescription = null,
                         tint = if (isSelected) accentBlue else Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                     Text(
                         text = if (isSelected) "VOICE-TO-TEXT REPLY SELECTED" else "LAST RECENT DM",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = if (isSelected) accentBlue else Color.White.copy(alpha = 0.78f),
-                        letterSpacing = 0.8.sp
+                        letterSpacing = 0.6.sp
                     )
                 }
                 if (recentDm != null && recentDm.timestampMillis > 0L) {
@@ -1320,9 +1512,11 @@ private fun LockScreenRecentDmCard(
 
             if (recentDm == null) {
                 Text(
-                    text = "No recent DM messages yet. When someone messages you, it will appear here so you can reply without unlocking.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.68f)
+                    text = "No recent DM yet. Incoming DMs appear here so you can reply by voice.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.68f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
             } else {
                 Row(
@@ -1335,7 +1529,7 @@ private fun LockScreenRecentDmCard(
                         } else {
                             recentDm.senderName
                         },
-                        style = MaterialTheme.typography.titleSmall,
+                        style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
                         maxLines = 1,
@@ -1363,16 +1557,16 @@ private fun LockScreenRecentDmCard(
                                 isSelected -> accentBlue
                                 else -> Color.White.copy(alpha = 0.88f)
                             },
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                         )
                     }
                 }
 
                 Text(
                     text = recentDm.messageText,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = Color.White.copy(alpha = 0.92f),
-                    maxLines = 3,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
 

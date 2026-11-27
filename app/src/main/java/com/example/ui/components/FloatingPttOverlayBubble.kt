@@ -12,6 +12,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,8 +49,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import com.example.data.PttThemeStyle
 import com.example.ui.theme.SnapBlue
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -247,3 +253,164 @@ fun FloatingPttOverlayBubble(
         }
     }
 }
+
+/**
+ * Compact 68.dp docked circular Push-to-Talk button (exact size of the floating PTT button)
+ * displayed at the bottom-right of a Private DM right above the thumbs-up button when the user
+ * closed the floating PTT button while choosing to keep the PTT stream open.
+ *
+ * - Press & Hold: transmits live PTT audio (or Voice-to-Text when VTT-only mode is active).
+ * - Double-Tap: immediately reopens the floating PTT button overlay.
+ */
+@Composable
+fun DockedCirclePttButton(
+    peerName: String,
+    isTransmitting: Boolean,
+    isVttOnlyMode: Boolean,
+    remoteSpeakerName: String?,
+    blockedByGroupAdmin: Boolean,
+    onSetTransmitting: (Boolean) -> Unit,
+    onDoubleTapReopenFloating: () -> Unit,
+    pttTheme: PttThemeStyle = PttThemeStyle.CLASSIC,
+    modifier: Modifier = Modifier
+) {
+    val coroutineScope = rememberCoroutineScope()
+    val latestSetTransmitting by rememberUpdatedState(onSetTransmitting)
+    val latestDoubleTapReopen by rememberUpdatedState(onDoubleTapReopenFloating)
+    var lastQuickTapUpMillis by remember { mutableLongStateOf(0L) }
+
+    val standbyColor = remember(pttTheme) { parseHexColor(pttTheme.standbyColorHex) }
+    val liveColor = remember(pttTheme) { parseHexColor(pttTheme.liveColorHex) }
+    val glowColor = remember(pttTheme) { parseHexColor(pttTheme.ringGlowHex) }
+
+    val circleColor = when {
+        blockedByGroupAdmin -> Color(0xFF475569)
+        isTransmitting -> liveColor
+        isVttOnlyMode -> SnapBlue
+        !remoteSpeakerName.isNullOrBlank() -> SnapBlue
+        else -> standbyColor
+    }
+    val circleLabel = when {
+        blockedByGroupAdmin -> "WAIT"
+        isTransmitting && isVttOnlyMode -> "VTT"
+        isTransmitting -> "LIVE"
+        isVttOnlyMode -> "VTT"
+        !remoteSpeakerName.isNullOrBlank() -> "HEAR"
+        else -> "PTT"
+    }
+
+    val showGlowRing = !blockedByGroupAdmin && (pttTheme.hasPulseRing || isTransmitting)
+    val infiniteTransition = rememberInfiniteTransition(label = "docked_ptt_glow_ring")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = if (isTransmitting) 1.22f else 1.13f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = if (isTransmitting) 650 else 1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "docked_ptt_pulse_scale"
+    )
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = if (isTransmitting) 0.55f else 0.34f,
+        targetValue = if (isTransmitting) 0.14f else 0.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = if (isTransmitting) 650 else 1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "docked_ptt_pulse_alpha"
+    )
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = modifier
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.size(78.dp)
+        ) {
+            if (showGlowRing) {
+                Box(
+                    modifier = Modifier
+                        .size(70.dp)
+                        .scale(pulseScale)
+                        .clip(CircleShape)
+                        .background(glowColor.copy(alpha = pulseAlpha))
+                        .border(BorderStroke(2.dp, glowColor.copy(alpha = 0.72f)), CircleShape)
+                )
+            }
+
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(68.dp)
+                    .shadow(
+                        elevation = if (showGlowRing) 12.dp else 8.dp,
+                        shape = CircleShape,
+                        ambientColor = glowColor,
+                        spotColor = glowColor
+                    )
+                    .clip(CircleShape)
+                    .background(circleColor)
+                    .border(
+                        BorderStroke(
+                            width = if (pttTheme.hasPulseRing) 3.dp else 2.5.dp,
+                            color = if (pttTheme.hasPulseRing) glowColor else Color.White
+                        ),
+                        CircleShape
+                    )
+                    .semantics {
+                        contentDescription =
+                            "Hold to talk to $peerName. Double tap to reopen floating push to talk button."
+                    }
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            val downMs = System.currentTimeMillis()
+                            val isSecondTapWindow = (downMs - lastQuickTapUpMillis) in 1L..340L
+                            var startedTx = false
+                            val holdJob = coroutineScope.launch {
+                                delay(if (isSecondTapWindow) 210L else 155L)
+                                startedTx = true
+                                lastQuickTapUpMillis = 0L
+                                latestSetTransmitting(true)
+                            }
+
+                            waitForUpOrCancellation()
+                            holdJob.cancel()
+
+                            if (startedTx) {
+                                latestSetTransmitting(false)
+                                lastQuickTapUpMillis = 0L
+                            } else {
+                                val upMs = System.currentTimeMillis()
+                                if (isSecondTapWindow && (upMs - downMs) <= 280L) {
+                                    lastQuickTapUpMillis = 0L
+                                    latestDoubleTapReopen()
+                                } else {
+                                    lastQuickTapUpMillis = upMs
+                                }
+                            }
+                        }
+                    }
+                    .testTag("dm_docked_circle_ptt_button")
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = circleLabel,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "2× float",
+                        color = Color.White.copy(alpha = 0.82f),
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+

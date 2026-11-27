@@ -34,6 +34,7 @@ class VoxStageRepository(
 
     companion object {
         const val BOOTSTRAPPED_ADMIN_EMAIL = "daj18801@gmail.com"
+        const val DIRECT_TYPING_TTL_MS = 8_000L
     }
 
     private fun requireUserId(): String {
@@ -1069,6 +1070,211 @@ class VoxStageRepository(
         }
     }
 
+    private object RoomJoinFloodTracker {
+        private const val WINDOW_MS = 60_000L
+        private const val MAX_JOINS_PER_WINDOW = 3
+        private val joinsByUserRoom = HashMap<String, MutableList<Long>>()
+
+        @Synchronized
+        fun recordAndCheckExceeded(userId: String, roomId: String, nowMs: Long): Boolean {
+            val key = "${userId}_$roomId"
+            val list = joinsByUserRoom.getOrPut(key) { mutableListOf() }
+            list.removeAll { nowMs - it > WINDOW_MS || it > nowMs + 10_000L }
+            list.add(nowMs)
+            return list.size > MAX_JOINS_PER_WINDOW
+        }
+
+        @Synchronized
+        fun clearForUserRoom(userId: String, roomId: String) {
+            joinsByUserRoom.remove("${userId}_$roomId")
+        }
+    }
+
+    private fun normalizeIdentityForMatch(raw: String): String {
+        val sb = StringBuilder(raw.length)
+        for (ch in raw.lowercase()) {
+            val mapped = when (ch) {
+                '0' -> 'o'
+                '1', '!' -> 'i'
+                '3' -> 'e'
+                '4', '@' -> 'a'
+                '5', '$' -> 's'
+                '7' -> 't'
+                else -> ch
+            }
+            if (mapped.isLetterOrDigit()) sb.append(mapped)
+        }
+        return sb.toString()
+    }
+
+    private fun extractNormalizedWords(raw: String): Set<String> {
+        return raw.lowercase()
+            .split(Regex("[^a-z0-9@$!]+"))
+            .map { normalizeIdentityForMatch(it) }
+            .filter { it.isNotBlank() }
+            .toSet()
+    }
+
+    private suspend fun detectStaffOrAdminNameImpersonation(
+        uid: String,
+        candidateName: String,
+        candidateHandle: String
+    ): String? {
+        val normName = normalizeIdentityForMatch(candidateName)
+        val normHandle = normalizeIdentityForMatch(candidateHandle)
+        val allWords = extractNormalizedWords(candidateName) + extractNormalizedWords(candidateHandle)
+
+        val reservedSubstrings = listOf(
+            "admin", "administrator", "superadmin", "sysadmin",
+            "voxstaff", "voxsupport", "voxadmin", "voxowner", "voxmod", "voxofficial",
+            "officialvox", "appadmin", "appowner", "supportteam", "supportstaff",
+            "moderator", "coowner"
+        )
+        val reservedExactWords = setOf(
+            "staff", "admin", "admins", "mod", "mods", "support",
+            "owner", "administrator", "moderator", "official"
+        )
+
+        val matchedKeyword = reservedSubstrings.firstOrNull { kw ->
+            normName.contains(kw) || normHandle.contains(kw)
+        } ?: reservedExactWords.firstOrNull { w -> w in allWords }
+        if (matchedKeyword != null) {
+            return "reserved Staff/Admin term \"$matchedKeyword\""
+        }
+
+        val staffDocs = runCatching {
+            db.collection("userDirectory")
+                .whereIn("staffTier", listOf(StaffTier.ADMIN.name, StaffTier.SUPPORT.name))
+                .get()
+                .await()
+                .documents
+        }.getOrDefault(emptyList())
+
+        for (doc in staffDocs) {
+            val entry = doc.toObject(DirectoryEntry::class.java) ?: continue
+            if (entry.userId == uid) continue
+            val staffNames = listOf(entry.displayName, entry.customDisplayName, entry.handle)
+                .map { normalizeIdentityForMatch(it) }
+                .filter { it.length >= 2 }
+                .toSet()
+            if ((normName.length >= 2 && normName in staffNames) ||
+                (normHandle.length >= 2 && normHandle in staffNames)
+            ) {
+                return "Staff/Admin member \"${entry.effectiveDisplayName()}\""
+            }
+        }
+        return null
+    }
+
+    /**
+     * Atomically writes a SYSTEM_AUTOMOD safety report, creates or increments userModerationFiles/{uid},
+     * and appends a matching note to userModerationFiles/{uid}/notes/{reportId}.
+     * Returns the created reportId.
+     */
+    private suspend fun recordAutoModReportAndUserFile(
+        uid: String,
+        targetName: String,
+        roomId: String,
+        roomTitle: String,
+        category: ReportCategory,
+        reportDetails: String,
+        noteReason: String,
+        suspendUntilMillis: Long = 0L,
+        suspendReason: String = ""
+    ): String {
+        val safeTarget = targetName.trim().ifBlank { "Member" }.take(40)
+        val reportRef = db.collection("safetyReports").document()
+        val reportId = reportRef.id
+        val modRef = db.collection("userModerationFiles").document(uid)
+        val existingSnap = runCatching { modRef.get().await() }.getOrNull()
+        val existingFile = existingSnap?.takeIf { it.exists() }?.toObject(UserModerationFile::class.java)
+        val newReportCount = (existingFile?.reportCount ?: 0) + 1
+
+        val batch = db.batch()
+        batch.set(
+            reportRef,
+            mapOf(
+                "reporterId" to uid,
+                "reporterName" to "AutoMod",
+                "roomId" to roomId.take(260),
+                "roomTitle" to roomTitle.trim().take(60),
+                "roomHostId" to "SYSTEM_AUTOMOD",
+                "targetUserId" to uid,
+                "targetName" to safeTarget,
+                "category" to category.name,
+                "details" to reportDetails.trim().take(400),
+                "status" to ReportStatus.OPEN.name,
+                "resolutionNote" to "",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+        )
+
+        if (existingFile == null) {
+            batch.set(
+                modRef,
+                mapOf(
+                    "userId" to uid,
+                    "targetName" to safeTarget,
+                    "reportCount" to 1,
+                    "warningCount" to 0,
+                    "investigationActive" to true,
+                    "investigationStatus" to InvestigationStatus.INVESTIGATING.name,
+                    "suspendedUntilMillis" to 0L,
+                    "suspendedUntilInvestigationResolved" to false,
+                    "pendingAdminReview" to false,
+                    "suspensionReason" to "",
+                    "lastWarningMessage" to "",
+                    "lastWarningAtMillis" to 0L,
+                    "lastWarningAcknowledgedAtMillis" to 0L,
+                    "lastReportId" to reportId,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+        } else {
+            val effectiveSuspendUntil = maxOf(existingFile.suspendedUntilMillis, suspendUntilMillis)
+            val effectiveSuspendReason = suspendReason.trim().take(240)
+                .ifBlank { existingFile.suspensionReason.take(240) }
+            val nextStatus = if (suspendUntilMillis > System.currentTimeMillis()) {
+                InvestigationStatus.SUSPENDED_PENDING_ADMIN_REVIEW.name
+            } else {
+                InvestigationStatus.INVESTIGATING.name
+            }
+            batch.update(
+                modRef,
+                mapOf(
+                    "targetName" to safeTarget,
+                    "reportCount" to newReportCount,
+                    "investigationActive" to true,
+                    "investigationStatus" to nextStatus,
+                    "suspendedUntilMillis" to effectiveSuspendUntil,
+                    "suspensionReason" to effectiveSuspendReason,
+                    "lastReportId" to reportId,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+        }
+
+        val noteRef = modRef.collection("notes").document(reportId)
+        batch.set(
+            noteRef,
+            mapOf(
+                "targetUserId" to uid,
+                "reportId" to reportId,
+                "strikeNumber" to newReportCount,
+                "actionTaken" to FileNoteAction.INVESTIGATION_STARTED.name,
+                "category" to category.name,
+                "reason" to noteReason.trim().take(450),
+                "reporterId" to uid,
+                "reporterName" to "AutoMod",
+                "actorRole" to "REPORTER",
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+        )
+        batch.commit().await()
+        return reportId
+    }
+
     suspend fun updateUserProfile(
         displayName: String,
         handle: String,
@@ -1094,6 +1300,45 @@ class VoxStageRepository(
             require(safeHandle.length >= 2) { "Handle must be at least 2 characters." }
             require(Regex("^#[0-9A-Fa-f]{6}$").matches(avatarColorHex)) { "Invalid color hex." }
             require(age == 0L || age in 13L..120L) { "Age must be between 13 and 120 (or left blank)." }
+
+            // Block non-staff users from changing their username or handle to a Staff/Admin name
+            // and automatically file an impersonation report to Staff + log in their moderation file.
+            val isRealStaff = currentStaffTier.isStaff() || runCatching {
+                val roleDoc = db.collection("staffRoles").document(uid).get().await()
+                val roleTier = StaffTier.fromRaw(roleDoc.getString("tier"))
+                roleDoc.exists() && roleTier.isStaff()
+            }.getOrDefault(false)
+
+            if (!isRealStaff) {
+                val impersonationMatch = detectStaffOrAdminNameImpersonation(
+                    uid = uid,
+                    candidateName = safeName,
+                    candidateHandle = safeHandle
+                )
+                if (impersonationMatch != null) {
+                    val currentUserDoc = runCatching {
+                        db.collection("users").document(uid).get().await()
+                    }.getOrNull()
+                    val existingName = currentUserDoc?.getString("displayName")
+                        ?.trim()?.ifBlank { "Member" } ?: "Member"
+                    runCatching {
+                        recordAutoModReportAndUserFile(
+                            uid = uid,
+                            targetName = existingName,
+                            roomId = "AUTOMOD_NAME_IMPERSONATION",
+                            roomTitle = "Staff/Admin Name Impersonation",
+                            category = ReportCategory.IMPERSONATION,
+                            reportDetails = "Blocked attempt by $existingName to change username to \"$safeName\" (@$safeHandle), matching $impersonationMatch.",
+                            noteReason = "Blocked Staff/Admin username impersonation attempt: tried to set name \"$safeName\" (@$safeHandle), matching $impersonationMatch."
+                        )
+                    }
+                    return Result.failure(
+                        IllegalStateException(
+                            "You cannot change your username or handle to a Staff or Admin name. This attempt has been reported to VOX Staff."
+                        )
+                    )
+                }
+            }
 
             val updates = mutableMapOf<String, Any>(
                 "displayName" to safeName,
@@ -1376,6 +1621,127 @@ class VoxStageRepository(
                     reason = "Admin updated user profile/name to \"$safeName\""
                 )
             }
+            if (suspendedUntilMillis <= 0L) {
+                runCatching {
+                    val modRef = db.collection("userModerationFiles").document(targetUserId)
+                    val modSnap = modRef.get().await()
+                    if (modSnap.exists()) {
+                        modRef.update(
+                            mapOf(
+                                "suspendedUntilMillis" to 0L,
+                                "suspendedUntilInvestigationResolved" to false,
+                                "pendingAdminReview" to false,
+                                "pendingSuspensionRequestId" to "",
+                                "investigationActive" to false,
+                                "investigationStatus" to InvestigationStatus.RESOLVED.name,
+                                "suspensionReason" to "",
+                                "lastResolvedById" to uid,
+                                "lastResolvedByName" to actorName.trim().ifBlank { "Administrator" }.take(40),
+                                "lastResolutionNote" to "Suspension cleared by Administrator",
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Admin-only one-tap removal of any active account suspension across both users/{uid}
+     * and userModerationFiles/{uid} (plus LOGIN feature suspension & device ban if present).
+     */
+    suspend fun adminRemoveUserSuspension(
+        targetUserId: String,
+        targetName: String,
+        actorName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val safeActor = actorName.trim().ifBlank { "Administrator" }.take(40)
+        val safeTarget = targetName.trim().ifBlank { "Member" }.take(40)
+        val path = "users/$targetUserId"
+        return try {
+            val userRef = db.collection("users").document(targetUserId)
+            val userSnap = userRef.get().await()
+            if (userSnap.exists()) {
+                val existingFeatureSuspensions = (userSnap.get("featureSuspensions") as? Map<*, *>)
+                    ?.entries
+                    ?.mapNotNull { (k, v) ->
+                        val key = k as? String ?: return@mapNotNull null
+                        val num = (v as? Number)?.toLong() ?: return@mapNotNull null
+                        if (key == RestrictableFeature.LOGIN.name) null else key to num
+                    }
+                    ?.toMap()
+                    .orEmpty()
+                val updates = mutableMapOf<String, Any>(
+                    "globallyBanned" to false,
+                    "suspendedUntilMillis" to 0L,
+                    "suspensionReason" to "",
+                    "featureSuspensions" to existingFeatureSuspensions,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                userRef.update(updates).await()
+            }
+
+            runCatching {
+                syncDeviceBanForTargetUser(
+                    targetUserId = targetUserId,
+                    targetName = safeTarget,
+                    active = false,
+                    reason = "Suspension removed by Administrator",
+                    actorUid = uid,
+                    actorName = safeActor
+                )
+            }
+
+            runCatching {
+                val modRef = db.collection("userModerationFiles").document(targetUserId)
+                val modSnap = modRef.get().await()
+                if (modSnap.exists()) {
+                    val existingCount = (modSnap.getLong("reportCount") ?: 0L).toInt()
+                    val noteRef = modRef.collection("notes").document()
+                    val batch = db.batch()
+                    batch.update(
+                        modRef,
+                        mapOf(
+                            "investigationActive" to false,
+                            "investigationStatus" to InvestigationStatus.RESOLVED.name,
+                            "suspendedUntilMillis" to 0L,
+                            "suspendedUntilInvestigationResolved" to false,
+                            "pendingAdminReview" to false,
+                            "pendingSuspensionRequestId" to "",
+                            "suspensionReason" to "",
+                            "lastResolvedById" to uid,
+                            "lastResolvedByName" to safeActor,
+                            "lastResolutionNote" to "Suspension removed by Administrator",
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    batch.set(
+                        noteRef,
+                        mapOf(
+                            "targetUserId" to targetUserId,
+                            "reportId" to "",
+                            "strikeNumber" to existingCount,
+                            "actionTaken" to FileNoteAction.ADMIN_REVIEW_COMPLETED.name,
+                            "category" to "ADMIN_REVIEW",
+                            "reason" to "Administrator $safeActor removed active suspension.",
+                            "reporterId" to uid,
+                            "reporterName" to safeActor,
+                            "actorRole" to "ADMIN",
+                            "createdAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    batch.commit().await()
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1519,6 +1885,469 @@ class VoxStageRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+        }
+    }
+
+    fun observeAllDeviceRecords(): Flow<List<BannedDevice>> {
+        if (auth.currentUser?.uid.isNullOrBlank()) return flowOf(emptyList())
+        return db.collection("bannedDevices")
+            .snapshots()
+            .map { snapshot ->
+                snapshot.documents.mapNotNull { doc ->
+                    doc.toObject(BannedDevice::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                }.sortedByDescending { it.updatedAt?.toDate()?.time ?: 0L }
+            }
+            .catch { emit(emptyList()) }
+    }
+
+    suspend fun syncReportedDeviceFlagForCurrentUser(
+        deviceHash: String,
+        displayName: String,
+        reportCount: Int
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 16 || reportCount <= 0) return Result.success(Unit)
+        val path = "bannedDevices/$safeHash"
+        return try {
+            val ref = db.collection("bannedDevices").document(safeHash)
+            val existing = runCatching { ref.get().await() }.getOrNull()
+            val safeName = displayName.trim().ifBlank { "Member" }.take(40)
+            val safeReason = "Device linked to account ($safeName) with $reportCount safety report(s)."
+            if (existing == null || !existing.exists()) {
+                ref.set(
+                    mapOf(
+                        "deviceHash" to safeHash,
+                        "bannedUserId" to uid,
+                        "bannedUserName" to safeName,
+                        "reason" to safeReason.take(240),
+                        "bannedByUid" to uid,
+                        "bannedByName" to "Safety Report Tracker",
+                        "active" to false,
+                        "reportedDeviceFlag" to true,
+                        "deletedAccountFlagged" to false,
+                        "priorReportCount" to reportCount,
+                        "returningFlagActive" to false,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                val existingUid = existing.getString("bannedUserId").orEmpty()
+                val alreadyFlagged = existing.getBoolean("reportedDeviceFlag") == true
+                val existingCount = (existing.get("priorReportCount") as? Number)?.toInt() ?: 0
+                if (existingUid == uid && (!alreadyFlagged || reportCount > existingCount)) {
+                    ref.update(
+                        mapOf(
+                            "bannedUserName" to safeName,
+                            "reason" to safeReason.take(240),
+                            "reportedDeviceFlag" to true,
+                            "priorReportCount" to maxOf(reportCount, existingCount),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Permanently deletes the current user's account and stops all active memberships.
+     * If the user has any safety reports on file, preserves their moderation file and safety reports
+     * under Deleted Accounts/Reports along with their username and device ID, flags their device,
+     * and notifies Admins for Keep/Delete file resolution.
+     */
+    suspend fun deleteOwnAccount(
+        deviceHash: String,
+        displayName: String,
+        handle: String
+    ): Result<Boolean> {
+        val currentUser = auth.currentUser
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val uid = currentUser.uid
+        val safeHash = deviceHash.trim().take(128)
+        val safeName = displayName.trim().ifBlank { "Former Member" }.take(40)
+        val safeHandle = handle.trim().removePrefix("@").take(40)
+        return try {
+            val modRef = db.collection("userModerationFiles").document(uid)
+            val modSnap = runCatching { modRef.get().await() }.getOrNull()
+            val reportCount = (modSnap?.get("reportCount") as? Number)?.toInt() ?: 0
+            val hasReports = modSnap != null && modSnap.exists() && reportCount > 0
+
+            if (hasReports) {
+                val nowMs = System.currentTimeMillis()
+                val retainedHash = if (safeHash.length >= 16) safeHash else "dev_${uid.take(24)}".padEnd(16, '0')
+                modRef.update(
+                    mapOf(
+                        "targetName" to safeName,
+                        "deletedAccount" to true,
+                        "deletedAtMillis" to nowMs,
+                        "deletedDeviceHash" to retainedHash,
+                        "deletedHandle" to safeHandle,
+                        "deletedFileDecision" to "PENDING",
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+
+                val devRef = db.collection("bannedDevices").document(retainedHash)
+                val existingDev = runCatching { devRef.get().await() }.getOrNull()
+                val existingActive = existingDev?.getBoolean("active") == true
+                val flagReason = "Deleted account ($safeName) had $reportCount safety report(s) on file."
+                if (existingDev != null && existingDev.exists()) {
+                    devRef.update(
+                        mapOf(
+                            "bannedUserId" to uid,
+                            "bannedUserName" to safeName,
+                            "reason" to flagReason.take(240),
+                            "active" to existingActive,
+                            "reportedDeviceFlag" to true,
+                            "deletedAccountFlagged" to true,
+                            "priorReportCount" to reportCount,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                } else {
+                    devRef.set(
+                        mapOf(
+                            "deviceHash" to retainedHash,
+                            "bannedUserId" to uid,
+                            "bannedUserName" to safeName,
+                            "reason" to flagReason.take(240),
+                            "bannedByUid" to uid,
+                            "bannedByName" to "Account Deletion Audit",
+                            "active" to false,
+                            "reportedDeviceFlag" to true,
+                            "deletedAccountFlagged" to true,
+                            "priorReportCount" to reportCount,
+                            "returningFlagActive" to false,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+
+                runCatching {
+                    val notifId = "del_rep_${uid.take(24)}_${nowMs}"
+                    db.collection("adminNotifications").document(notifId).set(
+                        mapOf(
+                            "type" to AdminNotificationType.DELETED_ACCOUNT_WITH_REPORTS.name,
+                            "title" to "Deleted Account Retained ($reportCount Report${if (reportCount == 1) "" else "s"})".take(120),
+                            "message" to "$safeName (@${safeHandle.ifBlank { "deleted" }}) deleted their account while having $reportCount report(s). Saved under Deleted Accounts/Reports with Device ID ${retainedHash.take(12)}… — Admin can Keep or Delete the file.".take(500),
+                            "createdById" to uid,
+                            "createdByName" to safeName,
+                            "targetUserId" to uid,
+                            "targetName" to safeName,
+                            "referenceId" to retainedHash,
+                            "countValue" to reportCount,
+                            "read" to false,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+
+            // Stop all active creator subscriptions owned by this user
+            runCatching {
+                val subsSnap = db.collection("creatorSubscriptions")
+                    .whereEqualTo("subscriberId", uid)
+                    .get()
+                    .await()
+                for (doc in subsSnap.documents) {
+                    runCatching { doc.reference.delete().await() }
+                }
+            }
+
+            // Delete public directory entry and private user profile (also terminates VOX Pro/VIP/Business membership)
+            runCatching { db.collection("userDirectory").document(uid).delete().await() }
+            db.collection("users").document(uid).delete().await()
+
+            // Delete Firebase Auth user (fallback to signOut if recent re-login is required)
+            val deletedAuth = runCatching { currentUser.delete().await() }.isSuccess
+            if (!deletedAuth) {
+                runCatching { auth.signOut() }
+            }
+            Result.success(hasReports)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, "users/$uid")
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Flags a returning user who signed in under a different account/name on a device
+     * that has safety reports on record, locking their account and notifying Staff/Admin.
+     */
+    suspend fun flagReturningUserOnReportedDevice(
+        deviceHash: String,
+        returningUserName: String,
+        existingRecord: BannedDevice
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 16) return Result.success(Unit)
+        val path = "bannedDevices/$safeHash"
+        return try {
+            val safeName = returningUserName.trim().ifBlank { "Returning User" }.take(40)
+            val devRef = db.collection("bannedDevices").document(safeHash)
+            devRef.update(
+                mapOf(
+                    "returningUserId" to uid,
+                    "returningUserName" to safeName,
+                    "returningFlagActive" to true,
+                    "staffReviewStatus" to "PENDING_STAFF_REVIEW",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            runCatching {
+                val notifId = "ret_dev_${uid.take(20)}_${safeHash.take(16)}"
+                val priorName = existingRecord.bannedUserName.ifBlank { "prior account" }
+                val reports = existingRecord.priorReportCount.coerceAtLeast(1)
+                db.collection("adminNotifications").document(notifId).set(
+                    mapOf(
+                        "type" to AdminNotificationType.RETURNING_REPORTED_DEVICE.name,
+                        "title" to "Flagged Returning Device: $safeName".take(120),
+                        "message" to "$safeName signed in on device ${safeHash.take(12)}… previously tied to $priorName ($reports report${if (reports == 1) "" else "s"}). Account is locked pending Staff/Admin action (Grant Access, Disable Features, or Ban).".take(500),
+                        "createdById" to uid,
+                        "createdByName" to safeName,
+                        "targetUserId" to uid,
+                        "targetName" to safeName,
+                        "referenceId" to safeHash,
+                        "countValue" to reports,
+                        "read" to false,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Admin resolves a Deleted Account / Reports moderation file by either Keeping it on record
+     * or Permanently Deleting the file, its notes, associated reports, and non-banned device flag.
+     */
+    suspend fun adminResolveDeletedAccountFile(
+        targetUserId: String,
+        deviceHash: String,
+        keepFile: Boolean,
+        actorName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (targetUserId.isBlank()) return Result.failure(IllegalArgumentException("Missing user ID"))
+        val safeActor = actorName.trim().ifBlank { "Admin" }.take(40)
+        val path = "userModerationFiles/$targetUserId"
+        return try {
+            val modRef = db.collection("userModerationFiles").document(targetUserId)
+            val reportsSnap = runCatching {
+                db.collection("safetyReports")
+                    .whereEqualTo("targetUserId", targetUserId)
+                    .get()
+                    .await()
+            }.getOrNull()
+
+            if (keepFile) {
+                modRef.update(
+                    mapOf(
+                        "deletedFileDecision" to "KEPT",
+                        "investigationActive" to false,
+                        "investigationStatus" to InvestigationStatus.RESOLVED.name,
+                        "suspendedUntilMillis" to 0L,
+                        "suspendedUntilInvestigationResolved" to false,
+                        "lastResolvedById" to uid,
+                        "lastResolvedByName" to safeActor,
+                        "lastResolutionNote" to "Admin kept deleted account & device report file on record.",
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+                reportsSnap?.documents?.forEach { doc ->
+                    if (doc.getString("status") == ReportStatus.OPEN.name) {
+                        runCatching {
+                            doc.reference.update(
+                                mapOf(
+                                    "status" to ReportStatus.RESOLVED.name,
+                                    "resolutionNote" to "Deleted account — report file retained by $safeActor",
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
+                    }
+                }
+            } else {
+                // Delete subcollection notes first
+                runCatching {
+                    val notesSnap = modRef.collection("notes").get().await()
+                    notesSnap.documents.forEach { n -> runCatching { n.reference.delete().await() } }
+                }
+                // Delete associated safety reports
+                reportsSnap?.documents?.forEach { doc ->
+                    runCatching { doc.reference.delete().await() }
+                }
+                // Delete moderation file
+                modRef.delete().await()
+                // Clear device flag if device isn't under an active hard ban
+                val safeHash = deviceHash.trim().take(128)
+                if (safeHash.length >= 16) {
+                    val devRef = db.collection("bannedDevices").document(safeHash)
+                    val devSnap = runCatching { devRef.get().await() }.getOrNull()
+                    if (devSnap != null && devSnap.exists() && devSnap.getBoolean("active") != true) {
+                        runCatching { devRef.delete().await() }
+                    }
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, if (keepFile) OperationType.UPDATE else OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Staff/Admin grants access to a returning user who was flagged on a reported device.
+     */
+    suspend fun staffGrantFlaggedDeviceAccess(
+        deviceHash: String,
+        actorName: String,
+        note: String = ""
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 16) return Result.failure(IllegalArgumentException("Invalid device ID"))
+        val safeActor = actorName.trim().ifBlank { "Staff" }.take(40)
+        val safeNote = note.trim().ifBlank { "Access granted after staff review." }.take(240)
+        val path = "bannedDevices/$safeHash"
+        return try {
+            db.collection("bannedDevices").document(safeHash).update(
+                mapOf(
+                    "active" to false,
+                    "reportedDeviceFlag" to false,
+                    "returningFlagActive" to false,
+                    "staffReviewStatus" to "ACCESS_GRANTED",
+                    "reviewedByUid" to uid,
+                    "reviewedByName" to safeActor,
+                    "reviewNote" to safeNote,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Staff/Admin clears the full returning-device lockout after applying feature restrictions
+     * so the user can enter with only their allowed app features enabled.
+     */
+    suspend fun staffMarkFlaggedDeviceRestricted(
+        deviceHash: String,
+        actorName: String,
+        note: String = ""
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 16) return Result.failure(IllegalArgumentException("Invalid device ID"))
+        val safeActor = actorName.trim().ifBlank { "Staff" }.take(40)
+        val safeNote = note.trim().ifBlank { "Granted restricted access with app features disabled." }.take(240)
+        val path = "bannedDevices/$safeHash"
+        return try {
+            db.collection("bannedDevices").document(safeHash).update(
+                mapOf(
+                    "returningFlagActive" to false,
+                    "staffReviewStatus" to "RESTRICTED",
+                    "reviewedByUid" to uid,
+                    "reviewedByName" to safeActor,
+                    "reviewNote" to safeNote,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Staff/Admin bans a returning user and permanently bans their device.
+     */
+    suspend fun staffBanFlaggedReturningUser(
+        deviceHash: String,
+        targetUserId: String,
+        targetName: String,
+        actorTier: StaffTier,
+        actorName: String,
+        reason: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val safeHash = deviceHash.trim().take(128)
+        if (safeHash.length < 16) return Result.failure(IllegalArgumentException("Invalid device ID"))
+        val safeActor = actorName.trim().ifBlank { "Staff" }.take(40)
+        val safeTarget = targetName.trim().ifBlank { "Returning User" }.take(40)
+        val safeReason = reason.trim().ifBlank { "Banned by $safeActor after returning on a reported device." }.take(240)
+        val path = "bannedDevices/$safeHash"
+        return try {
+            db.collection("bannedDevices").document(safeHash).update(
+                mapOf(
+                    "active" to true,
+                    "reportedDeviceFlag" to true,
+                    "returningFlagActive" to false,
+                    "staffReviewStatus" to "BANNED",
+                    "bannedUserId" to targetUserId.ifBlank { uid },
+                    "bannedUserName" to safeTarget,
+                    "reason" to safeReason,
+                    "bannedByUid" to uid,
+                    "bannedByName" to safeActor,
+                    "reviewedByUid" to uid,
+                    "reviewedByName" to safeActor,
+                    "reviewNote" to safeReason,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            if (targetUserId.isNotBlank() && actorTier == StaffTier.ADMIN) {
+                runCatching {
+                    db.collection("users").document(targetUserId).update(
+                        mapOf(
+                            "globallyBanned" to true,
+                            "suspensionReason" to safeReason,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
         }
     }
 
@@ -1715,15 +2544,21 @@ class VoxStageRepository(
         senderName: String,
         senderTier: StaffTier
     ) {
-        if (senderTier == StaffTier.ADMIN) return
         val userRef = db.collection("users").document(uid)
         val snap = runCatching { userRef.get().await() }.getOrNull()
+        val nowMs = System.currentTimeMillis()
         if (snap != null && snap.exists()) {
-            if (snap.getBoolean("disableMessaging") == true) {
-                throw IllegalStateException("Your messaging has been disabled by Staff.")
+            val prof = runCatching { snap.toObject(UserProfile::class.java) }.getOrNull()
+            if (snap.getBoolean("disableMessaging") == true ||
+                prof?.isFeatureRestricted(RestrictableFeature.DM, nowMs) == true
+            ) {
+                throw IllegalStateException(
+                    prof?.featureRestrictionNotice(RestrictableFeature.DM, nowMs)
+                        ?: "Your messaging has been disabled by Staff."
+                )
             }
         }
-        val nowMs = System.currentTimeMillis()
+        if (senderTier == StaffTier.ADMIN) return
         if (!MessageSpamTracker.checkAndRecordMessageAttempt(uid, nowMs)) return
 
         val existingViolations = (snap?.get("spamViolationTimestamps") as? List<*>)
@@ -2487,11 +3322,13 @@ class VoxStageRepository(
         profile: UserProfile,
         staffCapabilities: StaffCapabilities,
         enterInvisible: Boolean,
-        enteredPin: String = ""
+        enteredPin: String = "",
+        deviceHash: String = ""
     ): Result<Boolean> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
         val path = "rooms/${room.id}/participants/$uid"
+        val cleanDeviceHash = deviceHash.trim().ifBlank { profile.lastDeviceId.trim() }.take(128)
         return try {
             if (!staffCapabilities.isAdmin) {
                 if (profile.globallyBanned) {
@@ -2515,6 +3352,84 @@ class VoxStageRepository(
                         IllegalStateException("You were bounced from this room and cannot enter for $left.")
                     )
                 }
+                // Bounce-Evasion Protection:
+                // If this device was bounced from this room and the user tries to re-enter
+                // under a different account/username, flag the user, notify Staff, and impose
+                // a 5-day device suspension per VOX safety protocol.
+                if (cleanDeviceHash.length >= 16 && room.isDeviceBouncedOut(cleanDeviceHash)) {
+                    val nowMs = System.currentTimeMillis()
+                    val suspendUntilMs = nowMs + 5L * 24L * 60L * 60L * 1000L
+                    val currentName = profile.effectiveDisplayName().trim().ifBlank { "Member" }.take(40)
+                    val evasionReason = "VOX Safety Protocol Violation: Attempted to re-enter \"${room.displayTitle().take(32)}\" under another username while this device was bounced. Your device is suspended for 5 days."
+                        .take(240)
+                    runCatching {
+                        val devRef = db.collection("bannedDevices").document(cleanDeviceHash)
+                        val devSnap = devRef.get().await()
+                        val existingAct = devSnap.getBoolean("active") == true
+                        val existingReported = devSnap.getBoolean("reportedDeviceFlag") == true
+                        val existingDeletedFlag = devSnap.getBoolean("deletedAccountFlagged") == true
+                        val existingPriorCount = (devSnap.getLong("priorReportCount") ?: 0L).toInt().coerceAtLeast(1)
+                        val existingSusp = devSnap.getLong("suspendedUntilMillis") ?: 0L
+                        val nextSusp = maxOf(existingSusp, suspendUntilMs)
+                        val payload = mutableMapOf<String, Any>(
+                            "deviceHash" to cleanDeviceHash,
+                            "bannedUserId" to (devSnap.getString("bannedUserId").orEmpty().ifBlank { uid }),
+                            "bannedUserName" to (devSnap.getString("bannedUserName").orEmpty().ifBlank { currentName }.take(40)),
+                            "reason" to evasionReason,
+                            "bannedByUid" to (devSnap.getString("bannedByUid").orEmpty().ifBlank { uid }),
+                            "bannedByName" to (devSnap.getString("bannedByName").orEmpty().ifBlank { "VOX Safety Protocol" }.take(40)),
+                            "active" to existingAct,
+                            "reportedDeviceFlag" to existingReported,
+                            "deletedAccountFlagged" to existingDeletedFlag,
+                            "priorReportCount" to existingPriorCount,
+                            "returningUserId" to uid,
+                            "returningUserName" to currentName,
+                            "returningFlagActive" to true,
+                            "suspendedUntilMillis" to nextSusp,
+                            "bounceEvasionFlag" to true,
+                            "staffReviewStatus" to "BOUNCE_EVASION_SUSPENDED",
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (devSnap.exists()) {
+                            payload["createdAt"] = devSnap.getTimestamp("createdAt") ?: FieldValue.serverTimestamp()
+                        } else {
+                            payload["createdAt"] = FieldValue.serverTimestamp()
+                        }
+                        devRef.set(payload).await()
+                    }
+                    val reportId = runCatching {
+                        recordAutoModReportAndUserFile(
+                            uid = uid,
+                            targetName = currentName,
+                            roomId = "BOUNCE_EVASION_${room.id.take(36)}",
+                            roomTitle = "Bounce Evasion (5-Day Device Suspension)",
+                            category = ReportCategory.OTHER,
+                            reportDetails = "VOX Safety Protocol Violation: $currentName attempted to re-enter \"${room.displayTitle().take(36)}\" from a bounced device (${cleanDeviceHash.take(12)}…) under another account/username. Device suspended for 5 days.",
+                            noteReason = evasionReason,
+                            suspendUntilMillis = suspendUntilMs,
+                            suspendReason = evasionReason
+                        )
+                    }.getOrDefault("")
+                    runCatching {
+                        db.collection("adminNotifications").document().set(
+                            mapOf(
+                                "type" to AdminNotificationType.BOUNCE_EVASION_DEVICE_SUSPENSION.name,
+                                "title" to "Bounce Evasion (5-Day Ban): $currentName".take(120),
+                                "message" to "$currentName tried to re-enter \"${room.displayTitle().take(36)}\" using a different account on a bounced device (${cleanDeviceHash.take(12)}…). Device was suspended for 5 days per VOX safety protocol. Staff can lift this ban in Safety Center.".take(500),
+                                "createdById" to uid,
+                                "createdByName" to currentName,
+                                "targetUserId" to uid,
+                                "targetName" to currentName,
+                                "referenceId" to cleanDeviceHash.take(260),
+                                "countValue" to 1,
+                                "read" to false,
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                    return Result.failure(IllegalStateException(evasionReason))
+                }
             }
             if (room.isOfficialVoxChatRoom() && room.statusEnum() != RoomStatus.LIVE && !staffCapabilities.isAdmin) {
                 return Result.failure(IllegalStateException("VOX CHAT is currently disabled by an Administrator."))
@@ -2531,6 +3446,149 @@ class VoxStageRepository(
             val participantRef = db.collection("rooms").document(room.id)
                 .collection("participants").document(uid)
             val existingSnap = participantRef.get().await()
+
+            // Room Join Flood Protection:
+            // A non-admin user cannot join the same room more than 3 times in 1 minute.
+            // 1st offense -> 24-hour bounce from that room + report filed in user's moderation file.
+            // 2nd+ offense -> 5-day app suspension + report in user's file + Admin notification.
+            if (!staffCapabilities.isAdmin && !existingSnap.exists()) {
+                val nowMs = System.currentTimeMillis()
+                if (RoomJoinFloodTracker.recordAndCheckExceeded(uid, room.id, nowMs)) {
+                    RoomJoinFloodTracker.clearForUserRoom(uid, room.id)
+                    val floodUserName = profile.effectiveDisplayName().trim().ifBlank { "Member" }.take(40)
+                    val priorFloodOffenses = runCatching {
+                        db.collection("safetyReports")
+                            .whereEqualTo("reporterId", uid)
+                            .get()
+                            .await()
+                            .documents
+                            .count { it.getString("roomId") == "AUTOMOD_ROOM_FLOOD" }
+                    }.getOrDefault(0)
+
+                    if (priorFloodOffenses == 0) {
+                        val bounceUntilMs = nowMs + 24L * 60L * 60L * 1000L
+                        runCatching {
+                            val roomRef = db.collection("rooms").document(room.id)
+                            val roomSnap = roomRef.get().await()
+                            val updatedBounced = ((roomSnap.get("bouncedUntilByUserId") as? Map<*, *>)
+                                ?.mapNotNull { (k, v) ->
+                                    val key = k as? String ?: return@mapNotNull null
+                                    val num = (v as? Number)?.toLong() ?: return@mapNotNull null
+                                    key to num
+                                }?.toMap().orEmpty() + (uid to bounceUntilMs))
+                            val updatedNames = ((roomSnap.get("bouncedNamesByUserId") as? Map<*, *>)
+                                ?.mapNotNull { (k, v) ->
+                                    val key = k as? String ?: return@mapNotNull null
+                                    val value = v as? String ?: return@mapNotNull null
+                                    key to value
+                                }?.toMap().orEmpty() + (uid to floodUserName))
+                            val floodUpdate = mutableMapOf<String, Any>(
+                                "bouncedUntilByUserId" to updatedBounced,
+                                "bouncedNamesByUserId" to updatedNames,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                            if (cleanDeviceHash.length >= 16) {
+                                val updatedDevices = ((roomSnap.get("bouncedDevicesByHash") as? Map<*, *>)
+                                    ?.mapNotNull { (k, v) ->
+                                        val key = k as? String ?: return@mapNotNull null
+                                        val num = (v as? Number)?.toLong() ?: return@mapNotNull null
+                                        if (num > nowMs) key to num else null
+                                    }?.toMap().orEmpty() + (cleanDeviceHash to bounceUntilMs))
+                                    .entries
+                                    .sortedByDescending { it.value }
+                                    .take(100)
+                                    .associate { it.key to it.value }
+                                floodUpdate["bouncedDevicesByHash"] = updatedDevices
+                            }
+                            roomRef.update(floodUpdate).await()
+                        }
+                        runCatching {
+                            sendMessage(
+                                roomId = room.id,
+                                senderName = "VOX AutoMod",
+                                senderRole = ParticipantRole.MODERATOR,
+                                senderTier = staffCapabilities.tier,
+                                text = "$floodUserName was bounced for 24 hours (joined this room more than 3 times in 1 minute).",
+                                messageType = MessageType.MOD_NOTICE,
+                                flaggedByAutoMod = false,
+                                displayedSenderTier = StaffTier.USER
+                            )
+                        }
+                        runCatching {
+                            recordAutoModReportAndUserFile(
+                                uid = uid,
+                                targetName = floodUserName,
+                                roomId = "AUTOMOD_ROOM_FLOOD",
+                                roomTitle = "Room Flood Bounce (24h)",
+                                category = ReportCategory.SPAM_SCAM,
+                                reportDetails = "AutoMod 1st Offense: $floodUserName tried to join \"${room.title.take(36)}\" more than 3 times in 1 minute. Bounced from the room for 24 hours.",
+                                noteReason = "Room join flood (1st offense): Attempted >3 joins in 1 minute to \"${room.title.take(36)}\". Bounced for 24 hours."
+                            )
+                        }
+                        return Result.failure(
+                            IllegalStateException(
+                                "You cannot join the same room more than 3 times in 1 minute. You have been bounced from this room for 24 hours and a report has been added to your account file. A 2nd offense will suspend your account for 5 days."
+                            )
+                        )
+                    } else {
+                        val suspendUntilMs = nowMs + 5L * 24L * 60L * 60L * 1000L
+                        val suspendReason = "Suspended for 5 days: Repeated room join flooding (2nd offense — joined \"${room.title.take(36)}\" more than 3 times in 1 minute)."
+                            .take(195)
+                        runCatching {
+                            val userRef = db.collection("users").document(uid)
+                            val userSnap = userRef.get().await()
+                            val existingSpamTs = (userSnap.get("spamViolationTimestamps") as? List<*>)
+                                ?.mapNotNull { (it as? Number)?.toLong() }
+                                .orEmpty()
+                            val nextSpamTs = (existingSpamTs + nowMs).takeLast(20)
+                            userRef.update(
+                                mapOf(
+                                    "spamViolationTimestamps" to nextSpamTs,
+                                    "suspendedUntilMillis" to suspendUntilMs,
+                                    "suspensionReason" to suspendReason,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
+                        val reportId = runCatching {
+                            recordAutoModReportAndUserFile(
+                                uid = uid,
+                                targetName = floodUserName,
+                                roomId = "AUTOMOD_ROOM_FLOOD",
+                                roomTitle = "5-Day Auto-Suspension (Room Flood #2)",
+                                category = ReportCategory.SPAM_SCAM,
+                                reportDetails = "AutoMod 2nd Offense: $floodUserName joined \"${room.title.take(36)}\" more than 3 times in 1 minute. Automatically suspended from the app for 5 days.",
+                                noteReason = "Room join flood (2nd offense): Automatically suspended from app for 5 days. Administrator notified for corrective action.",
+                                suspendUntilMillis = suspendUntilMs,
+                                suspendReason = suspendReason
+                            )
+                        }.getOrDefault("")
+                        runCatching {
+                            db.collection("adminNotifications").document().set(
+                                mapOf(
+                                    "type" to AdminNotificationType.AUTOMOD_ROOM_FLOOD_SUSPENSION.name,
+                                    "title" to "5-Day Auto-Suspension: $floodUserName".take(120),
+                                    "message" to "$floodUserName triggered a 2nd room join flood offense (>3 joins in 1 minute in \"${room.title.take(36)}\") and was automatically suspended for 5 days. Review or remove suspension in the Admin Console.".take(500),
+                                    "createdById" to uid,
+                                    "createdByName" to floodUserName,
+                                    "targetUserId" to uid,
+                                    "targetName" to floodUserName,
+                                    "referenceId" to reportId.take(260),
+                                    "countValue" to (priorFloodOffenses + 1),
+                                    "read" to false,
+                                    "createdAt" to FieldValue.serverTimestamp(),
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
+                        return Result.failure(
+                            IllegalStateException(
+                                "2nd Room Join Flood Offense: Your account has been suspended for 5 days and an Administrator has been notified for corrective action."
+                            )
+                        )
+                    }
+                }
+            }
 
             // Enforce Private Chat Room user limits by host membership tier:
             // Free = 25, Pro = 50, VIP = 75, Elite = 100
@@ -2566,14 +3624,16 @@ class VoxStageRepository(
             }
             val isMuted = room.mutedUserIds.contains(uid)
 
+            val effectiveName = profile.effectiveDisplayName().trim().ifBlank { "Guest" }.take(40)
+            val displayedTier = profile.displayedStaffTier(staffCapabilities.tier)
             if (!existingSnap.exists()) {
                 val payload = mutableMapOf<String, Any>(
                     "userId" to uid,
                     "roomId" to room.id,
-                    "displayName" to profile.effectiveDisplayName().trim().ifBlank { "Guest" }.take(40),
+                    "displayName" to effectiveName,
                     "avatarColorHex" to profile.avatarColorHex,
                     "role" to assignedRole.name,
-                    "staffTier" to profile.displayedStaffTier(staffCapabilities.tier).name,
+                    "staffTier" to displayedTier.name,
                     "invisible" to actuallyInvisible,
                     "micActive" to false,
                     "camActive" to false,
@@ -2586,6 +3646,9 @@ class VoxStageRepository(
                 if (cleanPin.length == 4) {
                     payload["enteredPin"] = cleanPin
                 }
+                if (cleanDeviceHash.isNotEmpty()) {
+                    payload["deviceHash"] = cleanDeviceHash
+                }
                 participantRef.set(payload).await()
 
                 if (!actuallyInvisible) {
@@ -2596,24 +3659,27 @@ class VoxStageRepository(
                         )
                     ).await()
                     if (!isMuted) {
-                        sendMessage(
-                            roomId = room.id,
-                            senderName = profile.displayName,
-                            senderRole = assignedRole,
-                            senderTier = staffCapabilities.tier,
-                            text = "${profile.displayName} joined the stage",
-                            messageType = MessageType.JOIN_LEAVE,
-                            flaggedByAutoMod = false
-                        )
+                        runCatching {
+                            sendMessage(
+                                roomId = room.id,
+                                senderName = effectiveName,
+                                senderRole = assignedRole,
+                                senderTier = staffCapabilities.tier,
+                                text = "$effectiveName joined the room",
+                                messageType = MessageType.JOIN_LEAVE,
+                                flaggedByAutoMod = false,
+                                displayedSenderTier = displayedTier
+                            )
+                        }
                     }
                 }
             } else {
                 val prevInvisible = existingSnap.getBoolean("invisible") == true
                 participantRef.update(
                     mapOf(
-                        "displayName" to profile.displayName.trim().ifBlank { "Guest" }.take(40),
+                        "displayName" to effectiveName,
                         "avatarColorHex" to profile.avatarColorHex,
-                        "staffTier" to staffCapabilities.tier.name,
+                        "staffTier" to displayedTier.name,
                         "invisible" to actuallyInvisible,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
@@ -2625,6 +3691,20 @@ class VoxStageRepository(
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                     ).await()
+                    if (!isMuted) {
+                        runCatching {
+                            sendMessage(
+                                roomId = room.id,
+                                senderName = effectiveName,
+                                senderRole = assignedRole,
+                                senderTier = staffCapabilities.tier,
+                                text = "$effectiveName joined the room",
+                                messageType = MessageType.JOIN_LEAVE,
+                                flaggedByAutoMod = false,
+                                displayedSenderTier = displayedTier
+                            )
+                        }
+                    }
                 } else if (!prevInvisible && actuallyInvisible && room.participantCount > 0L) {
                     db.collection("rooms").document(room.id).update(
                         mapOf(
@@ -2709,6 +3789,10 @@ class VoxStageRepository(
             val roomRef = db.collection("rooms").document(roomId)
             val participantRef = roomRef.collection("participants").document(uid)
             val snap = participantRef.get().await()
+            val participantName = snap.getString("displayName")?.trim()?.takeIf { it.isNotBlank() } ?: "Member"
+            val participantRole = ParticipantRole.fromRaw(snap.getString("role").orEmpty())
+            val participantTier = StaffTier.fromRaw(snap.getString("staffTier"))
+            val wasMutedByMod = snap.getBoolean("mutedByMod") == true
             val docInvisible = if (snap.exists()) {
                 val inv = snap.getBoolean("invisible") == true || wasInvisible
                 participantRef.delete().await()
@@ -2723,10 +3807,35 @@ class VoxStageRepository(
             }
             val isOfficial = roomId == ChatRoom.VOX_CHAT_ROOM_ID ||
                 roomSnap.getBoolean("officialVoxChat") == true
+            val roomIsLive = roomSnap.getString("status") == RoomStatus.LIVE.name
             val liveCount = roomSnap.getLong("participantCount") ?: currentParticipantCount
+
+            suspend fun broadcastLeaveNoticeIfEligible() {
+                if (snap.exists() && !docInvisible && !wasMutedByMod && roomIsLive) {
+                    runCatching {
+                        val msgRef = roomRef.collection("messages").document()
+                        msgRef.set(
+                            mapOf(
+                                "roomId" to roomId,
+                                "senderId" to uid,
+                                "senderName" to participantName.take(40),
+                                "senderRole" to participantRole.name,
+                                "senderTier" to participantTier.name,
+                                "text" to "$participantName left the room".take(500),
+                                "messageType" to MessageType.JOIN_LEAVE.name,
+                                "flaggedByAutoMod" to false,
+                                "deletedByMod" to false,
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
+            }
 
             if (isOfficial) {
                 // Official VOX CHAT stays open even with 0 users
+                broadcastLeaveNoticeIfEligible()
                 if (snap.exists() && !docInvisible && liveCount > 0L) {
                     roomRef.update(
                         mapOf(
@@ -2761,13 +3870,16 @@ class VoxStageRepository(
                             ).await()
                         }
                     }
-                } else if (snap.exists() && !docInvisible && liveCount > 0L) {
-                    roomRef.update(
-                        mapOf(
-                            "participantCount" to FieldValue.increment(-1L),
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
+                } else {
+                    broadcastLeaveNoticeIfEligible()
+                    if (snap.exists() && !docInvisible && liveCount > 0L) {
+                        roomRef.update(
+                            mapOf(
+                                "participantCount" to FieldValue.increment(-1L),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
                 }
             }
             Result.success(Unit)
@@ -2962,6 +4074,7 @@ class VoxStageRepository(
             val participantRef = db.collection("rooms").document(room.id)
                 .collection("participants").document(targetUserId)
             val snap = participantRef.get().await()
+            val bouncedDeviceHash = snap.getString("deviceHash").orEmpty().trim().take(128)
             if (snap.exists()) {
                 val wasInvisible = snap.getBoolean("invisible") == true
                 participantRef.delete().await()
@@ -2975,7 +4088,8 @@ class VoxStageRepository(
                 }
             }
 
-            // Any bounce from a chat room imposes a 24-hour lockout & adds the user to the Room Admin's Bounce List
+            // Any bounce from a chat room imposes a 24-hour lockout & records the user's device ID
+            // so they cannot evade the bounce by returning under another username.
             val nowMs = System.currentTimeMillis()
             val bounceUntilMs = nowMs + 24L * 60L * 60L * 1000L
             val updatedBounces = room.bouncedUntilByUserId
@@ -2990,13 +4104,33 @@ class VoxStageRepository(
                 .filterKeys { updatedBounces.containsKey(it) }
                 .toMutableMap()
                 .apply { put(targetUserId, targetName.trim().ifBlank { "Member" }.take(40)) }
-            db.collection("rooms").document(room.id).update(
-                mapOf(
-                    "bouncedUntilByUserId" to updatedBounces,
-                    "bouncedNamesByUserId" to updatedBounceNames,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val roomBounceUpdate = mutableMapOf<String, Any>(
+                "bouncedUntilByUserId" to updatedBounces,
+                "bouncedNamesByUserId" to updatedBounceNames,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            val resolvedBounceDeviceHash = if (bouncedDeviceHash.length >= 16) {
+                bouncedDeviceHash
+            } else if (actorTier.isStaff()) {
+                runCatching {
+                    db.collection("users").document(targetUserId).get().await()
+                        .getString("lastDeviceId").orEmpty().trim().take(128)
+                }.getOrDefault("")
+            } else {
+                ""
+            }
+            if (resolvedBounceDeviceHash.length >= 16) {
+                val updatedBounceDevices = room.bouncedDevicesByHash
+                    .filterValues { it > nowMs }
+                    .toMutableMap()
+                    .apply { put(resolvedBounceDeviceHash, bounceUntilMs) }
+                    .entries
+                    .sortedByDescending { it.value }
+                    .take(100)
+                    .associate { it.key to it.value }
+                roomBounceUpdate["bouncedDevicesByHash"] = updatedBounceDevices
+            }
+            db.collection("rooms").document(room.id).update(roomBounceUpdate).await()
 
             writeModLog(
                 roomId = room.id,
@@ -3070,6 +4204,12 @@ class VoxStageRepository(
                 targetName = safeName,
                 actionType = ModActionType.UNBOUNCE,
                 reason = "24-hour bounce removed by $actorName"
+            )
+            sendModNotice(
+                roomId = room.id,
+                actorName = actorName,
+                actorTier = actorTier,
+                text = "$safeName's bounce was removed by $actorName"
             )
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -3240,6 +4380,12 @@ class VoxStageRepository(
                 actionType = ModActionType.UNBAN,
                 reason = "Ban lifted by $actorName"
             )
+            sendModNotice(
+                roomId = room.id,
+                actorName = actorName,
+                actorTier = actorTier,
+                text = "$safeName was unbanned by $actorName"
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -3282,18 +4428,21 @@ class VoxStageRepository(
         senderTier: StaffTier,
         text: String,
         messageType: MessageType = MessageType.TEXT,
-        flaggedByAutoMod: Boolean = false
+        flaggedByAutoMod: Boolean = false,
+        displayedSenderTier: StaffTier = senderTier
     ): Result<Unit> {
         var path = "rooms/$roomId/messages"
         return try {
             val uid = requireUserId()
             val cleanText = text.trim().take(500)
             require(cleanText.isNotEmpty()) { "Message cannot be empty." }
-            enforceMessagingAllowedAndAntiSpam(
-                uid = uid,
-                senderName = senderName,
-                senderTier = senderTier
-            )
+            if (messageType != MessageType.JOIN_LEAVE) {
+                enforceMessagingAllowedAndAntiSpam(
+                    uid = uid,
+                    senderName = senderName,
+                    senderTier = senderTier
+                )
+            }
             val docRef = db.collection("rooms").document(roomId)
                 .collection("messages").document()
             path = docRef.path
@@ -3302,7 +4451,7 @@ class VoxStageRepository(
                 "senderId" to uid,
                 "senderName" to senderName.trim().ifBlank { "Member" }.take(40),
                 "senderRole" to senderRole.name,
-                "senderTier" to senderTier.name,
+                "senderTier" to displayedSenderTier.name,
                 "text" to cleanText,
                 "messageType" to messageType.name,
                 "flaggedByAutoMod" to flaggedByAutoMod,
@@ -3649,13 +4798,15 @@ class VoxStageRepository(
         newStatus: ReportStatus,
         resolutionNote: String
     ): Result<Unit> {
-        val path = "safetyReports/$reportId"
+        val cleanId = reportId.trim()
+        val path = "safetyReports/$cleanId"
         return try {
             requireUserId()
+            require(cleanId.isNotEmpty()) { "Missing report ID — refresh and try again." }
             require(newStatus == ReportStatus.RESOLVED || newStatus == ReportStatus.DISMISSED) {
                 "Report can only transition to RESOLVED or DISMISSED."
             }
-            db.collection("safetyReports").document(reportId).update(
+            db.collection("safetyReports").document(cleanId).update(
                 mapOf(
                     "status" to newStatus.name,
                     "resolutionNote" to resolutionNote.trim().take(200),
@@ -3906,6 +5057,22 @@ class VoxStageRepository(
                     )
                 }
                 runCatching { ref.update(patch).await() }
+            }
+            // Youth Safety Monitoring: if an 18+ user opens a private 1:1 DM with an under-18 (13-17) user,
+            // notify VOX Staff and open staff monitoring access (Visible or Invisible).
+            val wasAlreadyFlagged = snap.exists() && snap.getBoolean("reportStaffAccessOpen") == true
+            if (!wasAlreadyFlagged && !myTier.isStaff() && !otherTier.isStaff()) {
+                runCatching {
+                    flagAdultMinorPrivateDmIfNeeded(
+                        threadId = threadId,
+                        callerUid = uid,
+                        callerName = myName,
+                        callerIsAdult = myProfile.isAdultViewer18Plus(),
+                        callerIsMinor = myProfile.isMinor13To17(),
+                        otherUserId = otherUserId,
+                        otherName = cleanOtherName
+                    )
+                }
             }
             Result.success(threadId)
         } catch (e: CancellationException) {
@@ -4334,7 +5501,8 @@ class VoxStageRepository(
         audioBase64: String = "",
         audioDurationSec: Long = 0L,
         messageType: String = DirectMessage.TYPE_TEXT,
-        hideSenderName: Boolean = false
+        hideSenderName: Boolean = false,
+        displayedSenderTier: StaffTier = senderTier
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -4397,7 +5565,7 @@ class VoxStageRepository(
                 "participantIds" to thread.participantIds,
                 "senderId" to uid,
                 "senderName" to safeName,
-                "senderTier" to senderTier.name,
+                "senderTier" to displayedSenderTier.name,
                 "text" to cleanText,
                 "messageType" to safeType,
                 "createdAt" to FieldValue.serverTimestamp()
@@ -4440,6 +5608,9 @@ class VoxStageRepository(
                 val streakFields = computeNextTalkStreakUpdate(thread, uid)
                 threadUpdate.putAll(streakFields)
             }
+            if (!isVisibleCompanyOwner && thread.participantIds.contains(uid) && thread.typingByUserId.containsKey(uid)) {
+                threadUpdate["typingByUserId.$uid"] = FieldValue.delete()
+            }
             val batch = db.batch()
             batch.set(msgRef, payload)
             batch.update(
@@ -4456,11 +5627,63 @@ class VoxStageRepository(
                 )
             }
             batch.commit().await()
+            // Youth Safety Monitoring: if an 18+ user sends a private DM to an under-18 user
+            // on an unflagged 1:1 thread, immediately flag for Staff monitoring & alert Staff.
+            if (!thread.isGroup &&
+                !thread.reportStaffAccessOpen &&
+                !thread.voxOfficial &&
+                thread.companyOwnerId.isBlank() &&
+                !senderTier.isStaff() &&
+                !isVisibleCompanyOwner
+            ) {
+                val otherUid = thread.otherUserId(uid)
+                if (otherUid.isNotBlank()) {
+                    runCatching {
+                        val myDir = db.collection("userDirectory").document(uid).get().await()
+                            .toObject(DirectoryEntry::class.java)
+                        flagAdultMinorPrivateDmIfNeeded(
+                            threadId = thread.id,
+                            callerUid = uid,
+                            callerName = safeName,
+                            callerIsAdult = myDir?.isAdult18Plus() == true,
+                            callerIsMinor = myDir?.isMinor13To17() == true,
+                            otherUserId = otherUid,
+                            otherName = thread.otherName(uid)
+                        )
+                    }
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setDirectThreadTyping(
+        threadId: String,
+        isTyping: Boolean
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (threadId.isBlank()) return Result.success(Unit)
+        return try {
+            val value: Any = if (isTyping) {
+                System.currentTimeMillis() + DIRECT_TYPING_TTL_MS
+            } else {
+                FieldValue.delete()
+            }
+            db.collection("directThreads")
+                .document(threadId)
+                .update(mapOf("typingByUserId.$uid" to value))
+                .await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.d("VoxStageRepository", "Typing indicator update skipped for $threadId: ${e.message}")
             Result.failure(e)
         }
     }
@@ -6063,6 +7286,44 @@ class VoxStageRepository(
     }
 
     /**
+     * Toggles Listen-Only Live Audio for the current user in `directThreads/{threadId}.pttListenOnlyUserIds`.
+     * Allows users (including sub-accounts or users whose PTT broadcast is restricted by an admin)
+     * to opt in to hearing live Push-to-Talk audio even if they cannot broadcast back.
+     */
+    suspend fun setDirectThreadPttListenOnly(
+        thread: DirectThread,
+        enabled: Boolean
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/${thread.id}"
+        return try {
+            require(!thread.hasAnyBlock()) { "Unavailable in a blocked chat." }
+            require(!thread.isUserKicked(uid)) { "You can no longer change settings in this chat." }
+            val currentList = thread.pttListenOnlyUserIds
+            val updatedList = if (enabled) {
+                if (currentList.contains(uid)) return Result.success(Unit)
+                currentList + uid
+            } else {
+                if (!currentList.contains(uid)) return Result.success(Unit)
+                currentList.filter { it != uid }
+            }
+            db.collection("directThreads").document(thread.id).update(
+                mapOf(
+                    "pttListenOnlyUserIds" to updatedList,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Toggles Do Not Disturb (PTT → Voice-to-Text) for the current user in `directThreads/{threadId}.pttDndUserIds`.
      * While enabled, incoming PTT voice audio is silenced on this device and senders automatically
      * deliver incoming PTT as voice-to-text messages so nothing is missed.
@@ -6237,16 +7498,17 @@ class VoxStageRepository(
         subject: String,
         details: String,
         assignedStaffId: String = "",
-        assignedStaffName: String = ""
+        assignedStaffName: String = "",
+        requesterTier: StaffTier = StaffTier.USER
     ): Result<String> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
         val cleanSubject = subject.trim().take(100)
-        val cleanDetails = details.trim().take(1000)
+        val cleanMessage = details.trim().take(600)
         if (cleanSubject.length < 2) {
             return Result.failure(IllegalArgumentException("Subject must be at least 2 characters."))
         }
-        if (cleanDetails.length < 4) {
+        if (cleanMessage.length < 4) {
             return Result.failure(IllegalArgumentException("Please describe your issue (at least 4 characters)."))
         }
         val docRef = db.collection("supportTickets").document()
@@ -6255,9 +7517,10 @@ class VoxStageRepository(
             val payload = mapOf(
                 "requesterId" to uid,
                 "requesterName" to requesterName.trim().ifBlank { "Member" }.take(40),
-                "category" to category.name,
+                "requesterTier" to requesterTier.name,
+                "category" to category.toFirestoreCategory(),
                 "subject" to cleanSubject,
-                "details" to cleanDetails,
+                "message" to cleanMessage,
                 "status" to SupportTicketStatus.OPEN.name,
                 "assignedStaffId" to assignedStaffId.trim().take(128),
                 "assignedStaffName" to assignedStaffName.trim().take(40),
@@ -6267,6 +7530,63 @@ class VoxStageRepository(
             )
             docRef.set(payload).await()
             Result.success(docRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Allows a suspended user to submit ONE review message per suspension.
+     * Uses a deterministic document ID so a second submission is strictly rejected.
+     */
+    suspend fun submitSuspensionReviewAppeal(
+        requesterName: String,
+        requesterTier: StaffTier,
+        suspensionKey: String,
+        suspensionReason: String,
+        reviewMessage: String
+    ): Result<String> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanMsg = reviewMessage.trim().take(600)
+        if (cleanMsg.length < 4) {
+            return Result.failure(IllegalArgumentException("Please enter at least 4 characters for your review message."))
+        }
+        val safeKey = suspensionKey.filter { it.isLetterOrDigit() || it == '_' }.take(32).ifBlank { "active" }
+        val docId = "susp_appeal_${uid}_$safeKey".take(120)
+        val docRef = db.collection("supportTickets").document(docId)
+        val path = docRef.path
+        return try {
+            if (docRef.get().await().exists()) {
+                return Result.failure(
+                    IllegalStateException("You have already submitted a review message for this suspension. Only one message can be sent.")
+                )
+            }
+            val safeReasonSnippet = suspensionReason.trim().take(60)
+            val subject = if (safeReasonSnippet.isNotBlank()) {
+                "Suspension Review: $safeReasonSnippet".take(100)
+            } else {
+                "Suspension Review Request"
+            }
+            val payload = mapOf(
+                "requesterId" to uid,
+                "requesterName" to requesterName.trim().ifBlank { "Member" }.take(40),
+                "requesterTier" to requesterTier.name,
+                "category" to "ACCOUNT",
+                "subject" to subject,
+                "message" to cleanMsg,
+                "status" to SupportTicketStatus.OPEN.name,
+                "assignedStaffId" to "",
+                "assignedStaffName" to "",
+                "staffResponse" to "",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.set(payload).await()
+            Result.success(docId)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -6288,7 +7608,7 @@ class VoxStageRepository(
             db.collection("supportTickets").document(ticketId).update(
                 mapOf(
                     "status" to status.name,
-                    "staffResponse" to staffResponse.trim().take(1000),
+                    "staffResponse" to staffResponse.trim().take(500),
                     "assignedStaffId" to uid,
                     "assignedStaffName" to staffName.trim().ifBlank { "Support" }.take(40),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -7758,6 +9078,114 @@ class VoxStageRepository(
         }
     }
 
+    // --- GIFTED 1-MONTH VOX PRO PASS (POINTS STORE: 15 POINTS -> FRIEND OR ROOM HOST) ---
+
+    suspend fun giftProPassToUser(
+        targetUserId: String,
+        targetName: String,
+        senderName: String,
+        giftNote: String = ""
+    ): Result<String> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val cleanTargetUid = targetUserId.trim()
+        if (cleanTargetUid.isBlank() || cleanTargetUid == uid) {
+            return Result.failure(IllegalArgumentException("Choose a friend or room host to gift a 1-Month VOX Pro Pass."))
+        }
+        val path = "users/$cleanTargetUid"
+        return try {
+            val senderRef = db.collection("users").document(uid)
+            val senderSnap = senderRef.get().await()
+            val senderPoints = (senderSnap.get("pointsBalance") as? Number)?.toLong() ?: 0L
+            require(senderPoints >= UserProfile.PRO_GIFT_POINTS) {
+                "You need ${UserProfile.PRO_GIFT_POINTS} points to gift a 1-Month VOX Pro Pass."
+            }
+
+            val recipientDirRef = db.collection("userDirectory").document(cleanTargetUid)
+            val recipientDirSnap = recipientDirRef.get().await()
+            if (!recipientDirSnap.exists()) {
+                return Result.failure(IllegalStateException("Recipient account could not be found."))
+            }
+            val recipientEntry = recipientDirSnap.toObject(DirectoryEntry::class.java)
+            val safeTargetName = targetName.trim()
+                .ifBlank { recipientEntry?.effectiveDisplayName().orEmpty() }
+                .ifBlank { "Member" }
+                .take(40)
+            val safeSenderName = senderName.trim().ifBlank { "Member" }.take(40)
+            val nowMs = System.currentTimeMillis()
+
+            if (recipientEntry != null) {
+                if (recipientEntry.proLifetime) {
+                    return Result.failure(IllegalStateException("$safeTargetName already has Lifetime VOX Pro!"))
+                }
+                val currentTier = recipientEntry.effectiveProTier(nowMs)
+                if (currentTier == ProTier.VIP_PRO || currentTier == ProTier.BUSINESS) {
+                    return Result.failure(
+                        IllegalStateException("$safeTargetName already has ${currentTier.label} membership!")
+                    )
+                }
+            }
+
+            val existingExp = recipientEntry?.proExpiresAtMillis ?: 0L
+            val baseExp = if (existingExp > nowMs) existingExp else nowMs
+            val newExpiresAtMillis = baseExp + UserProfile.PRO_DURATION_MILLIS
+            val safeNote = giftNote.trim().take(110).ifBlank { "GIFT_PRO_30D" }
+
+            val recipientUserRef = db.collection("users").document(cleanTargetUid)
+            val txRef = db.collection("pointTransactions").document()
+
+            val batch = db.batch()
+            batch.update(
+                senderRef,
+                mapOf(
+                    "pointsBalance" to FieldValue.increment(-UserProfile.PRO_GIFT_POINTS),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                recipientUserRef,
+                mapOf(
+                    "proMember" to true,
+                    "proTier" to ProTier.PRO.name,
+                    "proExpiresAtMillis" to newExpiresAtMillis,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                recipientDirRef,
+                mapOf(
+                    "proMember" to true,
+                    "proTier" to ProTier.PRO.name,
+                    "proExpiresAtMillis" to newExpiresAtMillis,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.set(
+                txRef,
+                mapOf(
+                    "type" to PointTransactionType.GIFT_PRO_PASS.name,
+                    "buyerId" to uid,
+                    "buyerName" to safeSenderName,
+                    "creatorId" to cleanTargetUid,
+                    "creatorName" to safeTargetName,
+                    "postId" to safeNote,
+                    "pointsDelta" to -UserProfile.PRO_GIFT_POINTS,
+                    "grossCents" to 1500L,
+                    "creatorShareCents" to 0L,
+                    "platformShareCents" to 1500L,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(safeTargetName)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
     // --- DAILY LOGIN STREAK (+0.5 PT FOR FREE USERS AFTER 7-DAY STREAK) ---
 
     data class DailyLoginStreakOutcome(
@@ -8277,7 +9705,8 @@ class VoxStageRepository(
         senderName: String,
         senderTier: StaffTier,
         messageText: String,
-        pointsCost: Int
+        pointsCost: Int,
+        displayedSenderTier: StaffTier = senderTier
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -8343,7 +9772,7 @@ class VoxStageRepository(
                     "participantIds" to thread.participantIds,
                     "senderId" to uid,
                     "senderName" to safeSender,
-                    "senderTier" to senderTier.name,
+                    "senderTier" to displayedSenderTier.name,
                     "text" to cleanMsg,
                     "messageType" to DirectMessage.TYPE_PRIORITY_CHIRP,
                     "createdAt" to FieldValue.serverTimestamp()
@@ -8811,6 +10240,20 @@ class VoxStageRepository(
                 )
             )
             batch.commit().await()
+            if (resolverTier == StaffTier.ADMIN) {
+                runCatching {
+                    val userRef = db.collection("users").document(targetUserId)
+                    if (userRef.get().await().exists()) {
+                        userRef.update(
+                            mapOf(
+                                "suspendedUntilMillis" to 0L,
+                                "suspensionReason" to "",
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -9245,6 +10688,73 @@ class VoxStageRepository(
     // GROUP DM ADMINISTRATOR CONTROLS (MUTE / BOUNCE 24H / BAN)
     // =========================================================================
 
+    suspend fun sendDirectPresenceNotice(
+        thread: DirectThread,
+        senderName: String,
+        senderTier: StaffTier,
+        text: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.success(Unit)
+        val cleanText = text.trim().take(500)
+        if (thread.id.isBlank() || cleanText.isBlank()) return Result.success(Unit)
+        if (thread.voxOfficial ||
+            !thread.participantIds.contains(uid) ||
+            thread.hasAnyBlock() ||
+            thread.isUserKicked(uid) ||
+            thread.isBannedInGroup(uid) ||
+            thread.isBouncedInGroup(uid) ||
+            thread.isMutedInGroup(uid)
+        ) {
+            return Result.success(Unit)
+        }
+        return runCatching {
+            val threadRef = db.collection("directThreads").document(thread.id)
+            val msgRef = threadRef.collection("messages").document()
+            val payload = mutableMapOf<String, Any>(
+                "threadId" to thread.id,
+                "participantIds" to thread.participantIds,
+                "senderId" to uid,
+                "senderName" to senderName.trim().ifBlank { "Member" }.take(40),
+                "senderTier" to senderTier.name,
+                "text" to cleanText,
+                "messageType" to DirectMessage.TYPE_SUPPORT_HANDOFF,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            if (thread.companyOwnerId.isNotBlank()) {
+                payload["companyOwnerId"] = thread.companyOwnerId
+            }
+            msgRef.set(payload).await()
+            Unit
+        }
+    }
+
+    private suspend fun postGroupDmModNotice(thread: DirectThread, text: String) {
+        val uid = auth.currentUser?.uid ?: return
+        val cleanText = text.trim().take(500)
+        if (thread.id.isBlank() || cleanText.isBlank() || !thread.isGroup) return
+        runCatching {
+            val actorName = thread.participantNamesById[uid]?.trim()?.takeIf { it.isNotBlank() }
+                ?: auth.currentUser?.displayName?.trim()?.takeIf { it.isNotBlank() }
+                ?: "Moderator"
+            val threadRef = db.collection("directThreads").document(thread.id)
+            val msgRef = threadRef.collection("messages").document()
+            val payload = mutableMapOf<String, Any>(
+                "threadId" to thread.id,
+                "participantIds" to thread.participantIds,
+                "senderId" to uid,
+                "senderName" to actorName.take(40),
+                "senderTier" to StaffTier.USER.name,
+                "text" to cleanText,
+                "messageType" to DirectMessage.TYPE_SUPPORT_HANDOFF,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            if (thread.companyOwnerId.isNotBlank()) {
+                payload["companyOwnerId"] = thread.companyOwnerId
+            }
+            msgRef.set(payload).await()
+        }
+    }
+
     suspend fun setGroupDmUserMuted(
         thread: DirectThread,
         targetUserId: String,
@@ -9270,6 +10780,11 @@ class VoxStageRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            val safeName = targetName.trim().ifBlank { "Member" }.take(40)
+            postGroupDmModNotice(
+                thread = thread,
+                text = if (mute) "$safeName was muted in this chat" else "$safeName was unmuted in this chat"
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -9309,6 +10824,10 @@ class VoxStageRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            postGroupDmModNotice(
+                thread = thread,
+                text = "$safeName was bounced from this chat for 24 hours"
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -9327,6 +10846,7 @@ class VoxStageRepository(
         val path = "directThreads/${thread.id}"
         return try {
             require(thread.isGroup) { "Not a group DM." }
+            val safeName = thread.bouncedNamesByUserId[targetUserId]?.trim()?.takeIf { it.isNotBlank() } ?: "Member"
             val nextBouncedUntil = thread.bouncedUntilByUserId.toMutableMap().apply {
                 remove(targetUserId)
             }
@@ -9340,6 +10860,10 @@ class VoxStageRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            postGroupDmModNotice(
+                thread = thread,
+                text = "$safeName's bounce was removed"
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -9371,17 +10895,25 @@ class VoxStageRepository(
                 "bannedNamesByUserId" to nextBannedNames,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            if (alsoRemoveFromParticipants &&
+            val nextParticipants = if (alsoRemoveFromParticipants &&
                 targetUserId != thread.companyOwnerId &&
                 thread.participantIds.size > 1 &&
                 thread.participantIds.contains(targetUserId)
             ) {
-                updates["participantIds"] = thread.participantIds.filter { it != targetUserId }
+                val filtered = thread.participantIds.filter { it != targetUserId }
+                updates["participantIds"] = filtered
                 updates["participantNamesById"] = thread.participantNamesById.toMutableMap().apply {
                     remove(targetUserId)
                 }
+                filtered
+            } else {
+                thread.participantIds
             }
             db.collection("directThreads").document(thread.id).update(updates).await()
+            postGroupDmModNotice(
+                thread = thread.copy(participantIds = nextParticipants),
+                text = "$safeName was banned from this chat"
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -9461,6 +10993,102 @@ class VoxStageRepository(
         }
     }
 
+    /**
+     * Removes a user from a Group DM (for Group DM Admins / App Admins) or kicks/removes the
+     * other participant from a 1-on-1 DM thread.
+     */
+    suspend fun removeUserFromDirectThread(
+        thread: DirectThread,
+        targetUserId: String,
+        targetName: String,
+        actorName: String,
+        isAppAdmin: Boolean = false
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/${thread.id}"
+        return try {
+            require(targetUserId.isNotBlank() && targetUserId != uid) { "Select another user to remove." }
+            val safeTarget = targetName.trim().ifBlank { "Member" }.take(40)
+            val safeActor = actorName.trim().ifBlank { "Member" }.take(40)
+            if (thread.isGroup) {
+                require(thread.isGroupAdmin(uid) || isAppAdmin) {
+                    "Only the Group DM Admin can remove members from this group."
+                }
+                if (thread.companyOwnerId.isNotBlank() && targetUserId == thread.companyOwnerId) {
+                    return Result.failure(IllegalStateException("Cannot remove the Business Account owner."))
+                }
+                val nextParticipants = thread.participantIds.filter { it != targetUserId }
+                require(nextParticipants.isNotEmpty()) { "Cannot remove the last remaining member." }
+                val nextNames = thread.participantNamesById.toMutableMap().apply { remove(targetUserId) }
+                db.collection("directThreads").document(thread.id).update(
+                    mapOf(
+                        "participantIds" to nextParticipants,
+                        "participantNamesById" to nextNames,
+                        "lastMessageText" to "$safeTarget was removed from the group by $safeActor",
+                        "lastMessageSenderId" to uid,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                val updatedKicked = (thread.kickedUserIds + targetUserId).distinct()
+                db.collection("directThreads").document(thread.id).update(
+                    mapOf(
+                        "kickedUserIds" to updatedKicked,
+                        "lastMessageText" to "$safeTarget was removed from this DM by $safeActor",
+                        "lastMessageSenderId" to uid,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Removes a DM thread from the user's inbox:
+     * - For non-admin members of a multi-person Group DM, removes only the caller so the group stays intact.
+     * - For 1-on-1 DMs or Group DM Admins, deletes the thread document.
+     */
+    suspend fun removeDirectThread(
+        thread: DirectThread,
+        actorName: String,
+        isAppAdmin: Boolean = false
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "directThreads/${thread.id}"
+        return try {
+            val safeActor = actorName.trim().ifBlank { "Member" }.take(40)
+            if (thread.isGroup && !thread.isGroupAdmin(uid) && thread.participantIds.size > 1 && !isAppAdmin) {
+                val nextParticipants = thread.participantIds.filter { it != uid }
+                val nextNames = thread.participantNamesById.toMutableMap().apply { remove(uid) }
+                db.collection("directThreads").document(thread.id).update(
+                    mapOf(
+                        "participantIds" to nextParticipants,
+                        "participantNamesById" to nextNames,
+                        "lastMessageText" to "$safeActor left the group",
+                        "lastMessageSenderId" to uid,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                db.collection("directThreads").document(thread.id).delete().await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
     suspend fun staffSetGroupDmDisabled(
         thread: DirectThread,
         disabled: Boolean,
@@ -9508,6 +11136,7 @@ class VoxStageRepository(
         val path = "directThreads/${thread.id}"
         return try {
             require(thread.isGroup) { "Not a group DM." }
+            val safeName = thread.bannedNamesByUserId[targetUserId]?.trim()?.takeIf { it.isNotBlank() } ?: "Member"
             val nextBanned = thread.bannedUserIds.filter { it != targetUserId }
             val nextBannedNames = thread.bannedNamesByUserId.toMutableMap().apply {
                 remove(targetUserId)
@@ -9519,6 +11148,10 @@ class VoxStageRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            postGroupDmModNotice(
+                thread = thread,
+                text = "$safeName was unbanned from this chat"
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -9659,7 +11292,8 @@ class VoxStageRepository(
         senderName: String,
         senderTier: StaffTier,
         title: String,
-        message: String
+        message: String,
+        displayedSenderTier: StaffTier = senderTier
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
@@ -9687,7 +11321,7 @@ class VoxStageRepository(
                 "participantIds" to thread.participantIds,
                 "senderId" to uid,
                 "senderName" to safeSender,
-                "senderTier" to senderTier.name,
+                "senderTier" to displayedSenderTier.name,
                 "text" to "$cleanTitle\n$cleanMessage".take(500),
                 "messageType" to DirectMessage.TYPE_GROUP_URGENT_ALERT,
                 "hideSenderName" to false,
@@ -9787,6 +11421,79 @@ class VoxStageRepository(
                         "customDisplayName" to cleanName,
                         "customNameColorHex" to cleanColor,
                         "customMembershipTier" to cleanTier,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * VIP Pro Custom Username Color: allows active VIP Pro (and Business / Staff) members
+     * to choose a custom username color from the approved palette (strictly excluding Red,
+     * Green, and Purple which are reserved for Admin, Support, and Room Leaders).
+     * Passing an empty string resets to the user's default role/membership color.
+     */
+    suspend fun setVipProNameColor(
+        colorHex: String,
+        currentStaffTier: StaffTier = StaffTier.USER
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val cleanColor = colorHex.trim().uppercase()
+            require(isAllowedVipProNameColorHex(cleanColor)) {
+                "VIP Pro username colors cannot be Red, Green, or Purple."
+            }
+            val userRef = db.collection("users").document(uid)
+            val userSnap = userRef.get().await()
+            val profile = userSnap.toObject(UserProfile::class.java)
+            val eligible = currentStaffTier.isStaff() ||
+                (profile?.canChooseVipProNameColor(currentStaffTier) == true)
+            require(eligible) {
+                "Upgrade to VIP Pro to choose a custom username color."
+            }
+
+            userRef.update(
+                mapOf(
+                    "customNameColorHex" to cleanColor,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            val dirRef = db.collection("userDirectory").document(uid)
+            val dirSnap = dirRef.get().await()
+            if (dirSnap.exists()) {
+                dirRef.update(
+                    mapOf(
+                        "customNameColorHex" to cleanColor,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                val realDisplayName = userSnap.getString("displayName").orEmpty().ifBlank { "Member" }
+                val realHandle = userSnap.getString("handle").orEmpty().ifBlank { "member" }
+                val realAvatarHex = userSnap.getString("avatarColorHex").orEmpty().ifBlank { "#0088FF" }
+                val effectiveTier = profile?.effectiveProTier(currentStaffTier) ?: ProTier.FREE
+                dirRef.set(
+                    mapOf(
+                        "userId" to uid,
+                        "displayName" to realDisplayName,
+                        "handle" to realHandle,
+                        "avatarColorHex" to realAvatarHex,
+                        "staffTier" to currentStaffTier.name,
+                        "proMember" to (profile?.proMember == true),
+                        "proExpiresAtMillis" to (profile?.proExpiresAtMillis ?: 0L),
+                        "proLifetime" to (profile?.proLifetime == true),
+                        "proTier" to effectiveTier.name,
+                        "customNameColorHex" to cleanColor,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 ).await()
@@ -11700,10 +13407,15 @@ class VoxStageRepository(
         val cleanName = staffName.trim().ifBlank { "VOX Staff" }.take(40)
         return try {
             val nextHelpers = (thread.staffHelpJoinedIds + uid).distinct().take(20)
+            val enterMsg = if (thread.isGroup) {
+                "$cleanName (VOX Staff) entered the group to help"
+            } else {
+                "$cleanName (VOX Staff) entered this private DM to monitor"
+            }
             db.collection("directThreads").document(thread.id).update(
                 mapOf(
                     "staffHelpJoinedIds" to nextHelpers,
-                    "lastMessageText" to "$cleanName (VOX Staff) entered the group to help",
+                    "lastMessageText" to enterMsg,
                     "lastMessageSenderId" to uid,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -11767,7 +13479,7 @@ class VoxStageRepository(
             .snapshots()
             .map { snap ->
                 snap.toObjects(DirectThread::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                    .filter { it.isGroup && it.reportStaffAccessOpen }
+                    .filter { it.reportStaffAccessOpen }
             }
             .catch { error ->
                 if (auth.currentUser?.uid == uid) {
@@ -11783,6 +13495,133 @@ class VoxStageRepository(
                     .sortedByDescending { maxOf(it.staffHelpRequestedAtMillis, it.lastReportedAtMillis) }
             }
         )
+    }
+
+    /**
+     * Checks if a 1:1 private DM is between an 18+ adult and an under-18 (13-17) minor.
+     * When detected, opens Staff monitoring access on the thread (allowing Visible or Invisible entry)
+     * and dispatches an urgent real-time Youth Safety alert to VOX Staff & Admins.
+     */
+    private suspend fun flagAdultMinorPrivateDmIfNeeded(
+        threadId: String,
+        callerUid: String,
+        callerName: String,
+        callerIsAdult: Boolean,
+        callerIsMinor: Boolean,
+        otherUserId: String,
+        otherName: String
+    ) {
+        if (threadId.isBlank() || otherUserId.isBlank() || callerUid == otherUserId) return
+        val otherDir = db.collection("userDirectory").document(otherUserId).get().await()
+            .toObject(DirectoryEntry::class.java) ?: return
+        if (otherDir.tierEnum().isStaff()) return
+        val otherIsAdult = otherDir.isAdult18Plus()
+        val otherIsMinor = otherDir.isMinor13To17()
+
+        val adultToMinor = callerIsAdult && otherIsMinor
+        val minorToAdult = callerIsMinor && otherIsAdult
+        if (!adultToMinor && !minorToAdult) return
+
+        val adultUid = if (adultToMinor) callerUid else otherUserId
+        val adultName = (if (adultToMinor) callerName else otherDir.effectiveDisplayName().ifBlank { otherName }).take(40)
+        val minorName = (if (adultToMinor) otherDir.effectiveDisplayName().ifBlank { otherName } else callerName).take(40)
+        val nowMs = System.currentTimeMillis()
+        val summary = "Youth Safety Alert: 18+ user ($adultName) private DM with under-18 user ($minorName)".take(240)
+
+        db.collection("directThreads").document(threadId).update(
+            mapOf(
+                "reportStaffAccessOpen" to true,
+                "lastReportedAtMillis" to nowMs,
+                "lastReportSummary" to summary,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+        ).await()
+
+        db.collection("adminNotifications").document().set(
+            mapOf(
+                "type" to AdminNotificationType.ADULT_TO_MINOR_DM.name,
+                "title" to "Youth Safety Alert: 18+ DM to Under-18".take(120),
+                "message" to "18+ user $adultName is in a private DM with under-18 user $minorName. Staff can enter this private DM Visible or Invisible from Safety Center to monitor.".take(500),
+                "createdById" to callerUid,
+                "createdByName" to callerName.take(40),
+                "targetUserId" to adultUid,
+                "targetName" to adultName,
+                "referenceId" to threadId.take(260),
+                "countValue" to 1,
+                "read" to false,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+        ).await()
+    }
+
+    /**
+     * Allows VOX Support Staff or App Admin to lift an active 5-day bounce-evasion device suspension.
+     */
+    suspend fun staffLiftDeviceSuspension(
+        deviceHash: String,
+        targetUserId: String,
+        actorName: String,
+        actorTier: StaffTier,
+        note: String = "5-day bounce-evasion device suspension lifted by VOX Staff."
+    ): Result<Unit> {
+        val actorUid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Not signed in"))
+        if (!actorTier.isStaff()) {
+            return Result.failure(IllegalStateException("VOX Staff privileges required."))
+        }
+        val cleanHash = deviceHash.trim()
+        if (cleanHash.length < 16) {
+            return Result.failure(IllegalArgumentException("Invalid device hash."))
+        }
+        val safeActor = actorName.trim().ifBlank { "VOX Staff" }.take(40)
+        val safeNote = note.trim().ifBlank { "5-day bounce-evasion device suspension lifted by $safeActor." }.take(240)
+        return try {
+            db.collection("bannedDevices").document(cleanHash).update(
+                mapOf(
+                    "active" to false,
+                    "suspendedUntilMillis" to 0L,
+                    "bounceEvasionFlag" to false,
+                    "returningFlagActive" to false,
+                    "staffReviewStatus" to "LIFTED",
+                    "reviewedByUid" to actorUid,
+                    "reviewedByName" to safeActor,
+                    "reviewNote" to safeNote,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            if (targetUserId.isNotBlank()) {
+                runCatching {
+                    val modRef = db.collection("userModerationFiles").document(targetUserId)
+                    if (modRef.get().await().exists()) {
+                        modRef.update(
+                            mapOf(
+                                "suspendedUntilMillis" to 0L,
+                                "suspensionReason" to "",
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
+                if (actorTier == StaffTier.ADMIN) {
+                    runCatching {
+                        db.collection("users").document(targetUserId).update(
+                            mapOf(
+                                "suspendedUntilMillis" to 0L,
+                                "suspensionReason" to "",
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, "bannedDevices/$cleanHash")
+            Result.failure(e)
+        }
     }
 
     suspend fun staffRemoveUserFromBusinessAccount(

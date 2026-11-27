@@ -11,6 +11,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -40,20 +42,26 @@ import androidx.compose.material.icons.rounded.CardMembership
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockPerson
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PersonRemove
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Stars
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -97,6 +105,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.CreatorSubscription
+import com.example.data.DirectoryEntry
 import com.example.data.DmAccessPass
 import android.widget.Toast
 import com.example.data.AdminPreviewMode
@@ -125,7 +134,9 @@ import com.example.notifications.DirectMessageSyncWorker
 import androidx.compose.ui.text.style.TextOverflow
 import com.example.ui.components.AdminSandboxControlCard
 import com.example.ui.components.DailyLoginStreakCard
+import com.example.ui.components.DeleteAccountConfirmDialog
 import com.example.ui.components.FullScreenPhotoDialog
+import com.example.ui.components.GiftedProPassStoreCard
 import com.example.ui.components.InviteFriendReferralCard
 import com.example.ui.components.PostCommentsDialog
 import com.example.ui.components.PresenceStatusDot
@@ -137,6 +148,7 @@ import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.SpotlightFrameShopCard
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopBarSafetyShieldButton
+import com.example.ui.components.VipProUsernameColorCard
 import com.example.ui.components.encodeImageUriToBase64Jpeg
 import com.example.ui.components.parseHexColor
 import com.example.ui.components.rememberBase64ImageBitmap
@@ -215,6 +227,7 @@ fun ProfileScreen(
         sex: UserSex,
         age: Long
     ) -> Unit,
+    onSelectVipProNameColor: (String) -> Unit = {},
     onSaveBio: (String, () -> Unit) -> Unit = { _, _ -> },
     onChangeAppearanceStatus: (PresenceStatus) -> Unit = {},
     onSignOut: () -> Unit,
@@ -228,19 +241,36 @@ fun ProfileScreen(
     canManageCompany: Boolean = false,
     isCompanySupervisor: Boolean = false,
     onOpenCompanyConsole: () -> Unit = {},
-    onJoinCompanySubAccount: (subName: String, accessCode: String) -> Unit = { _, _ -> }
+    onJoinCompanySubAccount: (subName: String, accessCode: String) -> Unit = { _, _ -> },
+    directoryEntries: List<DirectoryEntry> = emptyList(),
+    acceptedFriendIds: Set<String> = emptySet(),
+    liveRoomHostIds: Set<String> = emptySet(),
+    onGiftProPass: (
+        targetUserId: String,
+        targetName: String,
+        giftNote: String,
+        onInsufficientPoints: () -> Unit,
+        onGifted: () -> Unit
+    ) -> Unit = { _, _, _, _, _ -> },
+    onDeleteAccount: (
+        onCompleted: (hadReports: Boolean) -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var selectedTab by remember(initialTabIndex) { mutableIntStateOf(initialTabIndex) } // 0 = My Posts, 1 = Settings & Points
     var showJoinCompanyDialog by remember { mutableStateOf(false) }
+    var showDeleteAccountDialog by remember { mutableStateOf(false) }
+    var isDeletingAccount by remember { mutableStateOf(false) }
     var showFullAvatar by remember { mutableStateOf(false) }
     var showEditBioDialog by remember { mutableStateOf(false) }
     var bioDialogDraft by remember { mutableStateOf("") }
     var showNeedPointsForBoostDialog by remember { mutableStateOf(false) }
     var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
     var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
+    var settingsSubTab by remember { mutableIntStateOf(0) } // 0=Profile, 1=VIP & Points, 2=PTT & Alerts, 3=Privacy & Team
 
     var dmNotificationsEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isDmNotificationsEnabled(context))
@@ -254,12 +284,8 @@ fun ProfileScreen(
     var readReceiptsEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isReadReceiptsEnabled(context))
     }
-    var volumeDownPttEnabled by remember {
-        mutableStateOf(DirectMessageNotificationPrefs.isVolumeDownPttEnabled(context))
-    }
-    var lockScreenPttEnabled by remember {
-        mutableStateOf(DirectMessageNotificationPrefs.isLockScreenPttEnabled(context))
-    }
+    val volumeDownPttEnabled by LivePttSessionManager.isVolumeDownPttEnabled.collectAsStateWithLifecycle()
+    val lockScreenPttEnabled by LivePttSessionManager.isLockScreenPttEnabled.collectAsStateWithLifecycle()
     var lockScreenRecentDmEnabled by remember {
         mutableStateOf(DirectMessageNotificationPrefs.isLockScreenRecentDmEnabled(context))
     }
@@ -1187,703 +1213,920 @@ fun ProfileScreen(
                     }
                 }
             } else {
-                // TAB 1: VOXSTAGE PRO ($9.99/MO), POINTS WALLET, PRIVATE MESSAGE PRIVACY, CREATOR POINTS & PROFILE SETTINGS
-                item(key = "pro_membership_card") {
-                    ProMembershipCard(
-                        userProfile = userProfile,
-                        staffCapabilities = staffCapabilities,
-                        isProcessingWallet = isProcessingWallet,
-                        playBillingManager = playBillingManager,
-                        onUpgradeToProPlay = onUpgradeToProPlay,
-                        onUpgradeToVipProPlay = onUpgradeToVipProPlay,
-                        onActivateProWithPoints = onActivateProWithPoints
+                // TAB 1: SETTINGS & POINTS — ORGANIZED INTO 4 CLEAN SUB-TABS
+                item(key = "settings_sub_tabs") {
+                    val subTabs = listOf(
+                        Triple(0, "Profile", Icons.Rounded.Person),
+                        Triple(1, "VIP & Points", Icons.Rounded.Stars),
+                        Triple(2, "PTT & Alerts", Icons.Rounded.RecordVoiceOver),
+                        Triple(3, "Privacy & Team", Icons.Rounded.Security)
                     )
-                }
-
-                item(key = "company_workspace_card") {
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primaryContainer),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Groups,
-                                        contentDescription = "Company Sub-Accounts",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Company Employee Sub-Accounts",
-                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = if (canManageCompany || isCompanySupervisor) {
-                                            "Create sub-names, appoint supervisors, send work orders/notes, and review employee requests."
-                                        } else {
-                                            "VIP Pro unlocks Company Sub-Accounts with 60s PTT, Supervisors & Work Orders. Employees can link a sub-name code below."
-                                        },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                if (canManageCompany || isCompanySupervisor) {
-                                    Button(
-                                        onClick = onOpenCompanyConsole,
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp)
-                                            .testTag("profile_open_company_console_button")
-                                    ) {
-                                        Text(
-                                            text = if (canManageCompany) "Manage Company Team" else "Supervisor Console",
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                } else {
-                                    OutlinedButton(
-                                        onClick = { showJoinCompanyDialog = true },
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp)
-                                            .testTag("profile_join_company_sub_account_button")
-                                    ) {
-                                        Text(
-                                            text = "Join Company Sub-Account",
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                item(key = "points_wallet_card") {
-                    PointsWalletSettingsCard(
-                        currentUserId = currentUserId,
-                        userProfile = userProfile,
-                        isAdmin = staffCapabilities.isAdmin,
-                        isStaffFreePerks = staffCapabilities.isStaff,
-                        activeSubscriptions = mySubscriptions.filter { it.isCurrentlyActive() },
-                        recentTransactions = myTransactions.take(6),
-                        appOwnerRevenueCents = allTransactionsForAdmin.sumOf { it.platformShareCents },
-                        isProcessingWallet = isProcessingWallet,
-                        playBillingManager = playBillingManager,
-                        onBuyPoints = onBuyPoints,
-                        onBoostMyProfile = {
-                            onBoostMyProfile { showNeedPointsForBoostDialog = true }
-                        }
-                    )
-                }
-
-                item(key = "spotlight_frame_shop_card") {
-                    SpotlightFrameShopCard(
-                        userProfile = userProfile,
-                        isProcessingWallet = isProcessingWallet,
-                        isStaffFreePerks = staffCapabilities.isStaff,
-                        onBuySpotlightFrame = { color ->
-                            onBuySpotlightFrame(color) { showNeedPointsForBoostDialog = true }
-                        }
-                    )
-                }
-
-                item(key = "daily_login_streak_card") {
-                    DailyLoginStreakCard(
-                        userProfile = userProfile,
-                        staffTier = staffCapabilities.tier
-                    )
-                }
-
-                item(key = "invite_friend_referral_card") {
-                    InviteFriendReferralCard(
-                        currentUserId = currentUserId,
-                        userProfile = userProfile,
-                        isEmailVerified = userEmailVerified,
-                        incomingReferral = incomingReferral,
-                        invitedReferrals = invitedReferrals,
-                        onRedeemReferralCode = onRedeemReferralCode
-                    )
-                }
-
-                item(key = "ptt_customization_shop_card") {
-                    PttCustomizationShopCard(
-                        userProfile = userProfile,
-                        isProcessingWallet = isProcessingWallet,
-                        onSelectOrBuyTheme = { theme ->
-                            onSelectOrBuyPttTheme(theme) { showNeedPointsForBoostDialog = true }
-                        },
-                        onSelectOrBuyChirp = { chirp ->
-                            onSelectOrBuyPttChirp(chirp) { showNeedPointsForBoostDialog = true }
-                        }
-                    )
-                }
-
-                item(key = "private_message_privacy_card") {
-                    PrivateMessageSettingsCard(
-                        currentPolicy = userProfile?.dmPolicyEnum() ?: DmPolicy.OPEN,
-                        paidMembers = paidDmMembersForMe,
-                        onSelectPolicy = onSetDmPolicy,
-                        onKickMember = onKickPaidDmMember
-                    )
-                }
-
-                // 18+ AGE VERIFICATION STATUS CARD
-                item(key = "age_verification_card") {
-                    val isAdultVerified = userProfile?.isAdult18Plus() == true
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(
-                            1.dp,
-                            if (isAdultVerified) SafetyEmerald.copy(alpha = 0.5f)
-                            else ModAmber.copy(alpha = 0.55f)
-                        ),
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("settings_age_verification_card")
+                            .horizontalScroll(rememberScrollState())
+                            .testTag("profile_settings_sub_tabs"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Surface(
-                                shape = CircleShape,
-                                color = if (isAdultVerified) SafetyEmerald.copy(alpha = 0.14f) else ModAmber.copy(alpha = 0.16f),
-                                modifier = Modifier.size(44.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.VerifiedUser,
-                                        contentDescription = "18+ age verification status",
-                                        tint = if (isAdultVerified) SafetyEmerald else ModAmber,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                            }
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = if (isAdultVerified) "18+ Verified" else "18+ Verification Required",
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = if (isAdultVerified) SafetyEmerald else MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = if (isAdultVerified) {
-                                        "Born ${userProfile?.birthYear} · Age verified for 18+ account features"
-                                    } else {
-                                        "Verify 18+ via your Google Account or Play Age Signals for age-restricted features"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            if (!isAdultVerified) {
-                                Button(
-                                    onClick = onRequestAgeVerification,
-                                    shape = RoundedCornerShape(999.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = ModAmber,
-                                        contentColor = Color.Black
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                                    modifier = Modifier.testTag("settings_verify_age_button")
-                                ) {
+                        subTabs.forEach { (idx, label, icon) ->
+                            val selected = settingsSubTab == idx
+                            FilterChip(
+                                selected = selected,
+                                onClick = { settingsSubTab = idx },
+                                label = {
                                     Text(
-                                        text = "Verify 18+",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                        text = label,
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                        )
                                     )
-                                }
-                            }
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = label,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                shape = RoundedCornerShape(999.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                    selectedLabelColor = Color.White,
+                                    selectedLeadingIconColor = Color.White
+                                ),
+                                modifier = Modifier.testTag("profile_settings_subtab_$idx")
+                            )
                         }
                     }
                 }
 
-                // RESTRICTIONS, HARDWARE READINESS, PREFERENCES & SIGN OUT
-                if (!staffCapabilities.isAdmin && userProfile != null) {
-                    val activeRestrictions = buildList {
-                        if (userProfile.globallyBanned) add("Account Banned")
-                        if (userProfile.currentlySuspended()) add("Suspended (${userProfile.remainingSuspensionLabel()} left)")
-                        if (userProfile.disableCreateRoom) add("Creating Rooms Disabled")
-                        if (userProfile.disableEnterRoom) add("Entering Rooms Disabled")
-                        if (userProfile.disableMic) add("Microphone Disabled")
-                        if (userProfile.disableVideo) add("Video Streaming Disabled")
-                    }
-                    if (activeRestrictions.isNotEmpty()) {
-                        item(key = "restrictions_card") {
+                when (settingsSubTab) {
+                    0 -> {
+                        // SUB-TAB 0: PROFILE, HARDWARE READINESS, 18+ VERIFICATION, RESTRICTIONS & SIGN OUT
+                        if (!staffCapabilities.isAdmin && userProfile != null) {
+                            val activeRestrictions = buildList {
+                                if (userProfile.globallyBanned) add("Account Banned")
+                                if (userProfile.currentlySuspended()) add("Suspended (${userProfile.remainingSuspensionLabel()} left)")
+                                if (userProfile.disableCreateRoom) add("Creating Rooms Disabled")
+                                if (userProfile.disableEnterRoom) add("Entering Rooms Disabled")
+                                if (userProfile.disableMic) add("Microphone Disabled")
+                                if (userProfile.disableVideo) add("Video Streaming Disabled")
+                            }
+                            if (activeRestrictions.isNotEmpty()) {
+                                item(key = "restrictions_card") {
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = LiveCoral.copy(alpha = 0.14f),
+                                        border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.45f)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(14.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = "Active Account Restrictions",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = LiveCoral
+                                            )
+                                            Text(
+                                                text = activeRestrictions.joinToString(" · "),
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (staffCapabilities.isSupport && !staffCapabilities.canEnterInvisible) {
+                            item(key = "support_inv_notice") {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = usernameColor(StaffTier.SUPPORT).copy(alpha = 0.12f),
+                                    border = BorderStroke(1.dp, usernameColor(StaffTier.SUPPORT).copy(alpha = 0.4f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.VisibilityOff,
+                                            contentDescription = "Invisible mode status",
+                                            tint = usernameColor(StaffTier.SUPPORT)
+                                        )
+                                        Text(
+                                            text = "Invisible room entry is currently off for your Support account. An Administrator can enable it for you anytime.",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        item(key = "edit_profile_form") {
                             Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = LiveCoral.copy(alpha = 0.14f),
-                                border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.45f)),
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(
-                                    modifier = Modifier.padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
                                     Text(
-                                        text = "Active Account Restrictions",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = LiveCoral
+                                        text = "Stage Profile & Preferences",
+                                        style = MaterialTheme.typography.titleMedium
                                     )
-                                    Text(
-                                        text = activeRestrictions.joinToString(" · "),
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
 
-                if (staffCapabilities.isSupport && !staffCapabilities.canEnterInvisible) {
-                    item(key = "support_inv_notice") {
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = usernameColor(StaffTier.SUPPORT).copy(alpha = 0.12f),
-                            border = BorderStroke(1.dp, usernameColor(StaffTier.SUPPORT).copy(alpha = 0.4f)),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.VisibilityOff,
-                                    contentDescription = "Invisible mode status",
-                                    tint = usernameColor(StaffTier.SUPPORT)
-                                )
-                                Text(
-                                    text = "Invisible room entry is currently off for your Support account. An Administrator can enable it for you anytime.",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
-                    }
-                }
-
-                item(key = "hardware_readiness") {
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Text(
-                                text = "Audio & Video Readiness",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            HardwarePermissionRow(
-                                icon = Icons.Rounded.Mic,
-                                title = "Microphone (Voice Stage)",
-                                granted = micGranted,
-                                onRequest = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }
-                            )
-                            HardwarePermissionRow(
-                                icon = Icons.Rounded.Videocam,
-                                title = "Camera (Live Video Stream)",
-                                granted = camGranted,
-                                onRequest = { camLauncher.launch(Manifest.permission.CAMERA) }
-                            )
-                        }
-                    }
-                }
-
-                item(key = "edit_profile_form") {
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Text(
-                                text = "Stage Profile & Preferences",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-
-                            OutlinedTextField(
-                                value = displayName,
-                                onValueChange = { displayName = it.take(40) },
-                                label = { Text("Display Name") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("profile_name_input")
-                            )
-
-                            OutlinedTextField(
-                                value = handle,
-                                onValueChange = { handle = it.replace(" ", "_").take(30) },
-                                label = { Text("Handle") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("profile_handle_input")
-                            )
-
-                            OutlinedTextField(
-                                value = bio,
-                                onValueChange = { bio = it.take(200) },
-                                label = { Text("Bio") },
-                                minLines = 2,
-                                maxLines = 3,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("profile_bio_input")
-                            )
-
-                            OutlinedTextField(
-                                value = ageInput,
-                                onValueChange = { raw ->
-                                    ageInput = raw.filter { it.isDigit() }.take(3)
-                                },
-                                label = { Text("Age (13+ · used for Discovery filters)") },
-                                placeholder = { Text("e.g. 22") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("profile_age_input")
-                            )
-
-                            Text("Sex (used for Discovery filters)", style = MaterialTheme.typography.labelLarge)
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                listOf(UserSex.MALE, UserSex.FEMALE, UserSex.UNSPECIFIED).forEach { sexOption ->
-                                    FilterChip(
-                                        selected = selectedSex == sexOption,
-                                        onClick = { selectedSex = sexOption },
-                                        label = { Text(sexOption.label) },
-                                        shape = RoundedCornerShape(999.dp),
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                            selectedLabelColor = Color.White
-                                        ),
-                                        modifier = Modifier.testTag("profile_sex_chip_${sexOption.name}")
-                                    )
-                                }
-                            }
-
-                            Text("Avatar Ring Color", style = MaterialTheme.typography.labelLarge)
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                AvatarAccentHexPalette.forEach { hex ->
-                                    val swatch = parseHexColor(hex)
-                                    val selected = avatarColorHex.equals(hex, ignoreCase = true)
-                                    Box(
+                                    OutlinedTextField(
+                                        value = displayName,
+                                        onValueChange = { displayName = it.take(40) },
+                                        label = { Text("Display Name") },
+                                        singleLine = true,
                                         modifier = Modifier
-                                            .size(34.dp)
-                                            .clip(CircleShape)
-                                            .background(swatch)
-                                            .border(
-                                                width = if (selected) 3.dp else 0.dp,
-                                                color = if (selected) Color.White else Color.Transparent,
-                                                shape = CircleShape
-                                            )
-                                            .clickable { avatarColorHex = hex }
+                                            .fillMaxWidth()
+                                            .testTag("profile_name_input")
                                     )
-                                }
-                            }
 
-                            if (staffCapabilities.effectiveCanEnterInvisible) {
-                                ToggleSettingRow(
-                                    title = "Default to Ghost Entry (Invisible Mode)",
-                                    subtitle = if (staffCapabilities.isAdmin) {
-                                        "Enter rooms unseen — Main Admin can still use the mic while invisible"
-                                    } else {
-                                        "Enter rooms unseen — switch to Visible inside a room to use the mic"
-                                    },
-                                    checked = invisibleModePreferred,
-                                    onCheckedChange = { invisibleModePreferred = it }
-                                )
-                            }
+                                    OutlinedTextField(
+                                        value = handle,
+                                        onValueChange = { handle = it.replace(" ", "_").take(30) },
+                                        label = { Text("Handle") },
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("profile_handle_input")
+                                    )
 
-                            ToggleSettingRow(
-                                title = "Default to Push-to-Talk",
-                                subtitle = "Hold button to transmit voice on stage (classic Paltalk style)",
-                                checked = pushToTalkPreferred,
-                                onCheckedChange = { pushToTalkPreferred = it }
-                            )
+                                    OutlinedTextField(
+                                        value = bio,
+                                        onValueChange = { bio = it.take(200) },
+                                        label = { Text("Bio") },
+                                        minLines = 2,
+                                        maxLines = 3,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("profile_bio_input")
+                                    )
 
-                            ToggleSettingRow(
-                                title = "Night Blue Dark Mode",
-                                subtitle = "Off = Crisp Blue & White (default) · On = Deep Navy Night theme",
-                                checked = nightModeEnabled,
-                                onCheckedChange = { nightModeEnabled = it }
-                            )
+                                    OutlinedTextField(
+                                        value = ageInput,
+                                        onValueChange = { raw ->
+                                            ageInput = raw.filter { it.isDigit() }.take(3)
+                                        },
+                                        label = { Text("Age (13+ · used for Discovery filters)") },
+                                        placeholder = { Text("e.g. 22") },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("profile_age_input")
+                                    )
 
-                            ToggleSettingRow(
-                                title = "Private Message Notifications",
-                                subtitle = if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    "Tap to grant phone notification permission for background private messages"
-                                } else {
-                                    "Send phone notifications for incoming private messages even in the background"
-                                },
-                                checked = dmNotificationsEnabled && hasNotificationPermission,
-                                onCheckedChange = { enable ->
-                                    if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                        !DirectMessageNotificationHelper.hasNotificationPermission(context)
+                                    Text("Sex (used for Discovery filters)", style = MaterialTheme.typography.labelLarge)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                    } else {
-                                        dmNotificationsEnabled = enable
-                                        DirectMessageNotificationPrefs.setDmNotificationsEnabled(context, enable)
-                                        if (enable) {
-                                            DirectMessageNotificationHelper.ensureChannel(context)
-                                            DirectMessageSyncWorker.schedule(context)
+                                        listOf(UserSex.MALE, UserSex.FEMALE, UserSex.UNSPECIFIED).forEach { sexOption ->
+                                            FilterChip(
+                                                selected = selectedSex == sexOption,
+                                                onClick = { selectedSex = sexOption },
+                                                label = { Text(sexOption.label) },
+                                                shape = RoundedCornerShape(999.dp),
+                                                colors = FilterChipDefaults.filterChipColors(
+                                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                                    selectedLabelColor = Color.White
+                                                ),
+                                                modifier = Modifier.testTag("profile_sex_chip_${sexOption.name}")
+                                            )
+                                        }
+                                    }
+
+                                    Text("Avatar Ring Color", style = MaterialTheme.typography.labelLarge)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        AvatarAccentHexPalette.forEach { hex ->
+                                            val swatch = parseHexColor(hex)
+                                            val selected = avatarColorHex.equals(hex, ignoreCase = true)
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clip(CircleShape)
+                                                    .background(swatch)
+                                                    .border(
+                                                        width = if (selected) 3.dp else 0.dp,
+                                                        color = if (selected) Color.White else Color.Transparent,
+                                                        shape = CircleShape
+                                                    )
+                                                    .clickable { avatarColorHex = hex }
+                                            )
+                                        }
+                                    }
+
+                                    if (staffCapabilities.effectiveCanEnterInvisible) {
+                                        ToggleSettingRow(
+                                            title = "Default to Ghost Entry (Invisible Mode)",
+                                            subtitle = if (staffCapabilities.isAdmin) {
+                                                "Enter rooms unseen — Main Admin can still use the mic while invisible"
+                                            } else {
+                                                "Enter rooms unseen — switch to Visible inside a room to use the mic"
+                                            },
+                                            checked = invisibleModePreferred,
+                                            onCheckedChange = { invisibleModePreferred = it }
+                                        )
+                                    }
+
+                                    ToggleSettingRow(
+                                        title = "Default to Push-to-Talk",
+                                        subtitle = "Hold button to transmit voice on stage (classic Paltalk style)",
+                                        checked = pushToTalkPreferred,
+                                        onCheckedChange = { pushToTalkPreferred = it }
+                                    )
+
+                                    ToggleSettingRow(
+                                        title = "Night Blue Dark Mode",
+                                        subtitle = "Off = Crisp Blue & White (default) · On = Deep Navy Night theme",
+                                        checked = nightModeEnabled,
+                                        onCheckedChange = { nightModeEnabled = it }
+                                    )
+
+                                    if (realStaffCapabilities.isAdmin) {
+                                        AdminSandboxControlCard(
+                                            realProfile = realUserProfile,
+                                            previewMode = adminPreviewMode,
+                                            onSelectPreviewMode = onSelectAdminPreviewMode,
+                                            onSaveCustomIdentity = onSaveAdminCustomIdentity
+                                        )
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            val parsedAge = ageInput.trim().toLongOrNull()
+                                                ?.takeIf { it in 13L..120L } ?: 0L
+                                            onSaveProfile(
+                                                displayName,
+                                                handle,
+                                                bio,
+                                                avatarColorHex,
+                                                pushToTalkPreferred,
+                                                nightModeEnabled,
+                                                invisibleModePreferred,
+                                                selectedSex,
+                                                parsedAge
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(50.dp)
+                                            .testTag("save_profile_button")
+                                    ) {
+                                        Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Save Profile Preferences")
+                                    }
+                                }
+                            }
+                        }
+
+                        // 18+ AGE VERIFICATION STATUS CARD
+                        item(key = "age_verification_card") {
+                            val isAdultVerified = userProfile?.isAdult18Plus() == true
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isAdultVerified) SafetyEmerald.copy(alpha = 0.5f)
+                                    else ModAmber.copy(alpha = 0.55f)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("settings_age_verification_card")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isAdultVerified) SafetyEmerald.copy(alpha = 0.14f) else ModAmber.copy(alpha = 0.16f),
+                                        modifier = Modifier.size(44.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.VerifiedUser,
+                                                contentDescription = "18+ age verification status",
+                                                tint = if (isAdultVerified) SafetyEmerald else ModAmber,
+                                                modifier = Modifier.size(22.dp)
+                                            )
+                                        }
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = if (isAdultVerified) "18+ Verified" else "18+ Verification Required",
+                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = if (isAdultVerified) SafetyEmerald else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = if (isAdultVerified) {
+                                                "Born ${userProfile?.birthYear} · Age verified for 18+ account features"
+                                            } else {
+                                                "Verify 18+ via your Google Account or Play Age Signals for age-restricted features"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    if (!isAdultVerified) {
+                                        Button(
+                                            onClick = onRequestAgeVerification,
+                                            shape = RoundedCornerShape(999.dp),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = ModAmber,
+                                                contentColor = Color.Black
+                                            ),
+                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                            modifier = Modifier.testTag("settings_verify_age_button")
+                                        ) {
+                                            Text(
+                                                text = "Verify 18+",
+                                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                            )
                                         }
                                     }
                                 }
-                            )
-
-                            Box(modifier = Modifier.testTag("toggle_dm_popup_quick_reply")) {
-                                ToggleSettingRow(
-                                    title = "Background Message Pop-ups & Quick Reply",
-                                    subtitle = "Pop open message details with inline Quick Reply when a private message arrives",
-                                    checked = quickReplyPopupEnabled,
-                                    onCheckedChange = { enable ->
-                                        if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                            !DirectMessageNotificationHelper.hasNotificationPermission(context)
-                                        ) {
-                                            dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                        }
-                                        quickReplyPopupEnabled = enable
-                                        DirectMessageNotificationPrefs.setQuickReplyPopupEnabled(context, enable)
-                                        if (enable) {
-                                            DirectMessageNotificationHelper.ensureChannel(context)
-                                        }
-                                    }
-                                )
                             }
+                        }
 
-                            Box(modifier = Modifier.testTag("toggle_friend_attention_alerts")) {
-                                ToggleSettingRow(
-                                    title = "Friend Attention Alerts (Ring & Vibrate)",
-                                    subtitle = "Allow accepted friends to ring and vibrate your phone from private chat (max 1 every 5 min)",
-                                    checked = friendAttentionAlertsEnabled,
-                                    onCheckedChange = { enable ->
-                                        if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                            !DirectMessageNotificationHelper.hasNotificationPermission(context)
-                                        ) {
-                                            dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                        }
-                                        friendAttentionAlertsEnabled = enable
-                                        DirectMessageNotificationPrefs.setFriendAttentionAlertsEnabled(context, enable)
-                                        if (enable) {
-                                            DirectMessageNotificationHelper.ensureChannel(context)
-                                        }
-                                    }
-                                )
-                            }
-
-                            Box(modifier = Modifier.testTag("toggle_dm_read_receipts")) {
-                                ToggleSettingRow(
-                                    title = "Private Message Read Receipts",
-                                    subtitle = "Let others see when you've read their private messages (can also be toggled per chat)",
-                                    checked = readReceiptsEnabled,
-                                    onCheckedChange = { enable ->
-                                        readReceiptsEnabled = enable
-                                        DirectMessageNotificationPrefs.setReadReceiptsEnabled(context, enable)
-                                    }
-                                )
-                            }
-
-                            Box(modifier = Modifier.testTag("toggle_volume_down_ptt")) {
-                                ToggleSettingRow(
-                                    title = "Volume Down Push-to-Talk",
-                                    subtitle = "Hold the hardware Volume Down key to transmit whenever PTT is active in VOX",
-                                    checked = volumeDownPttEnabled,
-                                    onCheckedChange = { enable ->
-                                        volumeDownPttEnabled = enable
-                                        DirectMessageNotificationPrefs.setVolumeDownPttEnabled(context, enable)
-                                    }
-                                )
-                            }
-
-                            Box(modifier = Modifier.testTag("toggle_lock_screen_ptt")) {
-                                ToggleSettingRow(
-                                    title = "Lock-Screen Push-to-Talk Button",
-                                    subtitle = "Show a giant hold-to-talk PTT button over your lock screen if your phone locks during live PTT",
-                                    checked = lockScreenPttEnabled,
-                                    onCheckedChange = { enable ->
-                                        lockScreenPttEnabled = enable
-                                        DirectMessageNotificationPrefs.setLockScreenPttEnabled(context, enable)
-                                    }
-                                )
-                            }
-
-                            Box(modifier = Modifier.testTag("toggle_lock_screen_recent_dm")) {
-                                ToggleSettingRow(
-                                    title = "Show Recent DM on Lock Screen",
-                                    subtitle = "Display your last incoming DM on the lock screen so you can tap it and hold PTT to send a voice-to-text reply without unlocking (turn off to hide messages)",
-                                    checked = lockScreenRecentDmEnabled,
-                                    onCheckedChange = { enable ->
-                                        lockScreenRecentDmEnabled = enable
-                                        DirectMessageNotificationPrefs.setLockScreenRecentDmEnabled(context, enable)
-                                    }
-                                )
-                            }
-
-                            Box(modifier = Modifier.testTag("toggle_silence_ptt_beep")) {
-                                ToggleSettingRow(
-                                    title = "Silence PTT Beep Noise",
-                                    subtitle = "Mute incoming Push-to-Talk beep pings (by default beeps still come through even in PTT Silent Mode)",
-                                    checked = pttBeepSilenced,
-                                    onCheckedChange = { silence ->
-                                        pttBeepSilenced = silence
-                                        LivePttSessionManager.setBeepSilenced(context, silence)
-                                    }
-                                )
-                            }
-
-                            OutlinedButton(
-                                onClick = {
-                                    context.startActivity(LockScreenPttActivity.createPreviewIntent(context))
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(48.dp)
-                                    .testTag("profile_preview_lock_screen_ptt_button")
+                        item(key = "hardware_readiness") {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Lock,
-                                    contentDescription = "Open Lock-Screen PTT and Recent DM",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text("Open Lock-Screen PTT & Recent DM")
-                            }
-
-                            OutlinedButton(
-                                onClick = {
-                                    val msg = VoxPttWidgetHelper.requestPinPttWidget(context)
-                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(48.dp)
-                                    .testTag("profile_add_ptt_widget_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Mic,
-                                    contentDescription = "Add Home Screen PTT Widget",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text("Add Home Screen PTT Widget")
-                            }
-
-                            Box(modifier = Modifier.testTag("toggle_priority_chirp_opt_in")) {
-                                ToggleSettingRow(
-                                    title = "Close Friends Priority Break-In Chirps",
-                                    subtitle = "Allow close friends to spend 1–2 points to send a two-tone radio alert pinned to the top of your Chats inbox",
-                                    checked = userProfile?.priorityChirpOptIn == true,
-                                    onCheckedChange = { enable ->
-                                        onSetPriorityChirpOptIn(enable)
-                                    }
-                                )
-                            }
-
-                            if (realStaffCapabilities.isAdmin) {
-                                AdminSandboxControlCard(
-                                    realProfile = realUserProfile,
-                                    previewMode = adminPreviewMode,
-                                    onSelectPreviewMode = onSelectAdminPreviewMode,
-                                    onSaveCustomIdentity = onSaveAdminCustomIdentity
-                                )
-                            }
-
-                            Button(
-                                onClick = {
-                                    val parsedAge = ageInput.trim().toLongOrNull()
-                                        ?.takeIf { it in 13L..120L } ?: 0L
-                                    onSaveProfile(
-                                        displayName,
-                                        handle,
-                                        bio,
-                                        avatarColorHex,
-                                        pushToTalkPreferred,
-                                        nightModeEnabled,
-                                        invisibleModePreferred,
-                                        selectedSex,
-                                        parsedAge
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Text(
+                                        text = "Audio & Video Readiness",
+                                        style = MaterialTheme.typography.titleMedium
                                     )
-                                },
+                                    HardwarePermissionRow(
+                                        icon = Icons.Rounded.Mic,
+                                        title = "Microphone (Voice Stage)",
+                                        granted = micGranted,
+                                        onRequest = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+                                    )
+                                    HardwarePermissionRow(
+                                        icon = Icons.Rounded.Videocam,
+                                        title = "Camera (Live Video Stream)",
+                                        granted = camGranted,
+                                        onRequest = { camLauncher.launch(Manifest.permission.CAMERA) }
+                                    )
+                                }
+                            }
+                        }
+
+                        item(key = "sign_out_card") {
+                            OutlinedButton(
+                                onClick = onSignOut,
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = LiveCoral),
+                                border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.5f)),
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(50.dp)
-                                    .testTag("save_profile_button")
+                                    .testTag("sign_out_button")
                             ) {
-                                Icon(Icons.Rounded.Save, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Logout,
+                                    contentDescription = "Sign Out",
+                                    modifier = Modifier.size(18.dp)
+                                )
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Save Profile Preferences")
+                                Text("Sign Out")
+                            }
+                        }
+
+                        if (!realStaffCapabilities.isAdmin) {
+                            item(key = "delete_account_card") {
+                                Button(
+                                    onClick = { showDeleteAccountDialog = true },
+                                    enabled = !isDeletingAccount,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = LiveCoral.copy(alpha = 0.14f),
+                                        contentColor = LiveCoral
+                                    ),
+                                    border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.65f)),
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(50.dp)
+                                        .testTag("delete_account_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DeleteForever,
+                                        contentDescription = "Delete Account",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Delete Account",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
-                }
 
-                item(key = "sign_out_card") {
-                    OutlinedButton(
-                        onClick = onSignOut,
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = LiveCoral),
-                        border = BorderStroke(1.dp, LiveCoral.copy(alpha = 0.5f)),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .testTag("sign_out_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.Logout,
-                            contentDescription = "Sign out",
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Sign Out")
+                    1 -> {
+                        // SUB-TAB 1: VIP PRO MEMBERSHIP, NAME COLOR, POINTS WALLET, FRAMES, STREAKS & REFERRALS
+                        item(key = "pro_membership_card") {
+                            ProMembershipCard(
+                                userProfile = userProfile,
+                                staffCapabilities = staffCapabilities,
+                                isProcessingWallet = isProcessingWallet,
+                                playBillingManager = playBillingManager,
+                                onUpgradeToProPlay = onUpgradeToProPlay,
+                                onUpgradeToVipProPlay = onUpgradeToVipProPlay,
+                                onActivateProWithPoints = onActivateProWithPoints
+                            )
+                        }
+
+                        item(key = "vip_pro_username_color_card") {
+                            VipProUsernameColorCard(
+                                userProfile = userProfile,
+                                staffTier = staffCapabilities.tier,
+                                onSelectColorHex = onSelectVipProNameColor,
+                                onUpgradeToVipPro = onUpgradeToVipProPlay
+                            )
+                        }
+
+                        item(key = "points_wallet_card") {
+                            PointsWalletSettingsCard(
+                                currentUserId = currentUserId,
+                                userProfile = userProfile,
+                                isAdmin = staffCapabilities.isAdmin,
+                                isStaffFreePerks = staffCapabilities.isStaff,
+                                activeSubscriptions = mySubscriptions.filter { it.isCurrentlyActive() },
+                                recentTransactions = myTransactions.take(6),
+                                appOwnerRevenueCents = allTransactionsForAdmin.sumOf { it.platformShareCents },
+                                isProcessingWallet = isProcessingWallet,
+                                playBillingManager = playBillingManager,
+                                onBuyPoints = onBuyPoints,
+                                onBoostMyProfile = {
+                                    onBoostMyProfile { showNeedPointsForBoostDialog = true }
+                                }
+                            )
+                        }
+
+                        item(key = "gifted_pro_pass_store_card") {
+                            GiftedProPassStoreCard(
+                                currentUserId = currentUserId,
+                                userProfile = userProfile,
+                                directoryEntries = directoryEntries,
+                                acceptedFriendIds = acceptedFriendIds,
+                                liveRoomHostIds = liveRoomHostIds,
+                                isProcessingWallet = isProcessingWallet,
+                                onGiftProPass = { targetUserId, targetName, giftNote, onFinished ->
+                                    onGiftProPass(
+                                        targetUserId,
+                                        targetName,
+                                        giftNote,
+                                        {
+                                            onFinished()
+                                            showNeedPointsForBoostDialog = true
+                                        },
+                                        onFinished
+                                    )
+                                }
+                            )
+                        }
+
+                        item(key = "spotlight_frame_shop_card") {
+                            SpotlightFrameShopCard(
+                                userProfile = userProfile,
+                                isProcessingWallet = isProcessingWallet,
+                                isStaffFreePerks = staffCapabilities.isStaff,
+                                onBuySpotlightFrame = { color ->
+                                    onBuySpotlightFrame(color) { showNeedPointsForBoostDialog = true }
+                                }
+                            )
+                        }
+
+                        item(key = "daily_login_streak_card") {
+                            DailyLoginStreakCard(
+                                userProfile = userProfile,
+                                staffTier = staffCapabilities.tier
+                            )
+                        }
+
+                        item(key = "invite_friend_referral_card") {
+                            InviteFriendReferralCard(
+                                currentUserId = currentUserId,
+                                userProfile = userProfile,
+                                isEmailVerified = userEmailVerified,
+                                incomingReferral = incomingReferral,
+                                invitedReferrals = invitedReferrals,
+                                onRedeemReferralCode = onRedeemReferralCode
+                            )
+                        }
+                    }
+
+                    2 -> {
+                        // SUB-TAB 2: PUSH-TO-TALK HARDWARE, LOCK-SCREEN, CUSTOMIZATION & NOTIFICATIONS
+                        item(key = "user_ptt_volume_key_settings_card") {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("user_ptt_hardware_settings_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primaryContainer),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.VolumeUp,
+                                                contentDescription = "PTT Hardware & Lock-Screen Controls",
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Push-to-Talk & Lock-Screen Controls",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "Hardware buttons, lock-screen radio & beep preferences",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+
+                                    Box(modifier = Modifier.testTag("toggle_volume_down_ptt")) {
+                                        ToggleSettingRow(
+                                            title = "Use Volume Key for Push-to-Talk",
+                                            subtitle = if (volumeDownPttEnabled) {
+                                                "On: Hold Volume Down to talk when PTT is active. Turn off to use your volume button normally."
+                                            } else {
+                                                "Off: Volume key will NOT trigger Push-to-Talk — your volume buttons adjust sound normally."
+                                            },
+                                            checked = volumeDownPttEnabled,
+                                            onCheckedChange = { enable ->
+                                                LivePttSessionManager.setVolumeDownPttEnabled(context, enable)
+                                            }
+                                        )
+                                    }
+
+                                    Box(modifier = Modifier.testTag("toggle_lock_screen_ptt")) {
+                                        ToggleSettingRow(
+                                            title = "Lock-Screen Push-to-Talk Button",
+                                            subtitle = "Show a hold-to-talk PTT button over your lock screen if your phone locks during live PTT",
+                                            checked = lockScreenPttEnabled,
+                                            onCheckedChange = { enable ->
+                                                LivePttSessionManager.setLockScreenPttEnabled(context, enable)
+                                            }
+                                        )
+                                    }
+
+                                    Box(modifier = Modifier.testTag("toggle_lock_screen_recent_dm")) {
+                                        ToggleSettingRow(
+                                            title = "Show Recent DM on Lock Screen",
+                                            subtitle = "Display your last incoming DM on the lock screen so you can tap it and hold PTT to send a voice-to-text reply without unlocking",
+                                            checked = lockScreenRecentDmEnabled,
+                                            onCheckedChange = { enable ->
+                                                lockScreenRecentDmEnabled = enable
+                                                DirectMessageNotificationPrefs.setLockScreenRecentDmEnabled(context, enable)
+                                            }
+                                        )
+                                    }
+
+                                    Box(modifier = Modifier.testTag("toggle_silence_ptt_beep")) {
+                                        ToggleSettingRow(
+                                            title = "Silence PTT Beep Noise",
+                                            subtitle = "Mute incoming Push-to-Talk beep pings (by default beeps still come through even in PTT Silent Mode)",
+                                            checked = pttBeepSilenced,
+                                            onCheckedChange = { silence ->
+                                                pttBeepSilenced = silence
+                                                LivePttSessionManager.setBeepSilenced(context, silence)
+                                            }
+                                        )
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            context.startActivity(LockScreenPttActivity.createPreviewIntent(context))
+                                        },
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("profile_preview_lock_screen_ptt_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Lock,
+                                            contentDescription = "Open Lock-Screen PTT and Recent DM",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Open Lock-Screen PTT & Recent DM")
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            val msg = VoxPttWidgetHelper.requestPinPttWidget(context)
+                                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        },
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("profile_add_ptt_widget_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Mic,
+                                            contentDescription = "Add Home Screen PTT Widget",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Add Home Screen PTT Widget")
+                                    }
+                                }
+                            }
+                        }
+
+                        item(key = "ptt_customization_shop_card") {
+                            PttCustomizationShopCard(
+                                userProfile = userProfile,
+                                isProcessingWallet = isProcessingWallet,
+                                onSelectOrBuyTheme = { theme ->
+                                    onSelectOrBuyPttTheme(theme) { showNeedPointsForBoostDialog = true }
+                                },
+                                onSelectOrBuyChirp = { chirp ->
+                                    onSelectOrBuyPttChirp(chirp) { showNeedPointsForBoostDialog = true }
+                                }
+                            )
+                        }
+
+                        item(key = "dm_alerts_preferences_card") {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("dm_alerts_preferences_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primaryContainer),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.NotificationsActive,
+                                                contentDescription = "Notifications and Alerts",
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Notifications & Chirp Alerts",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "Private message notifications, read receipts & close-friend alerts",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+
+                                    ToggleSettingRow(
+                                        title = "Private Message Notifications",
+                                        subtitle = if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                            "Tap to grant phone notification permission for background private messages"
+                                        } else {
+                                            "Send phone notifications for incoming private messages even in the background"
+                                        },
+                                        checked = dmNotificationsEnabled && hasNotificationPermission,
+                                        onCheckedChange = { enable ->
+                                            if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                                !DirectMessageNotificationHelper.hasNotificationPermission(context)
+                                            ) {
+                                                dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                            } else {
+                                                dmNotificationsEnabled = enable
+                                                DirectMessageNotificationPrefs.setDmNotificationsEnabled(context, enable)
+                                                if (enable) {
+                                                    DirectMessageNotificationHelper.ensureChannel(context)
+                                                    DirectMessageSyncWorker.schedule(context)
+                                                }
+                                            }
+                                        }
+                                    )
+
+                                    Box(modifier = Modifier.testTag("toggle_dm_popup_quick_reply")) {
+                                        ToggleSettingRow(
+                                            title = "Background Message Pop-ups & Quick Reply",
+                                            subtitle = "Pop open message details with inline Quick Reply when a private message arrives",
+                                            checked = quickReplyPopupEnabled,
+                                            onCheckedChange = { enable ->
+                                                if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                                    !DirectMessageNotificationHelper.hasNotificationPermission(context)
+                                                ) {
+                                                    dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                                }
+                                                quickReplyPopupEnabled = enable
+                                                DirectMessageNotificationPrefs.setQuickReplyPopupEnabled(context, enable)
+                                                if (enable) {
+                                                    DirectMessageNotificationHelper.ensureChannel(context)
+                                                }
+                                            }
+                                        )
+                                    }
+
+                                    Box(modifier = Modifier.testTag("toggle_friend_attention_alerts")) {
+                                        ToggleSettingRow(
+                                            title = "Friend Attention Alerts (Ring & Vibrate)",
+                                            subtitle = "Allow accepted friends to ring and vibrate your phone from private chat (max 1 every 5 min)",
+                                            checked = friendAttentionAlertsEnabled,
+                                            onCheckedChange = { enable ->
+                                                if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                                    !DirectMessageNotificationHelper.hasNotificationPermission(context)
+                                                ) {
+                                                    dmNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                                }
+                                                friendAttentionAlertsEnabled = enable
+                                                DirectMessageNotificationPrefs.setFriendAttentionAlertsEnabled(context, enable)
+                                                if (enable) {
+                                                    DirectMessageNotificationHelper.ensureChannel(context)
+                                                }
+                                            }
+                                        )
+                                    }
+
+                                    Box(modifier = Modifier.testTag("toggle_dm_read_receipts")) {
+                                        ToggleSettingRow(
+                                            title = "Private Message Read Receipts",
+                                            subtitle = "Let others see when you've read their private messages (can also be toggled per chat)",
+                                            checked = readReceiptsEnabled,
+                                            onCheckedChange = { enable ->
+                                                readReceiptsEnabled = enable
+                                                DirectMessageNotificationPrefs.setReadReceiptsEnabled(context, enable)
+                                            }
+                                        )
+                                    }
+
+                                    Box(modifier = Modifier.testTag("toggle_priority_chirp_opt_in")) {
+                                        ToggleSettingRow(
+                                            title = "Close Friends Priority Break-In Chirps",
+                                            subtitle = "Allow close friends to spend 1–2 points to send a two-tone radio alert pinned to the top of your Chats inbox",
+                                            checked = userProfile?.priorityChirpOptIn == true,
+                                            onCheckedChange = { enable ->
+                                                onSetPriorityChirpOptIn(enable)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    else -> {
+                        // SUB-TAB 3: PRIVATE MESSAGE PRIVACY & COMPANY SUB-ACCOUNTS
+                        item(key = "private_message_privacy_card") {
+                            PrivateMessageSettingsCard(
+                                currentPolicy = userProfile?.dmPolicyEnum() ?: DmPolicy.OPEN,
+                                paidMembers = paidDmMembersForMe,
+                                onSelectPolicy = onSetDmPolicy,
+                                onKickMember = onKickPaidDmMember
+                            )
+                        }
+
+                        item(key = "company_workspace_card") {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primaryContainer),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Groups,
+                                                contentDescription = "Company Sub-Accounts",
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Company Employee Sub-Accounts",
+                                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = if (canManageCompany || isCompanySupervisor) {
+                                                    "Create sub-names, appoint supervisors, send work orders/notes, and review employee requests."
+                                                } else {
+                                                    "VIP Pro unlocks Company Sub-Accounts with 60s PTT, Supervisors & Work Orders. Employees can link a sub-name code below."
+                                                },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        if (canManageCompany || isCompanySupervisor) {
+                                            Button(
+                                                onClick = onOpenCompanyConsole,
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(48.dp)
+                                                    .testTag("profile_open_company_console_button")
+                                            ) {
+                                                Text(
+                                                    text = if (canManageCompany) "Manage Company Team" else "Supervisor Console",
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = { showJoinCompanyDialog = true },
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(48.dp)
+                                                    .testTag("profile_join_company_sub_account_button")
+                                            ) {
+                                                Text(
+                                                    text = "Join Company Sub-Account",
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1899,6 +2142,30 @@ fun ProfileScreen(
             photoBase64 = currentPhotoBase64,
             contentDescription = "My profile picture",
             onDismiss = { showFullAvatar = false }
+        )
+    }
+
+    if (showDeleteAccountDialog) {
+        val hasActivePlan = userProfile?.isProActive(staffCapabilities.tier) == true ||
+            mySubscriptions.any { it.isCurrentlyActive() }
+        DeleteAccountConfirmDialog(
+            hasActiveMembership = hasActivePlan,
+            isDeleting = isDeletingAccount,
+            onConfirmYes = {
+                isDeletingAccount = true
+                onDeleteAccount(
+                    { _ ->
+                        isDeletingAccount = false
+                        showDeleteAccountDialog = false
+                    },
+                    { _ ->
+                        isDeletingAccount = false
+                    }
+                )
+            },
+            onDismissNo = {
+                showDeleteAccountDialog = false
+            }
         )
     }
 
@@ -2763,6 +3030,15 @@ private fun PointsWalletSettingsCard(
                             "Sent Priority Break-In Chirp to ${tx.creatorName.ifBlank { "friend" }} (${tx.pointsDelta} pts)"
                         PointTransactionType.DM_SCROLLING_BANNER ->
                             "Set 24-Hour DM Scrolling Banner (${tx.pointsDelta} pt)"
+                        PointTransactionType.GIFT_PRO_PASS ->
+                            if (isCreatorCredit) {
+                                val noteSuffix = tx.postId.takeIf { it.isNotBlank() && it != "GIFT_PRO_30D" }
+                                    ?.let { " — \"$it\"" }
+                                    .orEmpty()
+                                "${tx.buyerName} gifted you a 1-Month VOX Pro Pass!$noteSuffix"
+                            } else {
+                                "Gifted 1-Month VOX Pro Pass to ${tx.creatorName.ifBlank { "friend" }} (${tx.pointsDelta} pts)"
+                            }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),

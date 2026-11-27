@@ -354,16 +354,17 @@ fun TrialVoxStageApp(
                                     )
                                 }
                             }
-                            if (directoryEntries.isNotEmpty()) {
+                            val trialVisibleDirectory = directoryEntries.filter { !it.isMinor13To17() }
+                            if (trialVisibleDirectory.isNotEmpty()) {
                                 item(key = "trial_people_header") {
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        text = "Community Members (${directoryEntries.size})",
+                                        text = "Community Members (${trialVisibleDirectory.size})",
                                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                         color = MaterialTheme.colorScheme.onBackground
                                     )
                                 }
-                                items(directoryEntries.take(20), key = { "dir_${it.userId}" }) { member ->
+                                items(trialVisibleDirectory.take(20), key = { "dir_${it.userId}" }) { member ->
                                     val isOnline = member.isCurrentlyOnline(presenceClock)
                                     Surface(
                                         shape = RoundedCornerShape(14.dp),

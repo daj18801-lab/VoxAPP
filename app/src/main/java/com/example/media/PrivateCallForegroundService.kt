@@ -62,6 +62,7 @@ class PrivateCallForegroundService : Service() {
     private var floatingLayoutParams: WindowManager.LayoutParams? = null
     private var floatingButtonCircle: TextView? = null
     private var floatingPeerPill: TextView? = null
+    private var closeConfirmOverlayView: View? = null
     private var overlayStateJob: Job? = null
     private var currentThreadId: String = ""
     private var currentPeerName: String = "Private Chat"
@@ -92,6 +93,7 @@ class PrivateCallForegroundService : Service() {
                 } else if (threadId.isNotBlank()) {
                     _endCallEvents.tryEmit(threadId)
                 }
+                removeCloseConfirmOverlay()
                 removeFloatingOverlay()
                 unregisterScreenOffReceiver()
                 stopForegroundCompat()
@@ -106,6 +108,7 @@ class PrivateCallForegroundService : Service() {
 
             ACTION_HIDE_FLOATING_PTT -> {
                 overlayDismissedByUserForBackgroundCycle = false
+                removeCloseConfirmOverlay()
                 removeFloatingOverlay()
                 return START_NOT_STICKY
             }
@@ -177,6 +180,7 @@ class PrivateCallForegroundService : Service() {
                 lockScreenIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
+            val lockScreenEnabled = DirectMessageNotificationPrefs.isLockScreenPttEnabled(this)
             notificationBuilder
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentTitle(
@@ -184,24 +188,29 @@ class PrivateCallForegroundService : Service() {
                     else "Live Push-to-Talk Ready · $currentPeerName"
                 )
                 .setContentText(
-                    if (pttTransmitting) "Streaming live audio — release button or tap Mute"
-                    else "Tap Lock-Screen PTT or hold floating button to stream live audio"
+                    when {
+                        pttTransmitting -> "Streaming live audio — release button or tap Mute"
+                        lockScreenEnabled -> "Tap Lock-Screen PTT or hold floating button to stream live audio"
+                        else -> "Hold floating button or tap Talk Live to stream live audio"
+                    }
                 )
                 .addAction(
                     0,
                     if (pttTransmitting) "Mute PTT" else "Talk Live",
                     togglePendingIntent
                 )
-                .addAction(
+            if (lockScreenEnabled) {
+                notificationBuilder.addAction(
                     0,
                     "Lock-Screen PTT",
                     lockScreenPendingIntent
                 )
-                .addAction(
-                    0,
-                    "Stop PTT",
-                    endPendingIntent
-                )
+            }
+            notificationBuilder.addAction(
+                0,
+                "Stop PTT",
+                endPendingIntent
+            )
         } else {
             notificationBuilder
                 .setContentTitle("Private Voice Call · $currentPeerName")
@@ -351,11 +360,14 @@ class PrivateCallForegroundService : Service() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(4), 0, dp(2), 0)
-            contentDescription = "Hide floating push to talk button"
+            contentDescription = "Close floating push to talk button"
             setOnClickListener {
-                overlayDismissedByUserForBackgroundCycle = true
                 LivePttSessionManager.setTransmitting(this@PrivateCallForegroundService, false)
-                removeFloatingOverlay()
+                if (!LivePttSessionManager.isAppInBackground.value) {
+                    LivePttSessionManager.requestFloatingPttClosePrompt(currentThreadId, currentPeerName)
+                } else {
+                    showCloseConfirmOverlay()
+                }
             }
         }
         pillRow.addView(peerLabel)
@@ -531,6 +543,156 @@ class PrivateCallForegroundService : Service() {
         }
     }
 
+    private fun showCloseConfirmOverlay() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            LivePttSessionManager.requestFloatingPttClosePrompt(currentThreadId, currentPeerName)
+            return
+        }
+        val wm = windowManager ?: (getSystemService(WINDOW_SERVICE) as? WindowManager).also {
+            windowManager = it
+        } ?: return
+
+        removeCloseConfirmOverlay()
+
+        val density = resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(14))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(18).toFloat()
+                setColor(0xF5111827.toInt())
+                setStroke(dp(1), 0x55FFFFFF)
+            }
+            elevation = dp(14).toFloat()
+        }
+
+        val titleView = TextView(this).apply {
+            text = "Close PTT Stream?"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val messageView = TextView(this).apply {
+            text = "Do you want to end the Push-to-Talk stream with $currentPeerName, or keep it open with a circle PTT button inside the Private DM?"
+            setTextColor(0xFFD1D5DB.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(0, dp(8), 0, dp(14))
+        }
+
+        val buttonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+
+        val keepBtn = TextView(this).apply {
+            text = "No, Keep Open"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(999).toFloat()
+                setColor(COLOR_INCOMING_BLUE)
+            }
+            setOnClickListener {
+                removeCloseConfirmOverlay()
+                LivePttSessionManager.dockFloatingPttToDm(this@PrivateCallForegroundService, currentThreadId)
+            }
+        }
+
+        val endBtn = TextView(this).apply {
+            text = "Yes, End PTT"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(999).toFloat()
+                setColor(COLOR_LIVE_CORAL)
+            }
+            setOnClickListener {
+                removeCloseConfirmOverlay()
+                LivePttSessionManager.endPttSessionAndDisableInThread(this@PrivateCallForegroundService, currentThreadId)
+            }
+        }
+
+        val cancelBtn = TextView(this).apply {
+            text = "Cancel"
+            setTextColor(0xFF9CA3AF.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(8), dp(8), dp(4))
+            setOnClickListener {
+                removeCloseConfirmOverlay()
+            }
+        }
+
+        val keepParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp(8) }
+        val endParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        buttonsRow.addView(keepBtn, keepParams)
+        buttonsRow.addView(endBtn, endParams)
+
+        card.addView(titleView)
+        card.addView(messageView)
+        card.addView(buttonsRow)
+        card.addView(
+            cancelBtn,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(4) }
+        )
+
+        val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val cardWidthPx = (resources.displayMetrics.widthPixels - dp(40)).coerceAtMost(dp(330))
+        val params = WindowManager.LayoutParams(
+            cardWidthPx,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_DIM_BEHIND,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.CENTER
+            dimAmount = 0.45f
+        }
+
+        try {
+            wm.addView(card, params)
+            closeConfirmOverlayView = card
+        } catch (err: Exception) {
+            Log.w(TAG, "Unable to show floating PTT close confirm overlay", err)
+            LivePttSessionManager.requestFloatingPttClosePrompt(currentThreadId, currentPeerName)
+        }
+    }
+
+    private fun removeCloseConfirmOverlay() {
+        val view = closeConfirmOverlayView
+        closeConfirmOverlayView = null
+        if (view != null) {
+            runCatching { windowManager?.removeView(view) }
+        }
+    }
+
     private fun removeFloatingOverlay() {
         overlayStateJob?.cancel()
         overlayStateJob = null
@@ -546,6 +708,7 @@ class PrivateCallForegroundService : Service() {
 
     override fun onDestroy() {
         unregisterScreenOffReceiver()
+        removeCloseConfirmOverlay()
         removeFloatingOverlay()
         serviceScope.cancel()
         isRunning = false

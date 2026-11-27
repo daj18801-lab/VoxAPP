@@ -56,6 +56,9 @@ class RoomViewModel(
 ) : ViewModel() {
 
     val liveKitManager = LiveKitRoomManager(context.applicationContext)
+    private val deviceHash: String = runCatching {
+        com.example.security.DeviceBanManager.getDeviceHash(context.applicationContext)
+    }.getOrDefault("")
     private val voiceMeterEngine = VoiceMeterEngine()
     val liveVoiceAmplitude: StateFlow<Float> = voiceMeterEngine.amplitude
 
@@ -273,13 +276,14 @@ class RoomViewModel(
                 profile = profile,
                 staffCapabilities = caps,
                 enterInvisible = wantInvisible,
-                enteredPin = enteredPin
+                enteredPin = enteredPin,
+                deviceHash = deviceHash
             ).onSuccess { enteredInvisibly ->
                 _isCurrentlyInvisible.value = enteredInvisibly
                 liveKitManager.connectToRoom(
                     roomName = roomId,
                     participantIdentity = currentUserId,
-                    participantName = profile.displayName.ifBlank { "Member" }
+                    participantName = profile.effectiveDisplayName().ifBlank { "Member" }
                 ).onSuccess {
                     liveKitManager.setRemoteAudioMuted(_isRoomAudioMutedForPtt.value)
                 }.onFailure { lkErr ->
@@ -530,16 +534,20 @@ class RoomViewModel(
             else if (caps.isStaff) ParticipantRole.MODERATOR
             else ParticipantRole.SPEAKER
 
+        val effectiveSenderName = profile.effectiveDisplayName().ifBlank { "Member" }
+        val displayedTier = profile.displayedStaffTier(caps.tier)
+
         if (isReaction) {
             viewModelScope.launch {
                 repository.sendMessage(
                     roomId = roomId,
-                    senderName = profile.displayName,
+                    senderName = effectiveSenderName,
                     senderRole = myRole,
                     senderTier = caps.tier,
                     text = rawText,
                     messageType = MessageType.REACTION,
-                    flaggedByAutoMod = false
+                    flaggedByAutoMod = false,
+                    displayedSenderTier = displayedTier
                 ).onFailure { err ->
                     _events.tryEmit(err.message ?: "Failed to send reaction")
                 }
@@ -554,7 +562,7 @@ class RoomViewModel(
                     viewModelScope.launch {
                         repository.logAutoModTrigger(
                             roomId = roomId,
-                            actorName = profile.displayName,
+                            actorName = effectiveSenderName,
                             reason = eval.reason
                         )
                     }
@@ -569,17 +577,18 @@ class RoomViewModel(
                 viewModelScope.launch {
                     repository.sendMessage(
                         roomId = roomId,
-                        senderName = profile.displayName,
+                        senderName = effectiveSenderName,
                         senderRole = myRole,
                         senderTier = caps.tier,
                         text = eval.sanitizedText,
                         messageType = MessageType.TEXT,
-                        flaggedByAutoMod = true
+                        flaggedByAutoMod = true,
+                        displayedSenderTier = displayedTier
                     ).onSuccess {
                         _events.tryEmit("Auto-Mod masked restricted words in your message.")
                         repository.logAutoModTrigger(
                             roomId = roomId,
-                            actorName = profile.displayName,
+                            actorName = effectiveSenderName,
                             reason = "Auto-Mod masked terms: ${eval.matchedTerms.joinToString(", ")}"
                         )
                     }.onFailure { err ->
@@ -596,12 +605,13 @@ class RoomViewModel(
                 viewModelScope.launch {
                     repository.sendMessage(
                         roomId = roomId,
-                        senderName = profile.displayName,
+                        senderName = effectiveSenderName,
                         senderRole = myRole,
                         senderTier = caps.tier,
                         text = eval.text,
                         messageType = MessageType.TEXT,
-                        flaggedByAutoMod = false
+                        flaggedByAutoMod = false,
+                        displayedSenderTier = displayedTier
                     ).onFailure { err ->
                         _events.tryEmit(err.message ?: "Could not send message")
                     }

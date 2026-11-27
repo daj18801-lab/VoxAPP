@@ -778,9 +778,9 @@ fun ParticipantsSheetContent(
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp)
-            .padding(top = 14.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 12.dp)
+            .padding(top = 12.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -789,14 +789,16 @@ fun ParticipantsSheetContent(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Room Users (${visibleParticipants.size})",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
+                    text = "Users (${visibleParticipants.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.padding(top = 4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(top = 3.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -958,7 +960,7 @@ private fun ParticipantRosterRow(
             .clickable(onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(10.dp),
+            modifier = Modifier.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             SpeakingAvatarCircle(
@@ -966,9 +968,9 @@ private fun ParticipantRosterRow(
                 colorHex = participant.avatarColorHex,
                 speakingLevel = participant.speakingLevel.toFloat(),
                 micActive = participant.micActive,
-                size = 40.dp
+                size = 34.dp
             )
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -979,7 +981,7 @@ private fun ParticipantRosterRow(
                     Text(
                         text = if (isSelf) "${participant.displayName} (You)" else participant.displayName,
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         color = usernameColor(tier, isRoomLeader = isLeader, userId = participant.userId),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

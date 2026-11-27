@@ -725,9 +725,22 @@ class MainViewModel(
         )
 
     val adminNotificationsState: StateFlow<List<AdminNotification>> =
-        isAdminFlow.flatMapLatest { isAdminNow ->
-            if (isAdminNow) {
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            if (isStaffNow) {
                 repository.observeAdminNotifications().catch { emit(emptyList()) }
+            } else {
+                flowOf(emptyList())
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = emptyList()
+        )
+
+    val allDeviceRecordsState: StateFlow<List<BannedDevice>> =
+        isStaffFlow.flatMapLatest { isStaffNow ->
+            if (isStaffNow) {
+                repository.observeAllDeviceRecords().catch { emit(emptyList()) }
             } else {
                 flowOf(emptyList())
             }
@@ -1087,6 +1100,129 @@ class MainViewModel(
         }
     }
 
+    fun removeUserFromDirectThread(
+        context: android.content.Context,
+        thread: DirectThread,
+        targetUserId: String,
+        targetName: String
+    ) {
+        viewModelScope.launch {
+            val isAdmin = staffCapabilities.value.isAdmin
+            val myName = effectiveMyProfile().effectiveDisplayName()
+            repository.removeUserFromDirectThread(
+                thread = thread,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = myName,
+                isAppAdmin = isAdmin
+            ).onSuccess {
+                if (!thread.isGroup && com.example.media.LivePttSessionManager.activeThreadId.value == thread.id) {
+                    com.example.media.LivePttSessionManager.disconnect(context)
+                }
+                _snackbarEvents.tryEmit("Removed $targetName from ${thread.displayTitle(currentUserId)}")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not remove user")
+            }
+        }
+    }
+
+    fun removeDirectThread(
+        context: android.content.Context,
+        thread: DirectThread
+    ) {
+        viewModelScope.launch {
+            val isAdmin = staffCapabilities.value.isAdmin
+            val myName = effectiveMyProfile().effectiveDisplayName()
+            val label = thread.displayTitle(currentUserId)
+            if (com.example.media.LivePttSessionManager.activeThreadId.value == thread.id) {
+                com.example.media.LivePttSessionManager.disconnect(context)
+            }
+            repository.removeDirectThread(
+                thread = thread,
+                actorName = myName,
+                isAppAdmin = isAdmin
+            ).onSuccess {
+                val msg = if (thread.isGroup && !thread.isGroupAdmin(currentUserId) && !isAdmin) {
+                    "Left and removed $label"
+                } else {
+                    "Removed DM with $label"
+                }
+                _snackbarEvents.tryEmit(msg)
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not remove DM")
+            }
+        }
+    }
+
+    fun connectPttForDirectThread(
+        context: android.content.Context,
+        thread: DirectThread
+    ) {
+        val profile = effectiveMyProfile()
+        val isAdmin = staffCapabilities.value.isAdmin
+        val nowMs = System.currentTimeMillis()
+        if (!isAdmin && profile.isFeatureRestricted(RestrictableFeature.PTT, nowMs)) {
+            _snackbarEvents.tryEmit(
+                profile.featureRestrictionNotice(RestrictableFeature.PTT, nowMs)
+                    ?: "Push-to-Talk is currently restricted on your account."
+            )
+            return
+        }
+        if (!isAdmin && profile.disableMic) {
+            _snackbarEvents.tryEmit("Microphone access is disabled on your account.")
+            return
+        }
+        if (!isAdmin && thread.requiresAdminPttSelection() && !thread.isPttAllowedInGroup(currentUserId, isAppAdmin = false)) {
+            _snackbarEvents.tryEmit("Only speakers selected by the Group DM Admin can use PTT in this group.")
+            return
+        }
+        val title = thread.displayTitle(currentUserId)
+        val myName = profile.effectiveDisplayName().ifBlank { "Member" }
+        viewModelScope.launch {
+            repository.setDirectThreadPttEnabled(
+                thread = thread,
+                enabled = true,
+                autoEnableAllParticipants = isAdmin
+            ).onSuccess {
+                val hasOtherListener = isAdmin || thread.hasAnyLiveAudioListenerOtherThan(currentUserId)
+                if (hasOtherListener && !thread.isPttVoiceToTextEnabledFor(currentUserId)) {
+                    com.example.media.LivePttSessionManager.ensureConnected(
+                        context = context,
+                        threadId = thread.id,
+                        peerName = title,
+                        myUserId = currentUserId,
+                        myDisplayName = myName
+                    )
+                    _snackbarEvents.tryEmit("Push-to-Talk connected for $title")
+                } else {
+                    _snackbarEvents.tryEmit("PTT enabled for $title — ready when they turn on PTT.")
+                }
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not connect PTT")
+            }
+        }
+    }
+
+    fun disconnectPttForDirectThread(
+        context: android.content.Context,
+        thread: DirectThread
+    ) {
+        val title = thread.displayTitle(currentUserId)
+        viewModelScope.launch {
+            if (com.example.media.LivePttSessionManager.activeThreadId.value == thread.id) {
+                com.example.media.LivePttSessionManager.disconnect(context)
+            }
+            repository.setDirectThreadPttEnabled(
+                thread = thread,
+                enabled = false
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Push-to-Talk disconnected for $title")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not disconnect PTT")
+            }
+        }
+    }
+
     // --- LIVE ROOMS ACTIONS ---
 
     fun canEnterRoomOrNotify(room: ChatRoom? = null): Boolean {
@@ -1306,6 +1442,27 @@ class MainViewModel(
                 _snackbarEvents.tryEmit("Profile saved")
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not update profile")
+            }
+        }
+    }
+
+    fun setVipProNameColor(colorHex: String) {
+        val clean = colorHex.trim().uppercase()
+        if (!com.example.data.isAllowedVipProNameColorHex(clean)) {
+            _snackbarEvents.tryEmit("Red, Green, and Purple are reserved and cannot be selected.")
+            return
+        }
+        viewModelScope.launch {
+            repository.setVipProNameColor(
+                colorHex = clean,
+                currentStaffTier = staffCapabilities.value.tier
+            ).onSuccess {
+                _snackbarEvents.tryEmit(
+                    if (clean.isEmpty()) "Username color reset to default"
+                    else "VIP Pro username color updated!"
+                )
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update username color")
             }
         }
     }
@@ -1750,6 +1907,161 @@ class MainViewModel(
         }
     }
 
+    fun syncReportedDeviceFlagIfNeeded(deviceHash: String, reportCount: Int) {
+        if (deviceHash.length < 16 || reportCount <= 0) return
+        if (realStaffCapabilities.value.isAdmin) return
+        val profile = (realUserProfileState.value as? UiState.Success)?.data
+        val name = profile?.displayName?.ifBlank { currentActorName() } ?: currentActorName()
+        viewModelScope.launch {
+            repository.syncReportedDeviceFlagForCurrentUser(
+                deviceHash = deviceHash,
+                displayName = name,
+                reportCount = reportCount
+            )
+        }
+    }
+
+    fun flagReturningUserOnReportedDevice(
+        deviceHash: String,
+        existingRecord: BannedDevice
+    ) {
+        if (deviceHash.length < 16 || realStaffCapabilities.value.isStaff) return
+        val profile = (realUserProfileState.value as? UiState.Success)?.data
+        val name = profile?.displayName?.ifBlank { currentActorName() } ?: currentActorName()
+        viewModelScope.launch {
+            repository.flagReturningUserOnReportedDevice(
+                deviceHash = deviceHash,
+                returningUserName = name,
+                existingRecord = existingRecord
+            )
+        }
+    }
+
+    fun deleteOwnAccount(
+        deviceHash: String,
+        onCompleted: (hadReports: Boolean) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val profile = (realUserProfileState.value as? UiState.Success)?.data
+        val name = profile?.displayName?.ifBlank { currentActorName() } ?: currentActorName()
+        val handle = profile?.handle.orEmpty()
+        viewModelScope.launch {
+            repository.deleteOwnAccount(
+                deviceHash = deviceHash,
+                displayName = name,
+                handle = handle
+            ).onSuccess { hadReports ->
+                onCompleted(hadReports)
+            }.onFailure { err ->
+                val msg = err.message ?: "Could not delete account right now."
+                _snackbarEvents.tryEmit(msg)
+                onError(msg)
+            }
+        }
+    }
+
+    fun adminResolveDeletedAccountFile(
+        targetUserId: String,
+        targetName: String,
+        deviceHash: String,
+        keepFile: Boolean
+    ) {
+        if (!staffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only App Administrators can resolve deleted account report files.")
+            return
+        }
+        val actorName = currentActorName()
+        viewModelScope.launch {
+            repository.adminResolveDeletedAccountFile(
+                targetUserId = targetUserId,
+                deviceHash = deviceHash,
+                keepFile = keepFile,
+                actorName = actorName
+            ).onSuccess {
+                _snackbarEvents.tryEmit(
+                    if (keepFile) {
+                        "Kept deleted account report file for $targetName on record."
+                    } else {
+                        "Permanently deleted report file for $targetName."
+                    }
+                )
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not resolve deleted account file.")
+            }
+        }
+    }
+
+    fun staffGrantFlaggedDeviceAccess(
+        deviceHash: String,
+        returningUserName: String,
+        note: String = ""
+    ) {
+        if (!staffCapabilities.value.isStaff) {
+            _snackbarEvents.tryEmit("Only Support Staff or App Admins can review flagged devices.")
+            return
+        }
+        val actorName = currentActorName()
+        viewModelScope.launch {
+            repository.staffGrantFlaggedDeviceAccess(
+                deviceHash = deviceHash,
+                actorName = actorName,
+                note = note
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Access granted to $returningUserName.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not grant access.")
+            }
+        }
+    }
+
+    fun staffMarkFlaggedDeviceRestricted(
+        deviceHash: String,
+        returningUserName: String,
+        note: String = ""
+    ) {
+        if (!staffCapabilities.value.isStaff) return
+        val actorName = currentActorName()
+        viewModelScope.launch {
+            repository.staffMarkFlaggedDeviceRestricted(
+                deviceHash = deviceHash,
+                actorName = actorName,
+                note = note
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Applied feature restrictions and lifted full hold for $returningUserName.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not update flagged device status.")
+            }
+        }
+    }
+
+    fun staffBanFlaggedReturningUser(
+        deviceHash: String,
+        targetUserId: String,
+        targetName: String,
+        reason: String
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("Only Support Staff or App Admins can ban flagged devices.")
+            return
+        }
+        val actorName = currentActorName()
+        viewModelScope.launch {
+            repository.staffBanFlaggedReturningUser(
+                deviceHash = deviceHash,
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorTier = caps.tier,
+                actorName = actorName,
+                reason = reason
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Banned $targetName and permanently blocked their device.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not ban returning user.")
+            }
+        }
+    }
+
     suspend fun fetchUserProfileOnce(targetUserId: String): UserProfile? =
         repository.fetchUserProfileOnce(targetUserId).getOrNull()
 
@@ -1959,12 +2271,15 @@ class MainViewModel(
     ) {
         val clean = replyText.trim()
         if (clean.isEmpty()) return
+        val me = effectiveMyProfile()
+        val realTier = staffCapabilities.value.tier
         viewModelScope.launch {
             repository.sendDirectMessage(
                 thread = thread,
-                senderName = effectiveMyProfile().displayName,
-                senderTier = staffCapabilities.value.tier,
-                text = clean
+                senderName = me.effectiveDisplayName(),
+                senderTier = realTier,
+                text = clean,
+                displayedSenderTier = me.displayedStaffTier(realTier)
             ).onSuccess {
                 _snackbarEvents.tryEmit("Quick reply sent to ${thread.displayTitle(currentUserId)}")
                 onSent()
@@ -2079,7 +2394,12 @@ class MainViewModel(
         }
     }
 
-    fun resolveReport(reportId: String, status: ReportStatus, note: String) {
+    fun resolveReport(
+        reportId: String,
+        status: ReportStatus,
+        note: String,
+        onFinished: (Boolean) -> Unit = {}
+    ) {
         viewModelScope.launch {
             repository.resolveSafetyReport(
                 reportId = reportId,
@@ -2087,8 +2407,10 @@ class MainViewModel(
                 resolutionNote = note
             ).onSuccess {
                 _snackbarEvents.tryEmit("Report marked as ${status.label}")
+                onFinished(true)
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not update report")
+                onFinished(false)
             }
         }
     }
@@ -2110,12 +2432,64 @@ class MainViewModel(
                 subject = subject,
                 details = details,
                 assignedStaffId = assignedStaffId,
-                assignedStaffName = assignedStaffName
+                assignedStaffName = assignedStaffName,
+                requesterTier = realStaffCapabilities.value.tier
             ).onSuccess {
                 _snackbarEvents.tryEmit("Support ticket submitted! Our Admin & Support team has been notified.")
                 onCreated()
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not submit support ticket")
+            }
+        }
+    }
+
+    fun submitSuspensionReviewAppeal(
+        suspensionKey: String,
+        suspensionReason: String,
+        reviewMessage: String,
+        onFinished: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val profileName = (realUserProfileState.value as? UiState.Success)?.data?.displayName
+                ?.trim()?.ifBlank { effectiveMyProfile().displayName }
+                ?: effectiveMyProfile().displayName
+            repository.submitSuspensionReviewAppeal(
+                requesterName = profileName,
+                requesterTier = realStaffCapabilities.value.tier,
+                suspensionKey = suspensionKey,
+                suspensionReason = suspensionReason,
+                reviewMessage = reviewMessage
+            ).onSuccess {
+                val msg = "Review message submitted to VOX Staff & Admin."
+                _snackbarEvents.tryEmit(msg)
+                onFinished(true, msg)
+            }.onFailure { err ->
+                val msg = err.message ?: "Could not submit review message"
+                _snackbarEvents.tryEmit(msg)
+                onFinished(false, msg)
+            }
+        }
+    }
+
+    fun adminRemoveUserSuspension(
+        targetUserId: String,
+        targetName: String,
+        onRemoved: () -> Unit = {}
+    ) {
+        if (!realStaffCapabilities.value.isAdmin) {
+            _snackbarEvents.tryEmit("Only Administrators can remove account suspensions.")
+            return
+        }
+        viewModelScope.launch {
+            repository.adminRemoveUserSuspension(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                actorName = currentActorName()
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Suspension removed for $targetName.")
+                onRemoved()
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not remove suspension")
             }
         }
     }
@@ -2604,6 +2978,42 @@ class MainViewModel(
             }.onFailure { err ->
                 _isProcessingWallet.value = false
                 _snackbarEvents.tryEmit(err.message ?: "Could not activate Spotlight Frame")
+            }
+        }
+    }
+
+    fun giftProPassToUser(
+        targetUserId: String,
+        targetName: String,
+        giftNote: String = "",
+        onInsufficientPoints: () -> Unit = {},
+        onGifted: () -> Unit = {}
+    ) {
+        if (_isProcessingWallet.value) return
+        val profile = (userProfileState.value as? UiState.Success)?.data ?: effectiveMyProfile()
+        if (profile.pointsBalance < UserProfile.PRO_GIFT_POINTS) {
+            _snackbarEvents.tryEmit(
+                "You need ${UserProfile.PRO_GIFT_POINTS} points to gift a 1-Month VOX Pro Pass."
+            )
+            onInsufficientPoints()
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWallet.value = true
+            repository.giftProPassToUser(
+                targetUserId = targetUserId,
+                targetName = targetName,
+                senderName = profile.displayName,
+                giftNote = giftNote
+            ).onSuccess { giftedName ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(
+                    "Gifted a 1-Month VOX Pro Pass to $giftedName! (-${UserProfile.PRO_GIFT_POINTS} pts)"
+                )
+                onGifted()
+            }.onFailure { err ->
+                _isProcessingWallet.value = false
+                _snackbarEvents.tryEmit(err.message ?: "Could not gift VOX Pro Pass")
             }
         }
     }
@@ -3608,6 +4018,33 @@ class MainViewModel(
                 onReviewed()
             }.onFailure { err ->
                 _snackbarEvents.tryEmit(err.message ?: "Could not update request")
+            }
+        }
+    }
+
+    fun staffLiftDeviceSuspension(
+        deviceHash: String,
+        targetUserId: String,
+        targetName: String,
+        note: String = "5-day bounce-evasion device suspension lifted by VOX Staff."
+    ) {
+        val caps = staffCapabilities.value
+        if (!caps.isStaff) {
+            _snackbarEvents.tryEmit("VOX Staff privileges required.")
+            return
+        }
+        val actorName = effectiveMyProfile().effectiveDisplayName()
+        viewModelScope.launch {
+            repository.staffLiftDeviceSuspension(
+                deviceHash = deviceHash,
+                targetUserId = targetUserId,
+                actorName = actorName,
+                actorTier = caps.tier,
+                note = note
+            ).onSuccess {
+                _snackbarEvents.tryEmit("Lifted 5-day device suspension for ${targetName.ifBlank { "user" }}.")
+            }.onFailure { err ->
+                _snackbarEvents.tryEmit(err.message ?: "Could not lift device suspension")
             }
         }
     }

@@ -62,11 +62,17 @@ class DirectMessageQuickReplyReceiver : BroadcastReceiver() {
 
                 val profileSnap = runCatching { db.collection("users").document(uid).get().await() }.getOrNull()
                 val staffSnap = runCatching { db.collection("staffRoles").document(uid).get().await() }.getOrNull()
-                val senderName = profileSnap?.getString("displayName")?.trim()
-                    ?.ifBlank { null }
+                val senderName = profileSnap?.getString("customDisplayName")?.trim()?.ifBlank { null }
+                    ?: profileSnap?.getString("displayName")?.trim()?.ifBlank { null }
                     ?: Firebase.auth.currentUser?.displayName?.trim()?.ifBlank { null }
                     ?: "Member"
-                val senderTier = StaffTier.fromRaw(staffSnap?.getString("staffTier"))
+                val realTier = StaffTier.fromRaw(staffSnap?.getString("staffTier"))
+                val senderTier = when (profileSnap?.getString("customMembershipTier")?.trim()?.uppercase()) {
+                    "ADMIN" -> StaffTier.ADMIN
+                    "SUPPORT" -> StaffTier.SUPPORT
+                    "FREE", "PRO", "VIP_PRO", "BUSINESS" -> StaffTier.USER
+                    else -> realTier
+                }
 
                 val msgRef = threadRef.collection("messages").document()
                 val msgPayload = mapOf(

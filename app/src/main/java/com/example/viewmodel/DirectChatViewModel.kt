@@ -20,7 +20,12 @@ import com.example.media.PrivateCallForegroundService
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -72,16 +77,71 @@ class DirectChatViewModel(
     private val _isInvisibleOwnerMode = MutableStateFlow(false)
     val isInvisibleOwnerMode: StateFlow<Boolean> = _isInvisibleOwnerMode.asStateFlow()
 
+    private var typingAutoClearJob: Job? = null
+    private var lastTypingHeartbeatMs: Long = 0L
+    private var isLocallyMarkedTyping: Boolean = false
+
     fun initOwnerMonitorMode(initialInvisible: Boolean) {
         _isInvisibleOwnerMode.value = initialInvisible
+        if (initialInvisible) {
+            clearTypingNow()
+        }
     }
 
     fun setInvisibleOwnerMode(invisible: Boolean) {
         _isInvisibleOwnerMode.value = invisible
+        if (invisible) {
+            clearTypingNow()
+        }
         _snackbarEvents.tryEmit(
             if (invisible) "Switched to Invisible Mode — sub-accounts cannot see you."
             else "Switched to Visible Mode — your messages will appear visibly as Company Owner."
         )
+    }
+
+    fun onDraftTextChanged(text: String, suppressed: Boolean = false) {
+        val thread = (threadState.value as? UiState.Success)?.data
+        val blockedOrIneligible = thread == null ||
+            thread.voxOfficial ||
+            thread.hasAnyBlock() ||
+            thread.isUserKicked(currentUserId) ||
+            thread.isBannedInGroup(currentUserId) ||
+            thread.isBouncedInGroup(currentUserId) ||
+            thread.isMutedInGroup(currentUserId) ||
+            _isInvisibleOwnerMode.value
+        if (suppressed || blockedOrIneligible || text.isBlank()) {
+            clearTypingNow()
+            return
+        }
+        typingAutoClearJob?.cancel()
+        typingAutoClearJob = viewModelScope.launch {
+            delay(TYPING_IDLE_CLEAR_MS)
+            clearTypingNow()
+        }
+        val now = System.currentTimeMillis()
+        if (!isLocallyMarkedTyping || (now - lastTypingHeartbeatMs) >= TYPING_HEARTBEAT_INTERVAL_MS) {
+            isLocallyMarkedTyping = true
+            lastTypingHeartbeatMs = now
+            viewModelScope.launch {
+                repository.setDirectThreadTyping(threadId, isTyping = true)
+            }
+        }
+    }
+
+    fun clearTypingNow(useExternalScope: Boolean = false) {
+        typingAutoClearJob?.cancel()
+        typingAutoClearJob = null
+        if (!isLocallyMarkedTyping) return
+        isLocallyMarkedTyping = false
+        lastTypingHeartbeatMs = 0L
+        val targetScope = if (useExternalScope) {
+            CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        } else {
+            viewModelScope
+        }
+        targetScope.launch {
+            runCatching { repository.setDirectThreadTyping(threadId, isTyping = false) }
+        }
     }
 
     val threadState: StateFlow<UiState<DirectThread?>> = repository.observeDirectThread(threadId)
@@ -115,7 +175,6 @@ class DirectChatViewModel(
                         ""
                     }
                     val asGroupStaffMod = thread != null &&
-                        thread.isGroup &&
                         thread.hasStaffAccessOpen() &&
                         !thread.participantIds.contains(currentUserId)
                     asCompanyOwner to asGroupStaffMod
@@ -158,6 +217,49 @@ class DirectChatViewModel(
     }
 
     private val purgedMessageIds = mutableSetOf<String>()
+
+    private data class PresenceAnnouncementInfo(
+        val thread: DirectThread,
+        val displayName: String,
+        val displayedTier: StaffTier
+    )
+
+    private var hasAnnouncedEnter = false
+    private var latestPresenceInfo: PresenceAnnouncementInfo? = null
+
+    fun announceEnterIfNeeded(
+        thread: DirectThread?,
+        displayName: String,
+        displayedTier: StaffTier,
+        isInvisible: Boolean
+    ) {
+        if (thread == null || isInvisible || thread.voxOfficial) return
+        if (!thread.participantIds.contains(currentUserId)) return
+        if (thread.hasAnyBlock() ||
+            thread.isUserKicked(currentUserId) ||
+            thread.isBannedInGroup(currentUserId) ||
+            thread.isBouncedInGroup(currentUserId) ||
+            thread.isMutedInGroup(currentUserId)
+        ) {
+            return
+        }
+        val cleanName = displayName.trim().ifBlank { "Member" }.take(40)
+        latestPresenceInfo = PresenceAnnouncementInfo(
+            thread = thread,
+            displayName = cleanName,
+            displayedTier = displayedTier
+        )
+        if (hasAnnouncedEnter) return
+        hasAnnouncedEnter = true
+        viewModelScope.launch {
+            repository.sendDirectPresenceNotice(
+                thread = thread,
+                senderName = cleanName,
+                senderTier = displayedTier,
+                text = "$cleanName entered the chat"
+            )
+        }
+    }
 
     fun markReadIfNeeded(thread: DirectThread?, sendReadReceipt: Boolean = true) {
         if (thread == null) return
@@ -234,7 +336,8 @@ class DirectChatViewModel(
         imageBase64: String = "",
         audioBase64: String = "",
         audioDurationSec: Long = 0L,
-        hideSenderName: Boolean = false
+        hideSenderName: Boolean = false,
+        displayedSenderTier: StaffTier = senderTier
     ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
         val isOwnerMonitor = !thread.isGroup &&
@@ -248,6 +351,19 @@ class DirectChatViewModel(
         val cleanImage = imageBase64.trim()
         val cleanAudio = audioBase64.trim()
         if ((clean.isEmpty() && cleanImage.isEmpty() && cleanAudio.isEmpty()) || _isSending.value) return
+        typingAutoClearJob?.cancel()
+        typingAutoClearJob = null
+        val clearedInBatch = !(
+            !thread.isGroup &&
+                thread.companyOwnerId == currentUserId &&
+                !thread.participantIds.contains(currentUserId)
+            ) && thread.participantIds.contains(currentUserId) && thread.typingByUserId.containsKey(currentUserId)
+        if (clearedInBatch) {
+            isLocallyMarkedTyping = false
+            lastTypingHeartbeatMs = 0L
+        } else {
+            clearTypingNow()
+        }
         viewModelScope.launch {
             _isSending.value = true
             repository.sendDirectMessage(
@@ -258,7 +374,8 @@ class DirectChatViewModel(
                 imageBase64 = cleanImage,
                 audioBase64 = cleanAudio,
                 audioDurationSec = audioDurationSec,
-                hideSenderName = hideSenderName
+                hideSenderName = hideSenderName,
+                displayedSenderTier = displayedSenderTier
             ).onSuccess {
                 if (cleanAudio.isNotEmpty()) {
                     repository.completeReferralBonusOnFirstPttClip(senderName)
@@ -291,7 +408,11 @@ class DirectChatViewModel(
         }
     }
 
-    fun sendScreenshotNotice(userName: String, senderTier: StaffTier) {
+    fun sendScreenshotNotice(
+        userName: String,
+        senderTier: StaffTier,
+        displayedSenderTier: StaffTier = senderTier
+    ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
         if (!thread.participantIds.contains(currentUserId)) return
         val safeName = userName.trim().ifBlank { "Someone" }
@@ -301,7 +422,8 @@ class DirectChatViewModel(
                 senderName = safeName,
                 senderTier = senderTier,
                 text = "$safeName took a screenshot of this chat",
-                messageType = DirectMessage.TYPE_SCREENSHOT
+                messageType = DirectMessage.TYPE_SCREENSHOT,
+                displayedSenderTier = displayedSenderTier
             ).onSuccess {
                 _snackbarEvents.tryEmit("Screenshot detected — the other user was notified.")
             }
@@ -507,7 +629,7 @@ class DirectChatViewModel(
                     )
                     _snackbarEvents.tryEmit(
                         if (enabled) {
-                            "PTT Voice-to-Text ON — Push-to-Talk in this chat will also send as text so you won't miss anything."
+                            "PTT Voice-to-Text ON — pressing PTT will send Voice-to-Text to this chat without broadcasting live audio."
                         } else {
                             "PTT Voice-to-Text turned off for this chat."
                         }
@@ -515,6 +637,35 @@ class DirectChatViewModel(
                 }
                 .onFailure { err ->
                     _snackbarEvents.tryEmit(err.message ?: "Could not update PTT Voice-to-Text")
+                }
+        }
+    }
+
+    fun setPttListenOnly(enabled: Boolean) {
+        val thread = (threadState.value as? UiState.Success)?.data ?: return
+        viewModelScope.launch {
+            repository.setDirectThreadPttListenOnly(thread = thread, enabled = enabled)
+                .onSuccess {
+                    val updatedList = if (enabled) {
+                        (thread.pttListenOnlyUserIds + currentUserId).distinct()
+                    } else {
+                        thread.pttListenOnlyUserIds.filter { it != currentUserId }
+                    }
+                    LivePttSessionManager.syncActiveThreadPttFlags(
+                        context = appContext,
+                        thread = thread.copy(pttListenOnlyUserIds = updatedList),
+                        currentUserId = currentUserId
+                    )
+                    _snackbarEvents.tryEmit(
+                        if (enabled) {
+                            "Live Audio ON — you can now hear live Push-to-Talk broadcasts in this chat."
+                        } else {
+                            "Live Audio turned off — incoming PTT will arrive as Voice-to-Text unless your Live PTT is on."
+                        }
+                    )
+                }
+                .onFailure { err ->
+                    _snackbarEvents.tryEmit(err.message ?: "Could not update Live Audio setting")
                 }
         }
     }
@@ -658,6 +809,7 @@ class DirectChatViewModel(
         senderTier: StaffTier,
         messageText: String,
         pointsCost: Int,
+        displayedSenderTier: StaffTier = senderTier,
         onInsufficientPoints: () -> Unit = {}
     ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
@@ -669,7 +821,8 @@ class DirectChatViewModel(
                 senderName = senderName,
                 senderTier = senderTier,
                 messageText = messageText,
-                pointsCost = pointsCost
+                pointsCost = pointsCost,
+                displayedSenderTier = displayedSenderTier
             ).onSuccess {
                 _snackbarEvents.tryEmit(
                     when {
@@ -828,7 +981,7 @@ class DirectChatViewModel(
     fun switchStaffVisibility(invisible: Boolean, staffName: String) {
         setInvisibleOwnerMode(invisible)
         val thread = (threadState.value as? UiState.Success)?.data ?: return
-        if (!invisible && thread.isGroup && thread.hasStaffAccessOpen() && !thread.staffHelpJoinedIds.contains(currentUserId)) {
+        if (!invisible && thread.hasStaffAccessOpen() && !thread.staffHelpJoinedIds.contains(currentUserId)) {
             viewModelScope.launch {
                 repository.joinBusinessStaffHelp(thread, staffName, invisible = false)
             }
@@ -901,6 +1054,7 @@ class DirectChatViewModel(
         senderTier: StaffTier,
         title: String,
         message: String,
+        displayedSenderTier: StaffTier = senderTier,
         onSuccess: () -> Unit = {}
     ) {
         val thread = (threadState.value as? UiState.Success)?.data ?: return
@@ -912,7 +1066,8 @@ class DirectChatViewModel(
                 senderName = senderName,
                 senderTier = senderTier,
                 title = title,
-                message = message
+                message = message,
+                displayedSenderTier = displayedSenderTier
             ).onSuccess {
                 val recipientCount = (thread.participantIds.size - 1).coerceAtLeast(0)
                 _snackbarEvents.tryEmit(
@@ -1052,6 +1207,20 @@ class DirectChatViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        clearTypingNow(useExternalScope = true)
+        val exitInfo = if (hasAnnouncedEnter) latestPresenceInfo else null
+        if (exitInfo != null) {
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                runCatching {
+                    repository.sendDirectPresenceNotice(
+                        thread = exitInfo.thread,
+                        senderName = exitInfo.displayName,
+                        senderTier = exitInfo.displayedTier,
+                        text = "${exitInfo.displayName} exited the chat"
+                    )
+                }
+            }
+        }
         LivePttSessionManager.clearPrivateCallSuppression(threadId)
         if (!PrivateCallForegroundService.isPttMode && PrivateCallForegroundService.activeThreadId == threadId) {
             PrivateCallForegroundService.stop(appContext)
@@ -1062,5 +1231,7 @@ class DirectChatViewModel(
     private companion object {
         const val TAG = "DirectChatViewModel"
         const val STOP_TIMEOUT_MS = 5000L
+        const val TYPING_HEARTBEAT_INTERVAL_MS = 3500L
+        const val TYPING_IDLE_CLEAR_MS = 4500L
     }
 }

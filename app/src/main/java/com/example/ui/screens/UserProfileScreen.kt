@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.CardGiftcard
 import androidx.compose.material.icons.rounded.CardMembership
 import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Check
@@ -82,10 +83,12 @@ import com.example.data.DmPolicy
 import com.example.data.Friendship
 import com.example.data.PostComment
 import com.example.data.PresenceStatus
+import com.example.data.ProTier
 import com.example.data.ProfilePost
 import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
+import com.example.data.UserProfile
 import com.example.ui.components.FullScreenPhotoDialog
 import com.example.ui.components.PostCommentsDialog
 import com.example.ui.components.PresenceStatusDot
@@ -139,7 +142,14 @@ fun UserProfileScreen(
         reason: String,
         onSent: () -> Unit
     ) -> Unit = { _, _, _, _ -> },
-    viewerProfile: com.example.data.UserProfile? = null
+    viewerProfile: com.example.data.UserProfile? = null,
+    onGiftProPass: (
+        targetUserId: String,
+        targetName: String,
+        giftNote: String,
+        onInsufficientPoints: () -> Unit,
+        onGifted: () -> Unit
+    ) -> Unit = { _, _, _, _, _ -> }
 ) {
     BackHandler(onBack = onBack)
 
@@ -161,6 +171,7 @@ fun UserProfileScreen(
     var activeCommentsPost by remember { mutableStateOf<ProfilePost?>(null) }
     var activeSharePost by remember { mutableStateOf<ProfilePost?>(null) }
     var showSendToSupportDialog by remember { mutableStateOf(false) }
+    var showGiftProDialog by remember { mutableStateOf(false) }
     val nowMillis = rememberPresenceClockMillis()
 
     LaunchedEffect(Unit) {
@@ -736,6 +747,48 @@ fun UserProfileScreen(
                                                 }
                                             }
 
+                                            // Gift 1-Month VOX Pro Pass (15 Points Store)
+                                            val targetTier = user.effectiveProTier(nowMillis)
+                                            val canReceiveProGift = !user.proLifetime &&
+                                                (targetTier == ProTier.FREE || targetTier == ProTier.PRO)
+                                            if (canReceiveProGift) {
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        if (myPointsBalance < UserProfile.PRO_GIFT_POINTS) {
+                                                            buyPointsNeededCount = UserProfile.PRO_GIFT_POINTS.toInt()
+                                                            showBuyPointsDialog = true
+                                                        } else {
+                                                            showGiftProDialog = true
+                                                        }
+                                                    },
+                                                    enabled = !isProcessingWallet,
+                                                    shape = RoundedCornerShape(999.dp),
+                                                    border = BorderStroke(1.5.dp, ModAmber),
+                                                    colors = ButtonDefaults.outlinedButtonColors(
+                                                        contentColor = ModAmber
+                                                    ),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(48.dp)
+                                                        .testTag("user_profile_gift_pro_button")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.CardGiftcard,
+                                                        contentDescription = "Gift 1-Month VOX Pro Pass",
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = if (targetTier == ProTier.PRO) {
+                                                            "Gift +30 Days VOX Pro (${UserProfile.PRO_GIFT_POINTS} pts)"
+                                                        } else {
+                                                            "Gift 1-Month VOX Pro (${UserProfile.PRO_GIFT_POINTS} pts)"
+                                                        },
+                                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                                    )
+                                                }
+                                            }
+
                                             // Admin Action: Send User to a Support Member's Private Message
                                             if (staffCapabilities.isAdmin) {
                                                 OutlinedButton(
@@ -1019,9 +1072,12 @@ fun UserProfileScreen(
             onDismissRequest = { showBuyPointsDialog = false },
             title = { Text("Need More Points") },
             text = {
-                Text(
+                val neededMsg = if (buyPointsNeededCount >= UserProfile.PRO_GIFT_POINTS.toInt()) {
+                    "You currently have $myPointsBalance pts. Gifting a 1-Month VOX Pro Pass costs ${UserProfile.PRO_GIFT_POINTS} points. Earn points via streaks, referrals, or creator rewards — or buy points in Profile Settings."
+                } else {
                     "You currently have $myPointsBalance pts. Boosting a post to the top of Discovery costs 5 points (\$5) for 24 hours. Buy points in Profile Settings."
-                )
+                }
+                Text(neededMsg)
             },
             confirmButton = {
                 Button(
@@ -1214,6 +1270,92 @@ fun UserProfileScreen(
                 TextButton(
                     onClick = { showSendToSupportDialog = false },
                     enabled = !isSendingSupportHandoff
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showGiftProDialog && entry != null && !isSelf) {
+        var giftNote by remember { mutableStateOf("") }
+        var isSendingGift by remember { mutableStateOf(false) }
+        val recipientHasPro = entry.effectiveProTier(nowMillis) == ProTier.PRO
+
+        AlertDialog(
+            onDismissRequest = { if (!isSendingGift) showGiftProDialog = false },
+            modifier = Modifier.testTag("user_profile_gift_pro_dialog"),
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.CardGiftcard,
+                    contentDescription = "Gift VOX Pro Pass",
+                    tint = ModAmber,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Gift 1-Month VOX Pro",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = if (recipientHasPro) {
+                            "Spend ${UserProfile.PRO_GIFT_POINTS} points to add +30 extra days of VOX Pro to ${entry.displayName}'s membership. Your balance: $myPointsBalance pts."
+                        } else {
+                            "Spend ${UserProfile.PRO_GIFT_POINTS} points to gift a 1-Month VOX Pro Pass to ${entry.displayName}. Your balance: $myPointsBalance pts."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = giftNote,
+                        onValueChange = { giftNote = it.take(80) },
+                        label = { Text("Appreciation note (optional)") },
+                        placeholder = { Text("e.g. Thanks for hosting awesome rooms!") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("user_profile_gift_pro_note_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isSendingGift = true
+                        onGiftProPass(
+                            entry.userId,
+                            entry.displayName.ifBlank { "Friend" },
+                            giftNote.trim(),
+                            {
+                                isSendingGift = false
+                                showGiftProDialog = false
+                                buyPointsNeededCount = UserProfile.PRO_GIFT_POINTS.toInt()
+                                showBuyPointsDialog = true
+                            },
+                            {
+                                isSendingGift = false
+                                showGiftProDialog = false
+                            }
+                        )
+                    },
+                    enabled = !isSendingGift && !isProcessingWallet,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = ModAmber,
+                        contentColor = Color.Black
+                    ),
+                    modifier = Modifier.testTag("user_profile_confirm_gift_pro_button")
+                ) {
+                    Text(if (isSendingGift) "Sending…" else "Gift Pro · ${UserProfile.PRO_GIFT_POINTS} pts")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showGiftProDialog = false },
+                    enabled = !isSendingGift
                 ) {
                     Text("Cancel")
                 }

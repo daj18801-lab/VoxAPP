@@ -1,5 +1,10 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -34,12 +39,15 @@ import androidx.compose.material.icons.rounded.EmojiEvents
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.HourglassTop
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SupportAgent
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -179,14 +187,17 @@ fun DiscoverUsersScreen(
     var peopleSexFilter by remember { mutableStateOf<UserSex?>(null) }
     var peopleAgeFilter by remember { mutableStateOf(AgeFilterRange.ALL) }
     var peoplePresenceFilter by remember { mutableStateOf("ALL") } // "ALL", "ONLINE", "OFFLINE"
+    var showPeopleFilters by remember { mutableStateOf(false) }
 
     // Posts tab filters (Friends, Male, Female)
     var postsFriendsOnly by remember { mutableStateOf(false) }
     var postsSexFilter by remember { mutableStateOf<UserSex?>(null) }
+    var showPostsFilters by remember { mutableStateOf(false) }
 
     // Recent Photos tab filters (Age, Sex)
     var photosSexFilter by remember { mutableStateOf<UserSex?>(null) }
     var photosAgeFilter by remember { mutableStateOf(AgeFilterRange.ALL) }
+    var showPhotosFilters by remember { mutableStateOf(false) }
 
     val nowMillis = rememberPresenceClockMillis()
 
@@ -328,7 +339,7 @@ fun DiscoverUsersScreen(
         if (q.isEmpty()) supportTickets
         else supportTickets.filter { ticket ->
             ticket.subject.contains(q, ignoreCase = true) ||
-                ticket.details.contains(q, ignoreCase = true) ||
+                ticket.effectiveMessage().contains(q, ignoreCase = true) ||
                 ticket.categoryEnum().label.contains(q, ignoreCase = true) ||
                 ticket.requesterName.contains(q, ignoreCase = true) ||
                 ticket.assignedStaffName.contains(q, ignoreCase = true)
@@ -544,103 +555,82 @@ fun DiscoverUsersScreen(
                 // TAB 0: BROWSE USERS (Filter by Age, Male, Female, Online, Offline)
                 0 -> {
                     item(key = "discover_people_filters") {
-                        val hasActivePeopleFilter = peopleSexFilter != null ||
-                            peopleAgeFilter != AgeFilterRange.ALL ||
+                        val activePeopleFilterCount = listOf(
+                            peopleSexFilter != null,
+                            peopleAgeFilter != AgeFilterRange.ALL,
                             peoplePresenceFilter != "ALL"
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                            modifier = Modifier.fillMaxWidth()
+                        ).count { it }
+                        DiscoverCollapsibleFilterSection(
+                            title = "Filter People (${browseUsers.size})",
+                            activeFilterCount = activePeopleFilterCount,
+                            expanded = showPeopleFilters,
+                            onToggleExpanded = { showPeopleFilters = !showPeopleFilters },
+                            onClear = {
+                                peopleSexFilter = null
+                                peopleAgeFilter = AgeFilterRange.ALL
+                                peoplePresenceFilter = "ALL"
+                            },
+                            toggleTestTag = "discover_people_filters_toggle",
+                            clearTestTag = "discover_people_clear_filters"
                         ) {
-                            Column(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            // Sex + Online/Offline Chips
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Filter People (${browseUsers.size})",
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    if (hasActivePeopleFilter) {
-                                        TextButton(
-                                            onClick = {
-                                                peopleSexFilter = null
-                                                peopleAgeFilter = AgeFilterRange.ALL
-                                                peoplePresenceFilter = "ALL"
-                                            },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                            modifier = Modifier.testTag("discover_people_clear_filters")
-                                        ) {
-                                            Text("Clear", style = MaterialTheme.typography.labelMedium)
-                                        }
-                                    }
-                                }
+                                FilterChip(
+                                    selected = peopleSexFilter == UserSex.MALE,
+                                    onClick = {
+                                        peopleSexFilter = if (peopleSexFilter == UserSex.MALE) null else UserSex.MALE
+                                    },
+                                    label = { Text("Male") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_people_filter_male")
+                                )
+                                FilterChip(
+                                    selected = peopleSexFilter == UserSex.FEMALE,
+                                    onClick = {
+                                        peopleSexFilter = if (peopleSexFilter == UserSex.FEMALE) null else UserSex.FEMALE
+                                    },
+                                    label = { Text("Female") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_people_filter_female")
+                                )
+                                FilterChip(
+                                    selected = peoplePresenceFilter == "ONLINE",
+                                    onClick = {
+                                        peoplePresenceFilter = if (peoplePresenceFilter == "ONLINE") "ALL" else "ONLINE"
+                                    },
+                                    label = { Text("Online") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_people_filter_online")
+                                )
+                                FilterChip(
+                                    selected = peoplePresenceFilter == "OFFLINE",
+                                    onClick = {
+                                        peoplePresenceFilter = if (peoplePresenceFilter == "OFFLINE") "ALL" else "OFFLINE"
+                                    },
+                                    label = { Text("Offline") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_people_filter_offline")
+                                )
+                            }
 
-                                // Sex + Online/Offline Chips
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
+                            // Age Range Chips
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                AgeFilterRange.entries.forEach { range ->
                                     FilterChip(
-                                        selected = peopleSexFilter == UserSex.MALE,
-                                        onClick = {
-                                            peopleSexFilter = if (peopleSexFilter == UserSex.MALE) null else UserSex.MALE
-                                        },
-                                        label = { Text("Male") },
+                                        selected = peopleAgeFilter == range,
+                                        onClick = { peopleAgeFilter = range },
+                                        label = { Text(range.label) },
                                         shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_people_filter_male")
+                                        modifier = Modifier.testTag("discover_people_age_${range.name}")
                                     )
-                                    FilterChip(
-                                        selected = peopleSexFilter == UserSex.FEMALE,
-                                        onClick = {
-                                            peopleSexFilter = if (peopleSexFilter == UserSex.FEMALE) null else UserSex.FEMALE
-                                        },
-                                        label = { Text("Female") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_people_filter_female")
-                                    )
-                                    FilterChip(
-                                        selected = peoplePresenceFilter == "ONLINE",
-                                        onClick = {
-                                            peoplePresenceFilter = if (peoplePresenceFilter == "ONLINE") "ALL" else "ONLINE"
-                                        },
-                                        label = { Text("Online") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_people_filter_online")
-                                    )
-                                    FilterChip(
-                                        selected = peoplePresenceFilter == "OFFLINE",
-                                        onClick = {
-                                            peoplePresenceFilter = if (peoplePresenceFilter == "OFFLINE") "ALL" else "OFFLINE"
-                                        },
-                                        label = { Text("Offline") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_people_filter_offline")
-                                    )
-                                }
-
-                                // Age Range Chips
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    AgeFilterRange.entries.forEach { range ->
-                                        FilterChip(
-                                            selected = peopleAgeFilter == range,
-                                            onClick = { peopleAgeFilter = range },
-                                            label = { Text(range.label) },
-                                            shape = RoundedCornerShape(999.dp),
-                                            modifier = Modifier.testTag("discover_people_age_${range.name}")
-                                        )
-                                    }
                                 }
                             }
                         }
@@ -719,89 +709,69 @@ fun DiscoverUsersScreen(
                     }
 
                     item(key = "discover_recent_photos_filters") {
-                        val hasPhotoFilter = photosSexFilter != null || photosAgeFilter != AgeFilterRange.ALL
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                            modifier = Modifier.fillMaxWidth()
+                        val activePhotoFilterCount = listOf(
+                            photosSexFilter != null,
+                            photosAgeFilter != AgeFilterRange.ALL
+                        ).count { it }
+                        DiscoverCollapsibleFilterSection(
+                            title = "Filter Recent Photos (${filteredRecentPhotoPosts.size})",
+                            activeFilterCount = activePhotoFilterCount,
+                            expanded = showPhotosFilters,
+                            onToggleExpanded = { showPhotosFilters = !showPhotosFilters },
+                            onClear = {
+                                photosSexFilter = null
+                                photosAgeFilter = AgeFilterRange.ALL
+                            },
+                            toggleTestTag = "discover_photos_filters_toggle",
+                            clearTestTag = "discover_photos_clear_filters"
                         ) {
-                            Column(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            // Sex Chips
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Filter Recent Photos (${filteredRecentPhotoPosts.size})",
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    if (hasPhotoFilter) {
-                                        TextButton(
-                                            onClick = {
-                                                photosSexFilter = null
-                                                photosAgeFilter = AgeFilterRange.ALL
-                                            },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                            modifier = Modifier.testTag("discover_photos_clear_filters")
-                                        ) {
-                                            Text("Clear", style = MaterialTheme.typography.labelMedium)
-                                        }
-                                    }
-                                }
+                                FilterChip(
+                                    selected = photosSexFilter == null,
+                                    onClick = { photosSexFilter = null },
+                                    label = { Text("All") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_photos_filter_all")
+                                )
+                                FilterChip(
+                                    selected = photosSexFilter == UserSex.MALE,
+                                    onClick = {
+                                        photosSexFilter = if (photosSexFilter == UserSex.MALE) null else UserSex.MALE
+                                    },
+                                    label = { Text("Male") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_photos_filter_male")
+                                )
+                                FilterChip(
+                                    selected = photosSexFilter == UserSex.FEMALE,
+                                    onClick = {
+                                        photosSexFilter = if (photosSexFilter == UserSex.FEMALE) null else UserSex.FEMALE
+                                    },
+                                    label = { Text("Female") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_photos_filter_female")
+                                )
+                            }
 
-                                // Sex Chips
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
+                            // Age Range Chips
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                AgeFilterRange.entries.forEach { range ->
                                     FilterChip(
-                                        selected = photosSexFilter == null,
-                                        onClick = { photosSexFilter = null },
-                                        label = { Text("All") },
+                                        selected = photosAgeFilter == range,
+                                        onClick = { photosAgeFilter = range },
+                                        label = { Text(range.label) },
                                         shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_photos_filter_all")
+                                        modifier = Modifier.testTag("discover_photos_age_${range.name}")
                                     )
-                                    FilterChip(
-                                        selected = photosSexFilter == UserSex.MALE,
-                                        onClick = {
-                                            photosSexFilter = if (photosSexFilter == UserSex.MALE) null else UserSex.MALE
-                                        },
-                                        label = { Text("Male") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_photos_filter_male")
-                                    )
-                                    FilterChip(
-                                        selected = photosSexFilter == UserSex.FEMALE,
-                                        onClick = {
-                                            photosSexFilter = if (photosSexFilter == UserSex.FEMALE) null else UserSex.FEMALE
-                                        },
-                                        label = { Text("Female") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_photos_filter_female")
-                                    )
-                                }
-
-                                // Age Range Chips
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    AgeFilterRange.entries.forEach { range ->
-                                        FilterChip(
-                                            selected = photosAgeFilter == range,
-                                            onClick = { photosAgeFilter = range },
-                                            label = { Text(range.label) },
-                                            shape = RoundedCornerShape(999.dp),
-                                            modifier = Modifier.testTag("discover_photos_age_${range.name}")
-                                        )
-                                    }
                                 }
                             }
                         }
@@ -885,82 +855,62 @@ fun DiscoverUsersScreen(
                 // TAB 2: COMMUNITY POSTS FEED (Filter by Friends, Male, Female)
                 2 -> {
                     item(key = "discover_posts_filters") {
-                        val hasPostFilter = postsFriendsOnly || postsSexFilter != null
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                            modifier = Modifier.fillMaxWidth()
+                        val activePostFilterCount = listOf(
+                            postsFriendsOnly,
+                            postsSexFilter != null
+                        ).count { it }
+                        DiscoverCollapsibleFilterSection(
+                            title = "Filter Posts (${filteredPosts.size})",
+                            activeFilterCount = activePostFilterCount,
+                            expanded = showPostsFilters,
+                            onToggleExpanded = { showPostsFilters = !showPostsFilters },
+                            onClear = {
+                                postsFriendsOnly = false
+                                postsSexFilter = null
+                            },
+                            toggleTestTag = "discover_posts_filters_toggle",
+                            clearTestTag = "discover_posts_clear_filters"
                         ) {
-                            Column(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Filter Posts (${filteredPosts.size})",
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    if (hasPostFilter) {
-                                        TextButton(
-                                            onClick = {
-                                                postsFriendsOnly = false
-                                                postsSexFilter = null
-                                            },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                            modifier = Modifier.testTag("discover_posts_clear_filters")
-                                        ) {
-                                            Text("Clear", style = MaterialTheme.typography.labelMedium)
-                                        }
-                                    }
-                                }
-
-                                FlowRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    FilterChip(
-                                        selected = !postsFriendsOnly && postsSexFilter == null,
-                                        onClick = {
-                                            postsFriendsOnly = false
-                                            postsSexFilter = null
-                                        },
-                                        label = { Text("All") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_posts_filter_all")
-                                    )
-                                    FilterChip(
-                                        selected = postsFriendsOnly,
-                                        onClick = { postsFriendsOnly = !postsFriendsOnly },
-                                        label = { Text("Friends") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_posts_filter_friends")
-                                    )
-                                    FilterChip(
-                                        selected = postsSexFilter == UserSex.MALE,
-                                        onClick = {
-                                            postsSexFilter = if (postsSexFilter == UserSex.MALE) null else UserSex.MALE
-                                        },
-                                        label = { Text("Male") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_posts_filter_male")
-                                    )
-                                    FilterChip(
-                                        selected = postsSexFilter == UserSex.FEMALE,
-                                        onClick = {
-                                            postsSexFilter = if (postsSexFilter == UserSex.FEMALE) null else UserSex.FEMALE
-                                        },
-                                        label = { Text("Female") },
-                                        shape = RoundedCornerShape(999.dp),
-                                        modifier = Modifier.testTag("discover_posts_filter_female")
-                                    )
-                                }
+                                FilterChip(
+                                    selected = !postsFriendsOnly && postsSexFilter == null,
+                                    onClick = {
+                                        postsFriendsOnly = false
+                                        postsSexFilter = null
+                                    },
+                                    label = { Text("All") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_posts_filter_all")
+                                )
+                                FilterChip(
+                                    selected = postsFriendsOnly,
+                                    onClick = { postsFriendsOnly = !postsFriendsOnly },
+                                    label = { Text("Friends") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_posts_filter_friends")
+                                )
+                                FilterChip(
+                                    selected = postsSexFilter == UserSex.MALE,
+                                    onClick = {
+                                        postsSexFilter = if (postsSexFilter == UserSex.MALE) null else UserSex.MALE
+                                    },
+                                    label = { Text("Male") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_posts_filter_male")
+                                )
+                                FilterChip(
+                                    selected = postsSexFilter == UserSex.FEMALE,
+                                    onClick = {
+                                        postsSexFilter = if (postsSexFilter == UserSex.FEMALE) null else UserSex.FEMALE
+                                    },
+                                    label = { Text("Female") },
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("discover_posts_filter_female")
+                                )
                             }
                         }
                     }
@@ -2267,3 +2217,119 @@ private fun DiscoverUserCard(
         }
     }
 }
+
+@Composable
+private fun DiscoverCollapsibleFilterSection(
+    title: String,
+    activeFilterCount: Int,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    onClear: () -> Unit,
+    toggleTestTag: String,
+    clearTestTag: String,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            1.dp,
+            if (activeFilterCount > 0) {
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+            } else {
+                MaterialTheme.colorScheme.outlineVariant
+            }
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggleExpanded)
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag(toggleTestTag),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = "Filters",
+                        tint = if (activeFilterCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (activeFilterCount > 0) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                        ) {
+                            Text(
+                                text = "$activeFilterCount active",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (activeFilterCount > 0) {
+                        TextButton(
+                            onClick = onClear,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.testTag(clearTestTag)
+                        ) {
+                            Text("Clear", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                    Surface(
+                        shape = CircleShape,
+                        color = if (expanded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                                contentDescription = if (expanded) "Hide filters" else "Show filters",
+                                tint = if (expanded) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    content()
+                }
+            }
+        }
+    }
+}
+

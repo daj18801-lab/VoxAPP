@@ -116,7 +116,7 @@ fun AdminNotificationsCard(
                     tint = if (unreadCount > 0) LiveCoral else MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "Admin Record-Keeping & Alerts",
+                    text = "Staff & Admin Safety Alerts",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
@@ -139,17 +139,22 @@ fun AdminNotificationsCard(
 
             if (notifications.isEmpty()) {
                 Text(
-                    text = "Support refund reports and 5-day Support Staff alerts (5+ Pro packages, >50 points, or 30+ perks) will appear here.",
+                    text = "Youth safety DM alerts, bounce-evasion 5-day bans, refund reports, and AutoMod alerts will appear here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
-                notifications.take(10).forEach { notif ->
+                notifications.take(15).forEach { notif ->
                     val notifType = notif.typeEnum()
-                    val isPerkAlert = notifType == AdminNotificationType.SUPPORT_PERK_THRESHOLD_30_IN_5D ||
+                    val isUrgentAlert = notifType == AdminNotificationType.SUPPORT_PERK_THRESHOLD_30_IN_5D ||
                         notifType == AdminNotificationType.SUPPORT_PRO_PACKAGES_5_IN_5D ||
-                        notifType == AdminNotificationType.SUPPORT_POINTS_50_IN_5D
-                    val accent = if (isPerkAlert) LiveCoral else ModAmber
+                        notifType == AdminNotificationType.SUPPORT_POINTS_50_IN_5D ||
+                        notifType == AdminNotificationType.AUTOMOD_ROOM_FLOOD_SUSPENSION ||
+                        notifType == AdminNotificationType.DELETED_ACCOUNT_WITH_REPORTS ||
+                        notifType == AdminNotificationType.RETURNING_REPORTED_DEVICE ||
+                        notifType == AdminNotificationType.ADULT_TO_MINOR_DM ||
+                        notifType == AdminNotificationType.BOUNCE_EVASION_DEVICE_SUSPENSION
+                    val accent = if (isUrgentAlert) LiveCoral else ModAmber
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
@@ -172,7 +177,7 @@ fun AdminNotificationsCard(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (isPerkAlert) Icons.Rounded.WarningAmber else Icons.Rounded.CurrencyExchange,
+                                    imageVector = if (isUrgentAlert) Icons.Rounded.WarningAmber else Icons.Rounded.CurrencyExchange,
                                     contentDescription = notif.typeEnum().label,
                                     tint = accent,
                                     modifier = Modifier.size(18.dp)

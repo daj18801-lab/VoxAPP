@@ -1,9 +1,15 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,8 +62,10 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -65,11 +73,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
@@ -80,8 +91,14 @@ import com.example.data.StaffCapabilities
 import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
+import com.example.media.LivePttSessionManager
+import com.example.ui.components.AddUserToDirectThreadDialog
+import com.example.ui.components.ConfirmRemoveDirectThreadDialog
+import com.example.ui.components.DirectThreadLongPressDialog
+import kotlinx.coroutines.delay
 import com.example.ui.components.PresenceStatusDot
 import com.example.ui.components.QuickCreatePostSheet
+import com.example.ui.components.RemoveUserFromDirectThreadDialog
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TalkStreakBadge
@@ -129,15 +146,36 @@ fun ChatsHomeScreen(
     pendingWorkOrdersCount: Int = 0,
     onOpenCompanyConsole: () -> Unit = {},
     onOpenWorkHub: () -> Unit = {},
-    onToggleDnd: (Boolean) -> Unit = {}
+    onToggleDnd: (Boolean) -> Unit = {},
+    onAddUserToThread: (DirectThread, DirectoryEntry) -> Unit = { _, _ -> },
+    onRemoveUserFromThread: (DirectThread, targetUserId: String, targetName: String) -> Unit = { _, _, _ -> },
+    onRemoveDirectThread: (DirectThread) -> Unit = {},
+    onConnectPttForThread: (DirectThread) -> Unit = {},
+    onDisconnectPttForThread: (DirectThread) -> Unit = {}
 ) {
+    val context = LocalContext.current
     val isSubAccount = userProfile?.companySubAccount == true
     val isDndOn = userProfile?.doNotDisturb == true
+    val activePttThreadId by LivePttSessionManager.activeThreadId.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableIntStateOf(0) }
     var showNewChatSheet by remember { mutableStateOf(false) }
     var showQuickCreateSheet by remember { mutableStateOf(false) }
+    var longPressedThread by remember { mutableStateOf<DirectThread?>(null) }
+    var addUserTargetThread by remember { mutableStateOf<DirectThread?>(null) }
+    var removeUserTargetThread by remember { mutableStateOf<DirectThread?>(null) }
+    var confirmRemoveDmThread by remember { mutableStateOf<DirectThread?>(null) }
+    var pendingPttMicThread by remember { mutableStateOf<DirectThread?>(null) }
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val pending = pendingPttMicThread
+        pendingPttMicThread = null
+        if (granted && pending != null) {
+            onConnectPttForThread(pending)
+        }
+    }
     val nowMillis = rememberPresenceClockMillis()
     val directoryByUid = remember(directoryEntries) {
         directoryEntries.associateBy { it.userId }
@@ -177,6 +215,18 @@ fun ChatsHomeScreen(
     }
     val unreadCount = remember(allThreads, currentUserId) {
         allThreads.count { it.isUnreadFor(currentUserId) }
+    }
+    val hasAnyRemoteTyping = allThreads.any { thread ->
+        thread.typingByUserId.any { (uid, _) -> uid.isNotBlank() && uid != currentUserId }
+    }
+    var typingClockMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(hasAnyRemoteTyping, allThreads) {
+        typingClockMs = System.currentTimeMillis()
+        if (!hasAnyRemoteTyping) return@LaunchedEffect
+        while (true) {
+            delay(1000L)
+            typingClockMs = System.currentTimeMillis()
+        }
     }
 
     val filteredThreads = remember(allThreads, searchQuery, selectedFilter, acceptedFriendIds, currentUserId, isSubAccount) {
@@ -502,65 +552,6 @@ fun ChatsHomeScreen(
                             }
                         }
                     }
-                } else if (canManageCompany || isCompanySupervisor) {
-                    item(key = "company_console_entry_card") {
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
-                                .clip(RoundedCornerShape(16.dp))
-                                .clickable(onClick = onOpenCompanyConsole)
-                                .testTag("chats_company_console_card")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(42.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Business,
-                                        contentDescription = "Company Team Console",
-                                        tint = androidx.compose.ui.graphics.Color.White,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = if (canManageCompany) "Company Team & Sub-Accounts" else "Supervisor Work Orders & Requests",
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        text = if (canManageCompany) {
-                                            "Create employee sub-names, appoint supervisors, and dispatch work orders."
-                                        } else {
-                                            "Send work orders to team members and review employee requests."
-                                        },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 2
-                                    )
-                                }
-                                OutlinedButton(
-                                    onClick = onOpenCompanyConsole,
-                                    shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                                ) {
-                                    Text("Open")
-                                }
-                            }
-                        }
-                    }
                 }
 
                 if (!isSubAccount) {
@@ -763,7 +754,12 @@ fun ChatsHomeScreen(
                                 ) { _, thread ->
                                     com.example.ui.components.PriorityChirpPinnedInboxCard(
                                         thread = thread,
-                                        onOpenThread = { onOpenThread(thread.id) }
+                                        onOpenThread = { onOpenThread(thread.id) },
+                                        onLongClick = if (!isSubAccount) {
+                                            { longPressedThread = thread }
+                                        } else {
+                                            null
+                                        }
                                     )
                                 }
                             }
@@ -773,19 +769,32 @@ fun ChatsHomeScreen(
                                 key = { idx, thread -> "regular_thread_${idx}_${thread.id}" }
                             ) { _, thread ->
                                 val otherUid = thread.otherUserId(currentUserId)
+                                val otherDirEntry = if (thread.isGroup) null else directoryByUid[otherUid]
+                                val rowTypingLabel = thread.formatTypingLabel(
+                                    myUid = currentUserId,
+                                    nowMs = typingClockMs,
+                                    nameLookup = { uid -> directoryByUid[uid]?.effectiveDisplayName() }
+                                )
                                 SnapChatFeedRow(
                                     thread = thread,
                                     currentUserId = currentUserId,
+                                    otherDirectoryEntry = otherDirEntry,
                                     otherPhotoBase64 = if (thread.isGroup) "" else directoryPhotoByUid[otherUid].orEmpty(),
                                     otherStatus = if (thread.isGroup) {
                                         PresenceStatus.OFFLINE
                                     } else {
-                                        directoryByUid[otherUid]?.displayedStatusFor(
+                                        otherDirEntry?.displayedStatusFor(
                                             viewerIsStaff = staffCapabilities.isStaff,
                                             nowMillis = nowMillis
                                         ) ?: PresenceStatus.OFFLINE
                                     },
+                                    typingLabel = rowTypingLabel,
                                     onClick = { onOpenThread(thread.id) },
+                                    onLongClick = {
+                                        if (!isSubAccount) {
+                                            longPressedThread = thread
+                                        }
+                                    },
                                     onAvatarClick = {
                                         if (thread.isGroup) onOpenThread(thread.id)
                                         else onOpenUserProfile(otherUid)
@@ -877,6 +886,88 @@ fun ChatsHomeScreen(
             )
         }
     }
+
+    longPressedThread?.let { selectedThread ->
+        val freshThread = allThreads.firstOrNull { it.id == selectedThread.id } ?: selectedThread
+        DirectThreadLongPressDialog(
+            thread = freshThread,
+            currentUserId = currentUserId,
+            isAppAdmin = staffCapabilities.isAdmin,
+            activePttThreadId = activePttThreadId,
+            onDismiss = { longPressedThread = null },
+            onAddUserToGroup = {
+                longPressedThread = null
+                addUserTargetThread = freshThread
+            },
+            onRemoveUser = {
+                longPressedThread = null
+                removeUserTargetThread = freshThread
+            },
+            onRemoveDm = {
+                longPressedThread = null
+                confirmRemoveDmThread = freshThread
+            },
+            onConnectPtt = {
+                longPressedThread = null
+                val hasMic = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasMic) {
+                    onConnectPttForThread(freshThread)
+                } else {
+                    pendingPttMicThread = freshThread
+                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
+            onDisconnectPtt = {
+                longPressedThread = null
+                onDisconnectPttForThread(freshThread)
+            }
+        )
+    }
+
+    addUserTargetThread?.let { targetThread ->
+        val freshThread = allThreads.firstOrNull { it.id == targetThread.id } ?: targetThread
+        AddUserToDirectThreadDialog(
+            thread = freshThread,
+            currentUserId = currentUserId,
+            directoryUsers = otherDirectoryUsers,
+            onDismiss = { addUserTargetThread = null },
+            onSelectUser = { candidate ->
+                addUserTargetThread = null
+                onAddUserToThread(freshThread, candidate)
+            }
+        )
+    }
+
+    removeUserTargetThread?.let { targetThread ->
+        val freshThread = allThreads.firstOrNull { it.id == targetThread.id } ?: targetThread
+        RemoveUserFromDirectThreadDialog(
+            thread = freshThread,
+            currentUserId = currentUserId,
+            directoryByUid = directoryByUid,
+            onDismiss = { removeUserTargetThread = null },
+            onConfirmRemoveUser = { uid, name ->
+                removeUserTargetThread = null
+                onRemoveUserFromThread(freshThread, uid, name)
+            }
+        )
+    }
+
+    confirmRemoveDmThread?.let { targetThread ->
+        val freshThread = allThreads.firstOrNull { it.id == targetThread.id } ?: targetThread
+        ConfirmRemoveDirectThreadDialog(
+            thread = freshThread,
+            currentUserId = currentUserId,
+            isAppAdmin = staffCapabilities.isAdmin,
+            onDismiss = { confirmRemoveDmThread = null },
+            onConfirm = {
+                confirmRemoveDmThread = null
+                onRemoveDirectThread(freshThread)
+            }
+        )
+    }
 }
 
 @Composable
@@ -933,20 +1024,32 @@ private fun QuickFriendCircleItem(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SnapChatFeedRow(
     thread: DirectThread,
     currentUserId: String,
+    otherDirectoryEntry: DirectoryEntry? = null,
     otherPhotoBase64: String,
     otherStatus: PresenceStatus,
+    typingLabel: String? = null,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
     onAvatarClick: () -> Unit
 ) {
     val isGroup = thread.isGroup
     val isVoxOfficial = thread.voxOfficial
-    val title = thread.displayTitle(currentUserId)
+    val title = if (!isGroup && !isVoxOfficial && otherDirectoryEntry != null && otherDirectoryEntry.effectiveDisplayName().isNotBlank()) {
+        otherDirectoryEntry.effectiveDisplayName()
+    } else {
+        thread.displayTitle(currentUserId)
+    }
     val otherColorHex = thread.otherColorHex(currentUserId)
-    val otherTier = if (isGroup) StaffTier.USER else thread.otherTier(currentUserId)
+    val otherTier = when {
+        isGroup || isVoxOfficial -> StaffTier.USER
+        otherDirectoryEntry != null -> otherDirectoryEntry.tierEnum()
+        else -> thread.otherTier(currentUserId)
+    }
     val isUnread = thread.isUnreadFor(currentUserId)
     val lastSentByMe = thread.lastMessageSenderId == currentUserId
 
@@ -954,7 +1057,10 @@ private fun SnapChatFeedRow(
         color = MaterialTheme.colorScheme.surface,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .testTag("chat_thread_row_${thread.id}")
     ) {
         Row(
@@ -1181,7 +1287,19 @@ private fun SnapChatFeedRow(
                     )
                 }
 
-                if (thread.lastMessageText.isNotBlank()) {
+                if (!typingLabel.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = typingLabel,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("thread_typing_preview_${thread.id}")
+                    )
+                } else if (thread.lastMessageText.isNotBlank()) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = thread.lastMessageText,
