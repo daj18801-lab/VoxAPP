@@ -543,6 +543,7 @@ fun SafetyScreen(
                 val adminTabs = listOf(
                     Triple(0, "Users", "admin_tab_users") to (Icons.Rounded.ManageAccounts to 0),
                     Triple(1, "Reports", "admin_tab_reports") to (Icons.Rounded.Flag to reportsTabBadge),
+                    Triple(7, "Identity", "admin_tab_identity") to (Icons.Rounded.SwapHoriz to 0),
                     Triple(2, "Staff", "admin_tab_support") to (Icons.Rounded.SupportAgent to staffRoles.size),
                     Triple(3, "Alerts", "admin_tab_alerts") to (Icons.Rounded.NotificationsActive to alertsTabBadge),
                     Triple(4, "Billing", "admin_tab_billing") to (Icons.Rounded.Verified to 0),
@@ -1349,7 +1350,7 @@ fun SafetyScreen(
                         }
                     }
 
-                    6 -> {
+                    7 -> {
                         if (realStaffCapabilities.isAdmin) {
                             item(key = "admin_sandbox_control") {
                                 AdminSandboxControlCard(
@@ -1360,7 +1361,9 @@ fun SafetyScreen(
                                 )
                             }
                         }
+                    }
 
+                    6 -> {
                         item(key = "admin_vox_chat_control_card") {
                             val isVoxEnabled = officialVoxChatRoom?.statusEnum() != RoomStatus.CLOSED
                             val isVoxHidden = officialVoxChatRoom?.hiddenFromLobby == true

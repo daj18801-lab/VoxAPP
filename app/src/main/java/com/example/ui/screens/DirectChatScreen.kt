@@ -302,7 +302,16 @@ fun DirectChatScreen(
     val activePttTheme by LivePttSessionManager.activePttTheme.collectAsStateWithLifecycle()
     val isGlobalPttVttEnabled by LivePttSessionManager.isPttVoiceToTextEnabled.collectAsStateWithLifecycle()
     val livePttTranscript by LivePttSessionManager.livePttTranscript.collectAsStateWithLifecycle()
+    val lastPttTranscriptFeedback by LivePttSessionManager.lastPttTranscriptFeedback.collectAsStateWithLifecycle()
     val remoteCallSpeakerName by viewModel.remoteCallSpeakerName.collectAsStateWithLifecycle()
+
+    LaunchedEffect(lastPttTranscriptFeedback) {
+        val feedback = lastPttTranscriptFeedback
+        if (!feedback.isNullOrBlank()) {
+            snackbarHostState.showTopMessage(feedback)
+            LivePttSessionManager.clearPttTranscriptFeedback()
+        }
+    }
     val myEffectiveName = userProfile.effectiveDisplayName().ifBlank { "Member" }
     val myDisplayedStaffTier = userProfile.displayedStaffTier(myStaffTier)
     val myMaxPttSeconds = userProfile.pttMaxDurationSeconds(myStaffTier)
@@ -1959,7 +1968,7 @@ fun DirectChatScreen(
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = "PTT Voice-to-Text ON · Push-to-Talk audios also post as text",
+                                    text = "PTT Voice-to-Text ON · Hold PTT below to send voice as text (no live audio)",
                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                     color = SafetyEmerald,
                                     modifier = Modifier.weight(1f),
@@ -2663,9 +2672,16 @@ fun DirectChatScreen(
                                 )
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
-                        } else if (isMyPttEnabled && canMyAccountUsePtt && thread != null) {
-                            val showBottomBigPttButton = !isFloatingPttEnabled
-                            val showLiveVttTranscript = isThisThreadTransmitting && livePttTranscript.isNotBlank()
+                        }
+                        val hasMyPttOrVttEnabled = isMyPttEnabled || isMyPttVttOn || isGlobalPttVttEnabled
+                        if (hasMyPttOrVttEnabled && canMyAccountUsePtt && thread != null) {
+                            val hasActiveFloatingOrDockedPtt = isFloatingPttEnabled &&
+                                isMyPttEnabled &&
+                                !isVttOnlyPttMode &&
+                                (isThisThreadLivePttConnected || isThisThreadLivePttConnecting)
+                            val showBottomBigPttButton = !hasActiveFloatingOrDockedPtt
+                            val showLiveVttTranscript = isThisThreadTransmitting &&
+                                (livePttTranscript.isNotBlank() || isVttOnlyPttMode)
                             val showBottomPttSection =
                                 blockedByGroupAdminTalking || showBottomBigPttButton || showLiveVttTranscript || isVttOnlyPttMode
                             if (showBottomPttSection) {
@@ -2696,7 +2712,11 @@ fun DirectChatScreen(
                                                     modifier = Modifier.size(16.dp)
                                                 )
                                                 Text(
-                                                    text = "Voice-to-Text: \"$livePttTranscript\"",
+                                                    text = if (livePttTranscript.isNotBlank()) {
+                                                        "Voice-to-Text: \"$livePttTranscript\""
+                                                    } else {
+                                                        "Listening for Voice-to-Text… speak clearly, release to send"
+                                                    },
                                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                                     color = SnapBlue,
                                                     maxLines = 2,

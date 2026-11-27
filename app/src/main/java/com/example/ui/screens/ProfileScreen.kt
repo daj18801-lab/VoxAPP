@@ -132,7 +132,6 @@ import com.example.notifications.DirectMessageNotificationHelper
 import com.example.notifications.DirectMessageNotificationPrefs
 import com.example.notifications.DirectMessageSyncWorker
 import androidx.compose.ui.text.style.TextOverflow
-import com.example.ui.components.AdminSandboxControlCard
 import com.example.ui.components.DailyLoginStreakCard
 import com.example.ui.components.DeleteAccountConfirmDialog
 import com.example.ui.components.FullScreenPhotoDialog
@@ -1456,15 +1455,6 @@ fun ProfileScreen(
                                         checked = nightModeEnabled,
                                         onCheckedChange = { nightModeEnabled = it }
                                     )
-
-                                    if (realStaffCapabilities.isAdmin) {
-                                        AdminSandboxControlCard(
-                                            realProfile = realUserProfile,
-                                            previewMode = adminPreviewMode,
-                                            onSelectPreviewMode = onSelectAdminPreviewMode,
-                                            onSaveCustomIdentity = onSaveAdminCustomIdentity
-                                        )
-                                    }
 
                                     Button(
                                         onClick = {

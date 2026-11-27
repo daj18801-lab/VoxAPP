@@ -84,6 +84,9 @@ class LiveKitRoomManager(
     @Volatile
     private var remoteAudioMuted: Boolean = false
 
+    @Volatile
+    private var audioPausedForSpeech: Boolean = false
+
     suspend fun connectToRoom(
         roomName: String,
         participantIdentity: String,
@@ -162,6 +165,7 @@ class LiveKitRoomManager(
     }
 
     private fun applyCurrentAudioOutputRoute() {
+        if (audioPausedForSpeech) return
         if (useLoudspeakerRoute) {
             enforceLoudspeakerRoute()
         } else {
@@ -253,6 +257,28 @@ class LiveKitRoomManager(
         }.onFailure {
             Log.w(TAG, "AudioManager loudspeaker release failed: ${it.message}")
         }
+    }
+
+    /**
+     * Temporarily releases WebRTC communication audio mode so Android's SpeechRecognizer
+     * has clean, uncontested access to the microphone for PTT Voice-to-Text.
+     */
+    fun pauseAudioForSpeechRecognition() {
+        audioPausedForSpeech = true
+        scope.launch { runCatching { room.localParticipant.setMicrophoneEnabled(false) } }
+        runCatching { audioHandler.stop() }
+        releaseLoudspeakerRoute()
+    }
+
+    /**
+     * Restores LiveKit audio routing after PTT Voice-to-Text finishes when still connected.
+     */
+    fun resumeAudioAfterSpeechRecognition() {
+        audioPausedForSpeech = false
+        if (!_isConnected.value) return
+        runCatching { audioHandler.start() }
+        applyCurrentAudioOutputRoute()
+        applyRemoteAudioMuteState()
     }
 
     private fun startObservingRoomEvents() {
