@@ -1,6 +1,8 @@
 package com.example.media
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.app.KeyguardManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -9,6 +11,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -16,6 +19,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -68,13 +72,22 @@ class PrivateCallForegroundService : Service() {
     private var currentPeerName: String = "Private Chat"
     private var overlayDismissedByUserForBackgroundCycle: Boolean = false
     private var screenOffReceiverRegistered: Boolean = false
+    private var lastLockScreenLaunchMs: Long = 0L
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != Intent.ACTION_SCREEN_OFF) return
+            val action = intent?.action ?: return
+            if (action != Intent.ACTION_SCREEN_OFF && action != Intent.ACTION_SCREEN_ON) return
             if (!isPttMode) return
             if (LivePttSessionManager.activeThreadId.value.isNullOrBlank()) return
             if (!DirectMessageNotificationPrefs.isLockScreenPttEnabled(this@PrivateCallForegroundService)) return
+            if (action == Intent.ACTION_SCREEN_ON) {
+                val km = getSystemService(KEYGUARD_SERVICE) as? KeyguardManager
+                if (km != null && !km.isKeyguardLocked) return
+            }
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastLockScreenLaunchMs < 1_500L) return
+            lastLockScreenLaunchMs = now
             launchLockScreenPttActivity()
         }
     }
@@ -181,22 +194,32 @@ class PrivateCallForegroundService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val lockScreenEnabled = DirectMessageNotificationPrefs.isLockScreenPttEnabled(this)
+            val isVttStandby = !LivePttSessionManager.activeThreadHasLiveListener.value ||
+                LivePttSessionManager.activeThreadSenderSelfVttOn.value ||
+                LivePttSessionManager.isPttVoiceToTextEnabled.value ||
+                LivePttSessionManager.isPttSilentMode.value
             notificationBuilder
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentTitle(
-                    if (pttTransmitting) "LIVE PTT Transmitting · $currentPeerName"
-                    else "Live Push-to-Talk Ready · $currentPeerName"
+                    when {
+                        pttTransmitting && isVttStandby -> "PTT Voice-to-Text Listening · $currentPeerName"
+                        pttTransmitting -> "LIVE PTT Transmitting · $currentPeerName"
+                        isVttStandby -> "Lock-Screen PTT (Voice-to-Text) · $currentPeerName"
+                        else -> "Live Push-to-Talk Ready · $currentPeerName"
+                    }
                 )
                 .setContentText(
                     when {
+                        pttTransmitting && isVttStandby -> "Transcribing Voice-to-Text — no live audio sent"
                         pttTransmitting -> "Streaming live audio — release button or tap Mute"
+                        isVttStandby && lockScreenEnabled -> "Peer PTT off or VTT mode — tap Lock-Screen PTT for Voice-to-Text"
                         lockScreenEnabled -> "Tap Lock-Screen PTT or hold floating button to stream live audio"
                         else -> "Hold floating button or tap Talk Live to stream live audio"
                     }
                 )
                 .addAction(
                     0,
-                    if (pttTransmitting) "Mute PTT" else "Talk Live",
+                    if (pttTransmitting) "Stop PTT" else if (isVttStandby) "Voice-to-Text" else "Talk Live",
                     togglePendingIntent
                 )
             if (lockScreenEnabled) {
@@ -208,7 +231,7 @@ class PrivateCallForegroundService : Service() {
             }
             notificationBuilder.addAction(
                 0,
-                "Stop PTT",
+                "End PTT",
                 endPendingIntent
             )
         } else {
@@ -223,7 +246,13 @@ class PrivateCallForegroundService : Service() {
         }
 
         try {
-            val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val hasMicPermission = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasMicPermission) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             } else {
                 0
@@ -259,10 +288,14 @@ class PrivateCallForegroundService : Service() {
     private fun registerScreenOffReceiver() {
         if (screenOffReceiverRegistered) return
         try {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
             ContextCompat.registerReceiver(
                 this,
                 screenOffReceiver,
-                IntentFilter(Intent.ACTION_SCREEN_OFF),
+                filter,
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
             screenOffReceiverRegistered = true
@@ -280,7 +313,9 @@ class PrivateCallForegroundService : Service() {
     private fun launchLockScreenPttActivity() {
         try {
             val intent = Intent(this, LockScreenPttActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             }
             startActivity(intent)
         } catch (err: Exception) {

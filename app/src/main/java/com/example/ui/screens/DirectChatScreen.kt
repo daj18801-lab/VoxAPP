@@ -8,7 +8,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
+import android.speech.RecognizerIntent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -142,6 +144,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -303,6 +306,8 @@ fun DirectChatScreen(
     val isGlobalPttVttEnabled by LivePttSessionManager.isPttVoiceToTextEnabled.collectAsStateWithLifecycle()
     val livePttTranscript by LivePttSessionManager.livePttTranscript.collectAsStateWithLifecycle()
     val lastPttTranscriptFeedback by LivePttSessionManager.lastPttTranscriptFeedback.collectAsStateWithLifecycle()
+    val pttVttTargetThreadId by LivePttSessionManager.vttTargetThreadId.collectAsStateWithLifecycle()
+    val isVttFinalizing by LivePttSessionManager.isVttFinalizing.collectAsStateWithLifecycle()
     val remoteCallSpeakerName by viewModel.remoteCallSpeakerName.collectAsStateWithLifecycle()
 
     LaunchedEffect(lastPttTranscriptFeedback) {
@@ -317,7 +322,10 @@ fun DirectChatScreen(
     val myMaxPttSeconds = userProfile.pttMaxDurationSeconds(myStaffTier)
     val isThisThreadLivePttConnected = pttActiveThreadId == viewModel.threadId && pttIsConnected
     val isThisThreadLivePttConnecting = pttActiveThreadId == viewModel.threadId && pttIsConnecting
-    val isThisThreadTransmitting = pttActiveThreadId == viewModel.threadId && pttIsTransmitting
+    val isThisThreadTransmitting = pttIsTransmitting &&
+        (pttActiveThreadId == viewModel.threadId || pttVttTargetThreadId == viewModel.threadId)
+    val isThisThreadVttFinalizing = isVttFinalizing &&
+        (pttVttTargetThreadId == viewModel.threadId || pttActiveThreadId == viewModel.threadId)
     val thisThreadRemoteSpeaker = if (pttActiveThreadId == viewModel.threadId) pttRemoteSpeaker else null
 
     var canDrawFloatingOverlay by remember {
@@ -440,6 +448,34 @@ fun DirectChatScreen(
         }
     }
 
+    val speechFallbackLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+                .orEmpty()
+            if (spoken.isNotBlank()) {
+                val activeThread = (threadState as? UiState.Success)?.data
+                viewModel.sendMessage(
+                    senderName = myEffectiveName,
+                    senderTier = myStaffTier,
+                    text = "🎙️ $spoken".take(490),
+                    hideSenderName = activeThread != null &&
+                        activeThread.isGroup &&
+                        !activeThread.anonymousModeDisabled &&
+                        hideMyNameInGroup,
+                    displayedSenderTier = myDisplayedStaffTier
+                )
+                scope.launch {
+                    snackbarHostState.showTopMessage("Voice-to-Text sent: \"$spoken\"")
+                }
+            }
+        }
+    }
+
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -448,6 +484,28 @@ fun DirectChatScreen(
         if (granted) {
             when (action) {
                 "VOICE_NOTE" -> startVoiceNoteRecording()
+                "PTT_VTT" -> {
+                    scope.launch {
+                        snackbarHostState.showTopMessage("Microphone ready! Tap or hold the PTT button to send Voice-to-Text.")
+                    }
+                }
+                "LOCK_SCREEN_PTT" -> {
+                    val activeThread = (threadState as? UiState.Success)?.data
+                    if (activeThread != null) {
+                        LivePttSessionManager.armLockScreenPttStandby(
+                            context = context,
+                            threadId = activeThread.id,
+                            peerName = activeThread.displayTitle(viewModel.currentUserId),
+                            myUserId = viewModel.currentUserId,
+                            myDisplayName = myEffectiveName,
+                            hasOtherLiveListener = activeThread.hasAnyLiveAudioListenerOtherThan(viewModel.currentUserId),
+                            senderSelfVttOn = activeThread.isPttVoiceToTextEnabledFor(viewModel.currentUserId)
+                        )
+                    }
+                    scope.launch {
+                        snackbarHostState.showTopMessage("Lock-Screen PTT armed! Lock your screen to use PTT controls.")
+                    }
+                }
                 "PTT" -> {
                     val activeThread = (threadState as? UiState.Success)?.data
                     if (activeThread != null && activeThread.isMutualPttActive(viewModel.currentUserId)) {
@@ -458,9 +516,19 @@ fun DirectChatScreen(
                             myUserId = viewModel.currentUserId,
                             myDisplayName = myEffectiveName
                         )
+                    } else if (activeThread != null && isLockScreenPttEnabled) {
+                        LivePttSessionManager.armLockScreenPttStandby(
+                            context = context,
+                            threadId = activeThread.id,
+                            peerName = activeThread.displayTitle(viewModel.currentUserId),
+                            myUserId = viewModel.currentUserId,
+                            myDisplayName = myEffectiveName,
+                            hasOtherLiveListener = activeThread.hasAnyLiveAudioListenerOtherThan(viewModel.currentUserId),
+                            senderSelfVttOn = activeThread.isPttVoiceToTextEnabledFor(viewModel.currentUserId)
+                        )
                     }
                     scope.launch {
-                        snackbarHostState.showTopMessage("Microphone ready! Hold Push to Talk to stream live audio.")
+                        snackbarHostState.showTopMessage("Microphone ready! Tap or hold Push to Talk to start.")
                     }
                 }
                 else -> viewModel.toggleCallMic(myEffectiveName)
@@ -470,7 +538,7 @@ fun DirectChatScreen(
                 snackbarHostState.showTopMessage(
                     when (action) {
                         "VOICE_NOTE" -> "Microphone permission is needed to send voice notes."
-                        "PTT" -> "Microphone permission is needed for Push to Talk."
+                        "PTT", "PTT_VTT", "LOCK_SCREEN_PTT" -> "Microphone permission is needed for Push to Talk."
                         else -> "Microphone permission is needed for private voice calls."
                     }
                 )
@@ -891,7 +959,11 @@ fun DirectChatScreen(
         isMutualPttActive,
         isMyLiveAudioListenOn,
         canUseListenOnlyLiveAudio,
+        canMyAccountUsePtt,
         isVttOnlyPttMode,
+        isLockScreenPttEnabled,
+        hasOtherLiveListener,
+        isMyPttVttOn,
         isInCall,
         thread?.id,
         otherName,
@@ -919,6 +991,16 @@ fun DirectChatScreen(
                 peerName = otherName,
                 myUserId = viewModel.currentUserId,
                 myDisplayName = myEffectiveName
+            )
+        } else if (isLockScreenPttEnabled && canMyAccountUsePtt && !isInCall) {
+            LivePttSessionManager.armLockScreenPttStandby(
+                context = context,
+                threadId = currentThread.id,
+                peerName = otherName,
+                myUserId = viewModel.currentUserId,
+                myDisplayName = myEffectiveName,
+                hasOtherLiveListener = hasOtherLiveListener,
+                senderSelfVttOn = isMyPttVttOn
             )
         } else if (LivePttSessionManager.activeThreadId.value == currentThread.id &&
             LivePttSessionManager.isListenOnlyMode.value &&
@@ -1335,10 +1417,37 @@ fun DirectChatScreen(
                                             onClick = {
                                                 val next = !isLockScreenPttEnabled
                                                 LivePttSessionManager.setLockScreenPttEnabled(context, next)
+                                                if (next && thread != null) {
+                                                    val micGranted = ContextCompat.checkSelfPermission(
+                                                        context,
+                                                        Manifest.permission.RECORD_AUDIO
+                                                    ) == PackageManager.PERMISSION_GRANTED
+                                                    if (!micGranted) {
+                                                        pendingMicAction = "LOCK_SCREEN_PTT"
+                                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                    } else {
+                                                        LivePttSessionManager.armLockScreenPttStandby(
+                                                            context = context,
+                                                            threadId = thread.id,
+                                                            peerName = otherName,
+                                                            myUserId = viewModel.currentUserId,
+                                                            myDisplayName = myEffectiveName,
+                                                            hasOtherLiveListener = hasOtherLiveListener,
+                                                            senderSelfVttOn = isMyPttVttOn
+                                                        )
+                                                    }
+                                                }
                                                 scope.launch {
                                                     snackbarHostState.showTopMessage(
-                                                        if (next) "Lock-Screen PTT enabled — PTT controls can appear on your lock screen."
-                                                        else "Lock-Screen PTT turned off — PTT will not pop up on your lock screen."
+                                                        if (next) {
+                                                            if (!hasOtherLiveListener) {
+                                                                "Lock-Screen PTT ON — will show on your lock screen (Voice-to-Text only while $otherName has PTT off)."
+                                                            } else {
+                                                                "Lock-Screen PTT enabled — PTT controls will appear on your lock screen."
+                                                            }
+                                                        } else {
+                                                            "Lock-Screen PTT turned off — PTT will not pop up on your lock screen."
+                                                        }
                                                     )
                                                 }
                                             }
@@ -1353,6 +1462,17 @@ fun DirectChatScreen(
                                                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                                                 testTag = "dm_open_lock_screen_ptt_button",
                                                 onClick = {
+                                                    if (thread != null) {
+                                                        LivePttSessionManager.armLockScreenPttStandby(
+                                                            context = context,
+                                                            threadId = thread.id,
+                                                            peerName = otherName,
+                                                            myUserId = viewModel.currentUserId,
+                                                            myDisplayName = myEffectiveName,
+                                                            hasOtherLiveListener = hasOtherLiveListener,
+                                                            senderSelfVttOn = isMyPttVttOn
+                                                        )
+                                                    }
                                                     val lockIntent = Intent(
                                                         context,
                                                         com.example.media.LockScreenPttActivity::class.java
@@ -1391,7 +1511,18 @@ fun DirectChatScreen(
                                             contentColor = if (isMyPttVttOn) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                                             testTag = "dm_toggle_ptt_vtt_button",
                                             onClick = {
-                                                viewModel.setPttVoiceToText(!isMyPttVttOn)
+                                                val next = !isMyPttVttOn
+                                                if (next) {
+                                                    val micGranted = ContextCompat.checkSelfPermission(
+                                                        context,
+                                                        Manifest.permission.RECORD_AUDIO
+                                                    ) == PackageManager.PERMISSION_GRANTED
+                                                    if (!micGranted) {
+                                                        pendingMicAction = "PTT_VTT"
+                                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                    }
+                                                }
+                                                viewModel.setPttVoiceToText(next)
                                             }
                                         )
 
@@ -2680,11 +2811,20 @@ fun DirectChatScreen(
                                 !isVttOnlyPttMode &&
                                 (isThisThreadLivePttConnected || isThisThreadLivePttConnecting)
                             val showBottomBigPttButton = !hasActiveFloatingOrDockedPtt
-                            val showLiveVttTranscript = isThisThreadTransmitting &&
-                                (livePttTranscript.isNotBlank() || isVttOnlyPttMode)
+                            val showLiveVttTranscript = (isThisThreadTransmitting || isThisThreadVttFinalizing) &&
+                                (livePttTranscript.isNotBlank() || isVttOnlyPttMode || isThisThreadVttFinalizing)
                             val showBottomPttSection =
                                 blockedByGroupAdminTalking || showBottomBigPttButton || showLiveVttTranscript || isVttOnlyPttMode
                             if (showBottomPttSection) {
+                                val latestOtherName by rememberUpdatedState(otherName)
+                                val latestMyEffectiveName by rememberUpdatedState(myEffectiveName)
+                                val latestIsInCall by rememberUpdatedState(isInCall)
+                                val latestBlockedByGroupAdmin by rememberUpdatedState(blockedByGroupAdminTalking)
+                                val latestIsVttOnly by rememberUpdatedState(isVttOnlyPttMode)
+                                val latestIsThisThreadTx by rememberUpdatedState(isThisThreadTransmitting)
+                                val latestSubPttDisabled by rememberUpdatedState(subPttDisabled)
+                                val latestSubMicDisabled by rememberUpdatedState(subMicDisabled)
+                                val latestDisableMic by rememberUpdatedState(!myStaffTier.isAdmin() && userProfile.disableMic)
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -2712,10 +2852,13 @@ fun DirectChatScreen(
                                                     modifier = Modifier.size(16.dp)
                                                 )
                                                 Text(
-                                                    text = if (livePttTranscript.isNotBlank()) {
-                                                        "Voice-to-Text: \"$livePttTranscript\""
-                                                    } else {
-                                                        "Listening for Voice-to-Text… speak clearly, release to send"
+                                                    text = when {
+                                                        livePttTranscript.isNotBlank() ->
+                                                            "Voice-to-Text: \"$livePttTranscript\""
+                                                        isThisThreadVttFinalizing ->
+                                                            "Sending Voice-to-Text message…"
+                                                        else ->
+                                                            "Listening for Voice-to-Text… speak clearly, then tap or release to send"
                                                     },
                                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                                     color = SnapBlue,
@@ -2742,13 +2885,14 @@ fun DirectChatScreen(
                                             )
                                         }
                                     }
-                                    // Big Hold-to-Talk button is ONLY shown when PTT is ON and Floating PTT is disabled
+                                    // Big Hold-to-Talk button is shown when PTT or PTT Voice-to-Text is ON and Floating PTT is not active
                                     if (showBottomBigPttButton) {
                                         Surface(
                                             shape = RoundedCornerShape(14.dp),
                                             color = when {
                                                 blockedByGroupAdminTalking -> MaterialTheme.colorScheme.surfaceVariant
                                                 isThisThreadTransmitting -> LiveCoral
+                                                isThisThreadVttFinalizing -> SnapBlue
                                                 isVttOnlyPttMode -> SnapBlue
                                                 !thisThreadRemoteSpeaker.isNullOrBlank() -> SnapBlue
                                                 isGroupAdmin -> ModAmber
@@ -2757,34 +2901,27 @@ fun DirectChatScreen(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .height(52.dp)
-                                                .pointerInput(
-                                                    thread.id,
-                                                    otherName,
-                                                    myEffectiveName,
-                                                    isInCall,
-                                                    blockedByGroupAdminTalking,
-                                                    isVttOnlyPttMode
-                                                ) {
+                                                .pointerInput(thread.id) {
                                                     awaitEachGesture {
                                                         awaitFirstDown(requireUnconsumed = false)
-                                                        if (blockedByGroupAdminTalking) {
+                                                        if (latestBlockedByGroupAdmin) {
                                                             scope.launch {
                                                                 snackbarHostState.showTopMessage("Group DM Admin has priority mic right now.")
                                                             }
                                                             waitForUpOrCancellation()
                                                             return@awaitEachGesture
                                                         }
-                                                        if (subPttDisabled || subMicDisabled) {
+                                                        if (latestSubPttDisabled || latestSubMicDisabled) {
                                                             scope.launch {
                                                                 snackbarHostState.showTopMessage(
-                                                                    if (subPttDisabled) "Push-to-Talk has been disabled by your company owner."
+                                                                    if (latestSubPttDisabled) "Push-to-Talk has been disabled by your company owner."
                                                                     else "Your microphone has been disabled by your company owner."
                                                                 )
                                                             }
                                                             waitForUpOrCancellation()
                                                             return@awaitEachGesture
                                                         }
-                                                        if (!myStaffTier.isAdmin() && userProfile.disableMic) {
+                                                        if (latestDisableMic) {
                                                             scope.launch {
                                                                 snackbarHostState.showTopMessage("Microphone access is disabled on your account.")
                                                             }
@@ -2796,34 +2933,92 @@ fun DirectChatScreen(
                                                             Manifest.permission.RECORD_AUDIO
                                                         ) == PackageManager.PERMISSION_GRANTED
                                                         if (!granted) {
-                                                            pendingMicAction = "PTT"
+                                                            pendingMicAction = if (latestIsVttOnly) "PTT_VTT" else "PTT"
                                                             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                                             waitForUpOrCancellation()
                                                             return@awaitEachGesture
                                                         }
-                                                        if (isInCall && !isVttOnlyPttMode) {
-                                                            viewModel.setPttLiveMic(myEffectiveName, true)
+                                                        val peerNameNow = latestOtherName
+                                                        val myNameNow = latestMyEffectiveName
+                                                        if (latestIsVttOnly) {
+                                                            // Voice-to-Text ONLY mode: never transmit audio; support both
+                                                            // quick tap-to-speak and press-and-hold (hold >= 450ms & release).
+                                                            if (!LivePttSessionManager.isInlineSpeechRecognitionAvailable(context)) {
+                                                                waitForUpOrCancellation()
+                                                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                                                    putExtra(
+                                                                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                                                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                                                    )
+                                                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak Voice-to-Text message")
+                                                                }
+                                                                runCatching { speechFallbackLauncher.launch(intent) }.onFailure {
+                                                                    scope.launch {
+                                                                        snackbarHostState.showTopMessage("Speech recognition is not available on this device.")
+                                                                    }
+                                                                }
+                                                                return@awaitEachGesture
+                                                            }
+                                                            if (latestIsThisThreadTx) {
+                                                                // Second tap stops tap-listening and sends immediately
+                                                                LivePttSessionManager.setTransmitting(
+                                                                    context = context,
+                                                                    transmitting = false,
+                                                                    threadId = thread.id,
+                                                                    peerName = peerNameNow,
+                                                                    myUserId = viewModel.currentUserId,
+                                                                    myDisplayName = myNameNow,
+                                                                    forceVoiceToTextOnly = true
+                                                                )
+                                                                waitForUpOrCancellation()
+                                                            } else {
+                                                                val downAtMs = SystemClock.elapsedRealtime()
+                                                                LivePttSessionManager.setTransmitting(
+                                                                    context = context,
+                                                                    transmitting = true,
+                                                                    threadId = thread.id,
+                                                                    peerName = peerNameNow,
+                                                                    myUserId = viewModel.currentUserId,
+                                                                    myDisplayName = myNameNow,
+                                                                    forceVoiceToTextOnly = true
+                                                                )
+                                                                waitForUpOrCancellation()
+                                                                val heldMs = SystemClock.elapsedRealtime() - downAtMs
+                                                                if (heldMs >= 450L) {
+                                                                    LivePttSessionManager.setTransmitting(
+                                                                        context = context,
+                                                                        transmitting = false,
+                                                                        threadId = thread.id,
+                                                                        peerName = peerNameNow,
+                                                                        myUserId = viewModel.currentUserId,
+                                                                        myDisplayName = myNameNow,
+                                                                        forceVoiceToTextOnly = true
+                                                                    )
+                                                                }
+                                                            }
+                                                        } else if (latestIsInCall) {
+                                                            viewModel.setPttLiveMic(myNameNow, true)
                                                             waitForUpOrCancellation()
-                                                            viewModel.setPttLiveMic(myEffectiveName, false)
+                                                            viewModel.setPttLiveMic(myNameNow, false)
                                                         } else {
                                                             LivePttSessionManager.setTransmitting(
                                                                 context = context,
                                                                 transmitting = true,
                                                                 threadId = thread.id,
-                                                                peerName = otherName,
+                                                                peerName = peerNameNow,
                                                                 myUserId = viewModel.currentUserId,
-                                                                myDisplayName = myEffectiveName,
-                                                                forceVoiceToTextOnly = isVttOnlyPttMode
+                                                                myDisplayName = myNameNow,
+                                                                forceVoiceToTextOnly = false
                                                             )
                                                             waitForUpOrCancellation()
                                                             LivePttSessionManager.setTransmitting(
                                                                 context = context,
                                                                 transmitting = false,
                                                                 threadId = thread.id,
-                                                                peerName = otherName,
+                                                                peerName = peerNameNow,
                                                                 myUserId = viewModel.currentUserId,
-                                                                myDisplayName = myEffectiveName,
-                                                                forceVoiceToTextOnly = isVttOnlyPttMode
+                                                                myDisplayName = myNameNow,
+                                                                forceVoiceToTextOnly = false
                                                             )
                                                         }
                                                     }
@@ -2839,7 +3034,7 @@ fun DirectChatScreen(
                                             ) {
                                                 Icon(
                                                     imageVector = if (isVttOnlyPttMode) Icons.Rounded.Subtitles else Icons.Rounded.RecordVoiceOver,
-                                                    contentDescription = if (isVttOnlyPttMode) "Hold for Voice to Text" else "Live Push to Talk",
+                                                    contentDescription = if (isVttOnlyPttMode) "Tap or hold for Voice to Text" else "Live Push to Talk",
                                                     tint = if (blockedByGroupAdminTalking) MaterialTheme.colorScheme.onSurfaceVariant else Color.White,
                                                     modifier = Modifier.size(20.dp)
                                                 )
@@ -2848,16 +3043,18 @@ fun DirectChatScreen(
                                                     text = when {
                                                         blockedByGroupAdminTalking ->
                                                             "ADMIN SPEAKING · MIC YIELDED"
+                                                        isThisThreadVttFinalizing ->
+                                                            "SENDING VOICE-TO-TEXT…"
                                                         isThisThreadTransmitting && isVttOnlyPttMode ->
-                                                            "VOICE-TO-TEXT (${pttElapsedSec}s) · NO AUDIO SENT"
+                                                            "LISTENING (${pttElapsedSec}s) · TAP OR RELEASE TO SEND"
                                                         isThisThreadTransmitting && isGroupAdmin ->
                                                             "ADMIN PRIORITY MIC LIVE (${pttElapsedSec}s) · TALKING OVER GROUP"
                                                         isThisThreadTransmitting ->
                                                             "LIVE (${pttElapsedSec}s/${pttMaxSec}s) · $otherName…"
                                                         isMyPttVttOn ->
-                                                            "HOLD TO TALK · VOICE-TO-TEXT ONLY"
+                                                            "TAP OR HOLD · VOICE-TO-TEXT ONLY"
                                                         !hasOtherLiveListener ->
-                                                            "HOLD TO TALK · VOICE-TO-TEXT ($otherName PTT OFF)"
+                                                            "TAP OR HOLD · VOICE-TO-TEXT ($otherName PTT OFF)"
                                                         isInCall && isMicActive ->
                                                             "LIVE AUDIO STREAMING to $otherName…"
                                                         isGroupAdmin ->

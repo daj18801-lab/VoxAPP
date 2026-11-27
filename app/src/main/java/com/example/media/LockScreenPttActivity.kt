@@ -637,6 +637,9 @@ private fun LockScreenPttContent(
     val isVolumeDownPttEnabled by LivePttSessionManager.isVolumeDownPttEnabled.collectAsStateWithLifecycle()
     val threadRequiresVoiceToText by LivePttSessionManager.threadRequiresVoiceToText.collectAsStateWithLifecycle()
     val threadDndActiveForMe by LivePttSessionManager.threadDndActiveForMe.collectAsStateWithLifecycle()
+    val activeThreadHasLiveListener by LivePttSessionManager.activeThreadHasLiveListener.collectAsStateWithLifecycle()
+    val activeThreadSenderSelfVttOn by LivePttSessionManager.activeThreadSenderSelfVttOn.collectAsStateWithLifecycle()
+    val isVttFinalizing by LivePttSessionManager.isVttFinalizing.collectAsStateWithLifecycle()
     val livePttTranscript by LivePttSessionManager.livePttTranscript.collectAsStateWithLifecycle()
     val lastPttTranscriptFeedback by LivePttSessionManager.lastPttTranscriptFeedback.collectAsStateWithLifecycle()
     val lastIncomingBeep by LivePttSessionManager.lastIncomingBeep.collectAsStateWithLifecycle()
@@ -700,18 +703,23 @@ private fun LockScreenPttContent(
         }
     }
 
-    LaunchedEffect(activeThreadId, isPreviewLaunch, isDmReplySelected) {
-        if (activeThreadId.isNullOrBlank() && !isPreviewLaunch && !isDmReplySelected) {
+    LaunchedEffect(activeThreadId, effectivePttThreadId, isPreviewLaunch, isDmReplySelected) {
+        if (effectivePttThreadId.isNullOrBlank() && !isPreviewLaunch && !isDmReplySelected) {
             onClose()
         }
     }
 
     val voiceReplyModeActive = showRecentDm && isDmReplySelected && recentDm != null && recentDm?.voxOfficial != true
-    val isLocalPttVttOnlyMode = !voiceReplyModeActive && (isPttVoiceToTextEnabled || isPttSilentMode)
+    val isLocalPttVttOnlyMode = !voiceReplyModeActive && (
+        isPttVoiceToTextEnabled ||
+            isPttSilentMode ||
+            activeThreadSenderSelfVttOn ||
+            !activeThreadHasLiveListener
+        )
     val standbyColor = when {
         voiceReplyModeActive -> Color(0xFF0EA5E9)
         isPttSilentMode -> Color(0xFFF97316)
-        isPttVoiceToTextEnabled -> Color(0xFF10B981)
+        isLocalPttVttOnlyMode -> Color(0xFF0EA5E9)
         else -> parseHexOrFallback(activeTheme.standbyColorHex, Color(0xFF10B981))
     }
     val liveColor = when {
@@ -722,7 +730,7 @@ private fun LockScreenPttContent(
     val ringColor = when {
         voiceReplyModeActive -> Color(0xFF38BDF8)
         isPttSilentMode -> Color(0xFFFB923C)
-        isPttVoiceToTextEnabled -> Color(0xFF34D399)
+        isLocalPttVttOnlyMode -> Color(0xFF38BDF8)
         else -> parseHexOrFallback(activeTheme.ringGlowHex, Color(0xFF34D399))
     }
     val isActiveAction = if (voiceReplyModeActive) isDictating else isTransmitting
@@ -901,17 +909,20 @@ private fun LockScreenPttContent(
             voiceReplyModeActive && isSendingReply -> "SENDING VOICE-TO-TEXT REPLY…"
             voiceReplyModeActive && isDictating -> "LISTENING • Release or tap PTT to send"
             voiceReplyModeActive -> "VOICE-TO-TEXT REPLY • Press or hold PTT"
+            isLocalPttVttOnlyMode && isVttFinalizing -> "SENDING VOICE-TO-TEXT…"
             isTransmitting && isPttSilentMode -> "PTT SILENT • Voice-to-Text ${elapsedSec}s"
-            isTransmitting && isPttVoiceToTextEnabled -> "VOICE-TO-TEXT ONLY • Listening ${elapsedSec}s"
+            isTransmitting && isLocalPttVttOnlyMode -> "VOICE-TO-TEXT ONLY • Listening ${elapsedSec}s (No Audio)"
             isTransmitting && isVttEffectivelyOn -> "ON AIR + VOICE-TO-TEXT • ${elapsedSec}s / ${maxSec}s"
             isTransmitting -> "ON AIR • ${elapsedSec}s / ${maxSec}s"
             isPttSilentMode -> "PTT SILENT • No audio, PTT → Text"
-            isPttVoiceToTextEnabled -> "VOICE-TO-TEXT ONLY • No live audio"
+            !activeThreadHasLiveListener && !effectivePttThreadId.isNullOrBlank() ->
+                "${effectivePeerName.ifBlank { "Peer" }} PTT OFF • Voice-to-Text Only (No Audio)"
+            isPttVoiceToTextEnabled || activeThreadSenderSelfVttOn -> "VOICE-TO-TEXT ONLY • No live audio"
             isDndEffectivelyOn -> "DO NOT DISTURB • Incoming PTT → Text"
             !remoteSpeakingName.isNullOrBlank() -> "$remoteSpeakingName is talking…"
             isConnected && isVttEffectivelyOn -> "LIVE + VOICE-TO-TEXT • ${if (isLoudspeakerEnabled) "Loudspeaker" else "Phone Speaker"}"
             isConnected -> "LIVE STANDBY • ${if (isLoudspeakerEnabled) "Loudspeaker" else "Phone Speaker"}"
-            !effectivePttThreadId.isNullOrBlank() -> "Connecting walkie channel…"
+            !effectivePttThreadId.isNullOrBlank() -> "LOCK-SCREEN PTT READY"
             else -> "Select Recent DM above to reply by voice"
         }
 
@@ -1106,6 +1117,7 @@ private fun LockScreenPttContent(
                             voiceReplyModeActive && isSendingReply -> "SENDING…"
                             voiceReplyModeActive && isDictating -> "LISTENING"
                             voiceReplyModeActive -> "PRESS TO REPLY"
+                            isLocalPttVttOnlyMode && isVttFinalizing -> "SENDING…"
                             isLocalPttVttOnlyMode && isTransmitting -> "LISTENING"
                             isLocalPttVttOnlyMode -> "VOICE TO TEXT"
                             isTransmitting -> "TALKING"

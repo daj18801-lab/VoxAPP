@@ -28,6 +28,7 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import java.lang.ref.WeakReference
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -202,6 +203,22 @@ object LivePttSessionManager {
     private val _isVoiceToTextOnlyTransmitting = MutableStateFlow(false)
     val isVoiceToTextOnlyTransmitting: StateFlow<Boolean> = _isVoiceToTextOnlyTransmitting.asStateFlow()
 
+    /** Target thread ID currently capturing Voice-to-Text (even when another thread was previously active). */
+    private val _vttTargetThreadId = MutableStateFlow<String?>(null)
+    val vttTargetThreadId: StateFlow<String?> = _vttTargetThreadId.asStateFlow()
+
+    /** True while SpeechRecognizer is finalizing/sending the captured Voice-to-Text message after release. */
+    private val _isVttFinalizing = MutableStateFlow(false)
+    val isVttFinalizing: StateFlow<Boolean> = _isVttFinalizing.asStateFlow()
+
+    /** True when at least one other participant in the active DM thread has Live PTT or Listen-Only enabled. */
+    private val _activeThreadHasLiveListener = MutableStateFlow(false)
+    val activeThreadHasLiveListener: StateFlow<Boolean> = _activeThreadHasLiveListener.asStateFlow()
+
+    /** True when the current user enabled per-DM PTT Voice-to-Text in the active thread. */
+    private val _activeThreadSenderSelfVttOn = MutableStateFlow(false)
+    val activeThreadSenderSelfVttOn: StateFlow<Boolean> = _activeThreadSenderSelfVttOn.asStateFlow()
+
     /** Live partial transcript while speaking with PTT Voice-to-Text enabled. */
     private val _livePttTranscript = MutableStateFlow("")
     val livePttTranscript: StateFlow<String> = _livePttTranscript.asStateFlow()
@@ -214,6 +231,10 @@ object LivePttSessionManager {
     private var pttSpeechRecognizer: SpeechRecognizer? = null
     @Volatile
     private var pttSpeechCapturing = false
+    @Volatile
+    private var pttSpeechIsVttOnlySession = false
+    @Volatile
+    private var pttSpeechRetriedOnDevice = false
     @Volatile
     private var pttSpeechSessionToken: Long = 0L
     @Volatile
@@ -298,6 +319,8 @@ object LivePttSessionManager {
         if (activeTid.isNullOrBlank() || thread.id == activeTid) {
             _threadRequiresVoiceToText.value = policy.anyNeedsVtt
             _threadDndActiveForMe.value = policy.myDndActive
+            _activeThreadHasLiveListener.value = policy.hasAnyLiveListener
+            _activeThreadSenderSelfVttOn.value = policy.senderSelfVttOn
             allOtherRecipientsInDnd = policy.allOthersInDnd
             recomputeRemoteAudioMute()
         }
@@ -342,6 +365,9 @@ object LivePttSessionManager {
         val appContext = context.applicationContext
         _isLockScreenPttEnabled.value = enabled
         DirectMessageNotificationPrefs.setLockScreenPttEnabled(appContext, enabled)
+        if (!enabled && !_isConnected.value && !_isConnecting.value && PrivateCallForegroundService.isPttMode) {
+            PrivateCallForegroundService.stop(appContext)
+        }
         triggerPttHaptic(appContext)
     }
 
@@ -428,9 +454,36 @@ object LivePttSessionManager {
         }
     }
 
+    fun isInlineSpeechRecognitionAvailable(context: Context): Boolean {
+        val ctx = context.applicationContext
+        val defaultAvailable = SpeechRecognizer.isRecognitionAvailable(ctx)
+        val onDeviceAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx) }.getOrDefault(false)
+        return defaultAvailable || onDeviceAvailable
+    }
+
+    private fun buildPttSpeechIntent(ctx: Context): Intent =
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500L)
+        }
+
     fun cancelPttSpeechCapture() {
         val cancelToken = ++pttSpeechSessionToken
         pttSpeechCapturing = false
+        pttSpeechIsVttOnlySession = false
+        pttSpeechRetriedOnDevice = false
+        _isVttFinalizing.value = false
+        _vttTargetThreadId.value = null
         mainHandler.post {
             if (pttSpeechSessionToken != cancelToken) return@post
             pttSpeechStartRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -444,10 +497,15 @@ object LivePttSessionManager {
         }
     }
 
-    private fun startPttSpeechCapture(appContext: Context, threadId: String) {
-        val ctx = appContext.applicationContext
+    private fun startPttSpeechCapture(context: Context, threadId: String, isVttOnly: Boolean) {
+        val appCtx = context.applicationContext
+        val callerContextRef = WeakReference(context)
         val sessionToken = ++pttSpeechSessionToken
         pttSpeechCapturing = true
+        pttSpeechIsVttOnlySession = isVttOnly
+        pttSpeechRetriedOnDevice = false
+        _isVttFinalizing.value = false
+        _vttTargetThreadId.value = threadId
         val needAudioModePause = liveKitManager?.isConnected?.value == true
         if (needAudioModePause) {
             pausedLiveKitForSpeech = true
@@ -459,17 +517,20 @@ object LivePttSessionManager {
             pttSpeechStartRunnable = null
             pttSpeechFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
             pttSpeechFallbackRunnable = null
-            pttSpeechAppContext = ctx
+            pttSpeechAppContext = appCtx
             pttSpeechTargetThreadId = threadId
             _livePttTranscript.value = ""
             _lastPttTranscriptFeedback.value = null
 
-            val defaultAvailable = SpeechRecognizer.isRecognitionAvailable(ctx)
+            val defaultAvailable = SpeechRecognizer.isRecognitionAvailable(appCtx)
             val onDeviceAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx) }.getOrDefault(false)
+                runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(appCtx) }.getOrDefault(false)
             if (!defaultAvailable && !onDeviceAvailable) {
                 pttSpeechCapturing = false
+                pttSpeechIsVttOnlySession = false
                 pttSpeechTargetThreadId = ""
+                _vttTargetThreadId.value = null
+                _isVttFinalizing.value = false
                 resumeLiveKitAudioIfPaused()
                 finishVttOnlyCaptureStateIfActive()
                 _lastPttTranscriptFeedback.value = "Speech recognition service is not available on this device."
@@ -481,29 +542,21 @@ object LivePttSessionManager {
                 pttSpeechStartRunnable = null
                 runCatching {
                     destroyPttSpeechRecognizerLocked()
+                    val recognizerCtx = callerContextRef.get() ?: appCtx
                     val recognizer = createFreshPttSpeechRecognizer(
-                        appContext = ctx,
+                        recognizerContext = recognizerCtx,
+                        appContext = appCtx,
                         sessionToken = sessionToken,
                         useOnDevice = !defaultAvailable && onDeviceAvailable
                     )
-                    val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(
-                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                        )
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                        putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
-                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
-                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
-                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500L)
-                    }
-                    recognizer.startListening(speechIntent)
+                    recognizer.startListening(buildPttSpeechIntent(appCtx))
                 }.onFailure { err ->
                     Log.w(TAG, "PTT SpeechRecognizer failed to start", err)
                     pttSpeechCapturing = false
+                    pttSpeechIsVttOnlySession = false
                     pttSpeechTargetThreadId = ""
+                    _vttTargetThreadId.value = null
+                    _isVttFinalizing.value = false
                     destroyPttSpeechRecognizerLocked()
                     resumeLiveKitAudioIfPaused()
                     finishVttOnlyCaptureStateIfActive()
@@ -541,28 +594,40 @@ object LivePttSessionManager {
                 mainHandler.removeCallbacks(pendingStart)
                 pttSpeechStartRunnable = null
                 pttSpeechCapturing = false
+                pttSpeechIsVttOnlySession = false
                 pttSpeechTargetThreadId = ""
+                _vttTargetThreadId.value = null
+                _isVttFinalizing.value = false
                 _livePttTranscript.value = ""
                 destroyPttSpeechRecognizerLocked()
                 resumeLiveKitAudioIfPaused()
                 finishVttOnlyCaptureStateIfActive()
-                _lastPttTranscriptFeedback.value = "Hold the PTT button while speaking to send Voice-to-Text."
+                _lastPttTranscriptFeedback.value = "Tap or hold the PTT button while speaking to send Voice-to-Text."
                 return@post
             }
             if (!pttSpeechCapturing) {
+                _isVttFinalizing.value = false
+                _vttTargetThreadId.value = null
                 resumeLiveKitAudioIfPaused()
                 return@post
             }
             pttSpeechAppContext = ctx
+            _isVttFinalizing.value = true
             runCatching { pttSpeechRecognizer?.stopListening() }
             pttSpeechFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
             val runnable = Runnable {
                 if (pttSpeechSessionToken == releaseToken && pttSpeechCapturing) {
                     val targetTid = pttSpeechTargetThreadId
                     val captured = _livePttTranscript.value.trim()
-                    val wasVttOnly = _isVoiceToTextOnlyTransmitting.value || _isPttVoiceToTextEnabled.value || _isPttSilentMode.value
+                    val wasVttOnly = pttSpeechIsVttOnlySession ||
+                        _isVoiceToTextOnlyTransmitting.value ||
+                        _isPttVoiceToTextEnabled.value ||
+                        _isPttSilentMode.value
                     pttSpeechCapturing = false
+                    pttSpeechIsVttOnlySession = false
                     pttSpeechTargetThreadId = ""
+                    _vttTargetThreadId.value = null
+                    _isVttFinalizing.value = false
                     _livePttTranscript.value = ""
                     destroyPttSpeechRecognizerLocked()
                     resumeLiveKitAudioIfPaused()
@@ -570,7 +635,7 @@ object LivePttSessionManager {
                     if (targetTid.isNotBlank() && captured.isNotBlank()) {
                         sendTranscribedPttMessage(ctx, targetTid, captured)
                     } else if (wasVttOnly) {
-                        _lastPttTranscriptFeedback.value = "Didn't catch any speech — hold PTT and speak clearly."
+                        _lastPttTranscriptFeedback.value = "Didn't catch any speech — tap or hold PTT and speak clearly."
                     }
                 }
             }
@@ -580,14 +645,15 @@ object LivePttSessionManager {
     }
 
     private fun createFreshPttSpeechRecognizer(
+        recognizerContext: Context,
         appContext: Context,
         sessionToken: Long,
         useOnDevice: Boolean
     ): SpeechRecognizer {
         val recognizer = if (useOnDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+            SpeechRecognizer.createOnDeviceSpeechRecognizer(recognizerContext)
         } else {
-            SpeechRecognizer.createSpeechRecognizer(appContext)
+            SpeechRecognizer.createSpeechRecognizer(recognizerContext)
         }
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {}
@@ -614,7 +680,10 @@ object LivePttSessionManager {
                 pttSpeechFallbackRunnable = null
                 val targetTid = pttSpeechTargetThreadId
                 val ctx = pttSpeechAppContext ?: appContext
-                val wasVttOnly = _isVoiceToTextOnlyTransmitting.value || _isPttVoiceToTextEnabled.value || _isPttSilentMode.value
+                val wasVttOnly = pttSpeechIsVttOnlySession ||
+                    _isVoiceToTextOnlyTransmitting.value ||
+                    _isPttVoiceToTextEnabled.value ||
+                    _isPttSilentMode.value
                 val finalText = results
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
@@ -622,7 +691,10 @@ object LivePttSessionManager {
                     .orEmpty()
                     .ifBlank { _livePttTranscript.value.trim() }
                 pttSpeechCapturing = false
+                pttSpeechIsVttOnlySession = false
                 pttSpeechTargetThreadId = ""
+                _vttTargetThreadId.value = null
+                _isVttFinalizing.value = false
                 _livePttTranscript.value = ""
                 destroyPttSpeechRecognizerLocked()
                 resumeLiveKitAudioIfPaused()
@@ -630,20 +702,53 @@ object LivePttSessionManager {
                 if (targetTid.isNotBlank() && finalText.isNotBlank()) {
                     sendTranscribedPttMessage(ctx, targetTid, finalText)
                 } else if (wasVttOnly) {
-                    _lastPttTranscriptFeedback.value = "Didn't catch any speech — hold PTT and speak clearly."
+                    _lastPttTranscriptFeedback.value = "Didn't catch any speech — tap or hold PTT and speak clearly."
                 }
             }
 
             override fun onError(error: Int) {
                 if (pttSpeechSessionToken != sessionToken) return
+                val ctx = pttSpeechAppContext ?: appContext
+                val canRetryOnDevice = !useOnDevice &&
+                    !pttSpeechRetriedOnDevice &&
+                    !_isVttFinalizing.value &&
+                    _livePttTranscript.value.isBlank() &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    (error == SpeechRecognizer.ERROR_CLIENT ||
+                        error == SpeechRecognizer.ERROR_NETWORK ||
+                        error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT ||
+                        error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED) &&
+                    runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx) }.getOrDefault(false)
+                if (canRetryOnDevice) {
+                    pttSpeechRetriedOnDevice = true
+                    runCatching {
+                        destroyPttSpeechRecognizerLocked()
+                        val onDeviceRecognizer = createFreshPttSpeechRecognizer(
+                            recognizerContext = ctx,
+                            appContext = ctx,
+                            sessionToken = sessionToken,
+                            useOnDevice = true
+                        )
+                        onDeviceRecognizer.startListening(buildPttSpeechIntent(ctx))
+                        return
+                    }.onFailure { err ->
+                        Log.w(TAG, "On-device PTT speech retry failed", err)
+                    }
+                }
+
                 pttSpeechFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
                 pttSpeechFallbackRunnable = null
                 val targetTid = pttSpeechTargetThreadId
-                val ctx = pttSpeechAppContext ?: appContext
-                val wasVttOnly = _isVoiceToTextOnlyTransmitting.value || _isPttVoiceToTextEnabled.value || _isPttSilentMode.value
+                val wasVttOnly = pttSpeechIsVttOnlySession ||
+                    _isVoiceToTextOnlyTransmitting.value ||
+                    _isPttVoiceToTextEnabled.value ||
+                    _isPttSilentMode.value
                 val partial = _livePttTranscript.value.trim()
                 pttSpeechCapturing = false
+                pttSpeechIsVttOnlySession = false
                 pttSpeechTargetThreadId = ""
+                _vttTargetThreadId.value = null
+                _isVttFinalizing.value = false
                 _livePttTranscript.value = ""
                 destroyPttSpeechRecognizerLocked()
                 resumeLiveKitAudioIfPaused()
@@ -657,7 +762,7 @@ object LivePttSessionManager {
                         SpeechRecognizer.ERROR_NETWORK,
                         SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network error during voice-to-text."
                         SpeechRecognizer.ERROR_NO_MATCH,
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Didn't catch that — hold PTT and speak clearly."
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Didn't catch that — tap or hold PTT and speak clearly."
                         else -> "Voice-to-text interrupted — try again."
                     }
                 }
@@ -1378,7 +1483,7 @@ object LivePttSessionManager {
                 ) == PackageManager.PERMISSION_GRANTED
                 if (!hasMic) return false
                 activeHardwareTargetId = "live_dm_ptt"
-                setTransmitting(appContext, true)
+                setTransmitting(context, true)
                 return true
             }
             return false
@@ -1386,12 +1491,12 @@ object LivePttSessionManager {
             val activeId = activeHardwareTargetId ?: return false
             activeHardwareTargetId = null
             if (activeId == "live_dm_ptt") {
-                setTransmitting(appContext, false)
+                setTransmitting(context, false)
             } else if (target != null && target.id == activeId) {
                 target.onSetTransmitting(false)
             } else {
                 // Safety fallback in case the screen changed while the key was held
-                setTransmitting(appContext, false)
+                setTransmitting(context, false)
             }
             return true
         }
@@ -1421,13 +1526,14 @@ object LivePttSessionManager {
         _isAppInBackground.value = false
         val tid = _activeThreadId.value
         val peer = _activePeerName.value
-        if (!tid.isNullOrBlank() && (_isConnected.value || _isConnecting.value)) {
+        val hasLive = _isConnected.value || _isConnecting.value
+        if (!tid.isNullOrBlank() && (hasLive || _isLockScreenPttEnabled.value)) {
             PrivateCallForegroundService.startPtt(
                 context = context,
                 threadId = tid,
                 peerName = peer,
                 isTransmitting = _isTransmitting.value,
-                showFloatingOverlay = shouldShowFloatingOverlayFor(tid)
+                showFloatingOverlay = hasLive && shouldShowFloatingOverlayFor(tid)
             )
         }
     }
@@ -1436,14 +1542,77 @@ object LivePttSessionManager {
         _isAppInBackground.value = true
         val tid = _activeThreadId.value
         val peer = _activePeerName.value
-        if (!tid.isNullOrBlank() && (_isConnected.value || _isConnecting.value)) {
+        val hasLive = _isConnected.value || _isConnecting.value
+        if (!tid.isNullOrBlank() && (hasLive || _isLockScreenPttEnabled.value)) {
             PrivateCallForegroundService.startPtt(
                 context = context,
                 threadId = tid,
                 peerName = peer,
                 isTransmitting = _isTransmitting.value,
-                showFloatingOverlay = shouldShowFloatingOverlayFor(tid)
+                showFloatingOverlay = hasLive && shouldShowFloatingOverlayFor(tid)
             )
+        }
+    }
+
+    /**
+     * Arms Lock-Screen PTT standby for [threadId] even when Live Audio PTT is not mutually active
+     * (e.g., when only Lock-Screen PTT is ON or the other user does not have PTT enabled).
+     * Registers the foreground service screen-lock receiver so LockScreenPttActivity appears when
+     * the device locks; if the peer has PTT OFF, pressing PTT on the lock screen automatically
+     * sends Voice-to-Text without transmitting audio.
+     */
+    fun armLockScreenPttStandby(
+        context: Context,
+        threadId: String,
+        peerName: String,
+        myUserId: String,
+        myDisplayName: String,
+        hasOtherLiveListener: Boolean,
+        senderSelfVttOn: Boolean
+    ) {
+        if (threadId.isBlank() || myUserId.isBlank()) return
+        if (_suppressedForCallThreadId.value == threadId) return
+        val appContext = context.applicationContext
+        cachedMyUserId = myUserId
+        cachedMyDisplayName = myDisplayName.ifBlank { "Member" }
+        val cleanPeer = peerName.ifBlank { "Private Chat" }
+        saveLastSession(appContext, threadId, cleanPeer, myUserId, cachedMyDisplayName)
+
+        val existingPolicy = threadPttPolicyById[threadId]
+        threadPttPolicyById[threadId] = existingPolicy?.copy(
+            senderSelfVttOn = senderSelfVttOn,
+            hasAnyLiveListener = hasOtherLiveListener
+        ) ?: ThreadPttPolicy(
+            senderSelfVttOn = senderSelfVttOn,
+            hasAnyLiveListener = hasOtherLiveListener,
+            anyNeedsVtt = senderSelfVttOn || !hasOtherLiveListener,
+            allOthersInDnd = false,
+            myDndActive = false,
+            myListenOnlyOn = false
+        )
+
+        val hasOtherLiveConnection = (_isConnected.value || _isConnecting.value) &&
+            !_activeThreadId.value.isNullOrBlank() &&
+            _activeThreadId.value != threadId
+        if (!hasOtherLiveConnection) {
+            _activeThreadId.value = threadId
+            _activePeerName.value = cleanPeer
+            _activeThreadHasLiveListener.value = hasOtherLiveListener
+            _activeThreadSenderSelfVttOn.value = senderSelfVttOn
+            val hasMic = ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasMic || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                PrivateCallForegroundService.startPtt(
+                    context = appContext,
+                    threadId = threadId,
+                    peerName = cleanPeer,
+                    isTransmitting = _isTransmitting.value,
+                    showFloatingOverlay = (_isConnected.value || _isConnecting.value) &&
+                        shouldShowFloatingOverlayFor(threadId)
+                )
+            }
         }
     }
 
@@ -1667,6 +1836,8 @@ object LivePttSessionManager {
                     _isPttSilentMode.value ||
                     (policy?.senderSelfVttOn == true) ||
                     (policy != null && !policy.hasAnyLiveListener) ||
+                    (policy == null && targetThreadId == _activeThreadId.value &&
+                        (!_activeThreadHasLiveListener.value || _activeThreadSenderSelfVttOn.value)) ||
                     (policy?.allOthersInDnd ?: allOtherRecipientsInDnd)
 
                 if (voiceToTextOnly) {
@@ -1682,10 +1853,12 @@ object LivePttSessionManager {
                     if (!_isTransmitting.value) {
                         triggerPttHaptic(appContext)
                     }
+                    _vttTargetThreadId.value = targetThreadId
+                    _isVttFinalizing.value = false
                     _isVoiceToTextOnlyTransmitting.value = true
                     _isTransmitting.value = true
                     _transmittingElapsedSec.value = 0
-                    startPttSpeechCapture(appContext, targetThreadId)
+                    startPttSpeechCapture(context, targetThreadId, isVttOnly = true)
                     transmitLimitJob?.cancel()
                     val limitSec = if (isGroupAdminForTarget) 60 else _maxPttSeconds.value.coerceIn(5, 60)
                     transmitLimitJob = scope.launch {
@@ -1727,7 +1900,7 @@ object LivePttSessionManager {
                 val shouldTranscribe = _isPttVoiceToTextEnabled.value || (policy?.anyNeedsVtt ?: _threadRequiresVoiceToText.value)
                 liveKitManager?.setMicEnabled(true)
                 if (shouldTranscribe) {
-                    startPttSpeechCapture(appContext, targetThreadId)
+                    startPttSpeechCapture(context, targetThreadId, isVttOnly = false)
                 }
                 PrivateCallForegroundService.startPtt(
                     context = appContext,
@@ -1851,6 +2024,10 @@ object LivePttSessionManager {
         _isConnecting.value = false
         _isListenOnlyMode.value = false
         _isVoiceToTextOnlyTransmitting.value = false
+        _vttTargetThreadId.value = null
+        _isVttFinalizing.value = false
+        _activeThreadHasLiveListener.value = false
+        _activeThreadSenderSelfVttOn.value = false
         _isBlockedByGroupAdminTalking.value = false
         _threadRequiresVoiceToText.value = false
         _threadDndActiveForMe.value = false
