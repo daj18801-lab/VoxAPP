@@ -172,6 +172,7 @@ import com.example.data.DirectThread
 import com.example.data.DirectoryEntry
 import com.example.data.DmAccessPass
 import com.example.data.DmPolicy
+import com.example.data.Friendship
 import com.example.data.PresenceStatus
 import com.example.data.ProTier
 import com.example.data.ReportCategory
@@ -193,6 +194,7 @@ import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TalkStreakBadge
 import com.example.ui.components.TopSnackbarOverlay
+import com.example.ui.components.UserListLongPressMenuDialog
 import com.example.ui.components.encodeBitmapToBase64Jpeg
 import com.example.ui.components.encodeImageUriToBase64Jpeg
 import com.example.ui.components.formatTimestampShort
@@ -217,12 +219,16 @@ fun DirectChatScreen(
     myStaffTier: StaffTier,
     otherPhotoBase64: String = "",
     directoryEntries: List<DirectoryEntry> = emptyList(),
+    friendships: List<Friendship> = emptyList(),
     paidDmMembersForMe: List<DmAccessPass> = emptyList(),
     isAcceptedFriend: Boolean = false,
     onAddUserToChat: (DirectThread, DirectoryEntry) -> Unit = { _, _ -> },
     onKickPaidMember: (senderId: String, senderName: String) -> Unit = { _, _ -> },
     onBlockContact: (targetUserId: String, targetName: String) -> Unit = { _, _ -> },
     onUnblockContact: (targetUserId: String) -> Unit = {},
+    onSendFriendRequest: (DirectoryEntry) -> Unit = {},
+    onAcceptFriendRequest: (Friendship) -> Unit = {},
+    onOpenPrivateMessage: (targetUserId: String, targetName: String, targetColorHex: String, targetTier: StaffTier) -> Unit = { _, _, _, _ -> },
     onSendFriendAttentionAlert: (DirectThread) -> Unit = {},
     onOpenUserProfile: (String) -> Unit = {},
     onOpenBuyPoints: () -> Unit = {},
@@ -272,6 +278,7 @@ fun DirectChatScreen(
     var showSendGroupAlertDialog by remember { mutableStateOf(false) }
     var showTopActionsPanel by remember { mutableStateOf(false) }
     var showUserListDrawer by remember { mutableStateOf(false) }
+    var longPressDmMember by remember { mutableStateOf<DmUserListMember?>(null) }
     var workOrderTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     var showEmployeeRequestDialog by remember { mutableStateOf(false) }
     var showRequestStaffHelpDialog by remember { mutableStateOf(false) }
@@ -308,7 +315,12 @@ fun DirectChatScreen(
     val lastPttTranscriptFeedback by LivePttSessionManager.lastPttTranscriptFeedback.collectAsStateWithLifecycle()
     val pttVttTargetThreadId by LivePttSessionManager.vttTargetThreadId.collectAsStateWithLifecycle()
     val isVttFinalizing by LivePttSessionManager.isVttFinalizing.collectAsStateWithLifecycle()
+    val isSpeechRecognizerReady by LivePttSessionManager.isSpeechRecognizerReady.collectAsStateWithLifecycle()
     val remoteCallSpeakerName by viewModel.remoteCallSpeakerName.collectAsStateWithLifecycle()
+
+    LaunchedEffect(Unit) {
+        LivePttSessionManager.syncAudioPrefs(context)
+    }
 
     LaunchedEffect(lastPttTranscriptFeedback) {
         val feedback = lastPttTranscriptFeedback
@@ -471,6 +483,25 @@ fun DirectChatScreen(
                 )
                 scope.launch {
                     snackbarHostState.showTopMessage("Voice-to-Text sent: \"$spoken\"")
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(viewModel.threadId) {
+        LivePttSessionManager.speechFallbackRequests.collect { requestedThreadId ->
+            if (requestedThreadId == viewModel.threadId) {
+                val langTag = java.util.Locale.getDefault().toLanguageTag().ifBlank { "en-US" }
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(
+                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                    )
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, langTag)
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak Voice-to-Text message")
+                }
+                runCatching { speechFallbackLauncher.launch(intent) }.onFailure {
+                    snackbarHostState.showTopMessage("Speech recognition is not available on this device.")
                 }
             }
         }
@@ -1482,6 +1513,25 @@ fun DirectChatScreen(
                                                     runCatching { context.startActivity(lockIntent) }
                                                 }
                                             )
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !canDrawFloatingOverlay) {
+                                                DmTopDropdownChip(
+                                                    icon = Icons.Rounded.LockOpen,
+                                                    label = "Allow Lock-Screen Overlay",
+                                                    containerColor = ModAmber.copy(alpha = 0.22f),
+                                                    contentColor = MaterialTheme.colorScheme.onSurface,
+                                                    testTag = "dm_lock_screen_overlay_permission_button",
+                                                    onClick = {
+                                                        runCatching {
+                                                            context.startActivity(
+                                                                Intent(
+                                                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                                                    Uri.parse("package:${context.packageName}")
+                                                                )
+                                                            )
+                                                        }
+                                                    }
+                                                )
+                                            }
                                         }
 
                                         // Volume Down Key PTT ON/OFF Toggle (available in both Private DMs & Group DMs)
@@ -2857,8 +2907,10 @@ fun DirectChatScreen(
                                                             "Voice-to-Text: \"$livePttTranscript\""
                                                         isThisThreadVttFinalizing ->
                                                             "Sending Voice-to-Text message…"
+                                                        !isSpeechRecognizerReady ->
+                                                            "Starting microphone for Voice-to-Text…"
                                                         else ->
-                                                            "Listening for Voice-to-Text… speak clearly, then tap or release to send"
+                                                            "Listening… speak now, then tap or release to send"
                                                     },
                                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                                     color = SnapBlue,
@@ -2949,6 +3001,10 @@ fun DirectChatScreen(
                                                                     putExtra(
                                                                         RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                                                                         RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                                                    )
+                                                                    putExtra(
+                                                                        RecognizerIntent.EXTRA_LANGUAGE,
+                                                                        java.util.Locale.getDefault().toLanguageTag().ifBlank { "en-US" }
                                                                     )
                                                                     putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak Voice-to-Text message")
                                                                 }
@@ -3046,7 +3102,11 @@ fun DirectChatScreen(
                                                         isThisThreadVttFinalizing ->
                                                             "SENDING VOICE-TO-TEXT…"
                                                         isThisThreadTransmitting && isVttOnlyPttMode ->
-                                                            "LISTENING (${pttElapsedSec}s) · TAP OR RELEASE TO SEND"
+                                                            if (!isSpeechRecognizerReady) {
+                                                                "STARTING MIC… SPEAK IN A MOMENT"
+                                                            } else {
+                                                                "LISTENING (${pttElapsedSec}s) · SPEAK NOW · TAP TO SEND"
+                                                            }
                                                         isThisThreadTransmitting && isGroupAdmin ->
                                                             "ADMIN PRIORITY MIC LIVE (${pttElapsedSec}s) · TALKING OVER GROUP"
                                                         isThisThreadTransmitting ->
@@ -4051,6 +4111,11 @@ fun DirectChatScreen(
                             onSelectUser = { uid ->
                                 onOpenUserProfile(uid)
                             },
+                            onLongPressUser = { member ->
+                                if (!member.isSelf) {
+                                    longPressDmMember = member
+                                }
+                            },
                             onOpenGroupControls = {
                                 showGroupAdminSheet = true
                             },
@@ -4067,6 +4132,127 @@ fun DirectChatScreen(
         TopSnackbarOverlay(
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.TopCenter)
+        )
+    }
+
+    val lpMember = longPressDmMember
+    if (lpMember != null && thread != null) {
+        val targetUid = lpMember.uid
+        val targetDirEntry = directoryByUid[targetUid]
+        val targetFriendship = remember(friendships, targetUid, viewModel.currentUserId) {
+            friendships.firstOrNull { it.otherUserId(viewModel.currentUserId) == targetUid }
+        }
+        val canUseGroupAdminOrStaffWrite = isGroup && (
+            isGroupAdmin ||
+                myStaffTier == StaffTier.ADMIN ||
+                (isAppStaff && thread.hasStaffAccessOpen())
+            )
+        val canUseGroupSupportMod = isGroup &&
+            (isGroupSupport || isGroupSupervisor) &&
+            !lpMember.isGroupAdmin &&
+            !lpMember.isSupport &&
+            !lpMember.isSupervisor
+        val targetAllowedForGroupMod = lpMember.staffTier != StaffTier.ADMIN && !lpMember.isGroupAdmin
+        val canMuteInGroup = (canUseGroupAdminOrStaffWrite || canUseGroupSupportMod) && targetAllowedForGroupMod
+        val canBounceInGroup = (canUseGroupAdminOrStaffWrite || canUseGroupSupportMod) && targetAllowedForGroupMod
+        val canBanInGroup = canUseGroupAdminOrStaffWrite && targetAllowedForGroupMod
+        val canMakeRoomAdminInGroup = canUseGroupAdminOrStaffWrite && targetAllowedForGroupMod
+        val targetIsBlockedByMe = userProfile.blockedUserIds.contains(targetUid) ||
+            (!isGroup && thread.isBlockedBy(viewModel.currentUserId))
+        val roleSubtitle = when {
+            lpMember.staffTier == StaffTier.ADMIN -> "App Owner Administrator"
+            lpMember.staffTier == StaffTier.SUPPORT -> "Support Staff"
+            lpMember.isGroupAdmin -> "Group Administrator"
+            lpMember.isSupervisor -> if (thread.isCompanyThread()) "Supervisor" else "Room Admin"
+            lpMember.isSupport -> "Group Support"
+            isGroup -> "Group Member"
+            else -> "Private DM"
+        }
+
+        UserListLongPressMenuDialog(
+            targetUserId = targetUid,
+            targetDisplayName = lpMember.displayName,
+            targetColorHex = lpMember.colorHex,
+            targetPhotoBase64 = lpMember.photoBase64,
+            targetTier = lpMember.staffTier,
+            targetRoleSubtitle = roleSubtitle,
+            isTargetRoomLeader = lpMember.isGroupAdmin || lpMember.isSupervisor || lpMember.isSupport,
+            currentUserId = viewModel.currentUserId,
+            friendship = targetFriendship,
+            onAddFriend = {
+                val entry = targetDirEntry ?: DirectoryEntry(
+                    userId = targetUid,
+                    displayName = lpMember.displayName,
+                    avatarColorHex = lpMember.colorHex,
+                    photoBase64 = lpMember.photoBase64,
+                    staffTier = lpMember.staffTier.name
+                )
+                onSendFriendRequest(entry)
+            },
+            onAcceptFriendRequest = { friendship ->
+                onAcceptFriendRequest(friendship)
+            },
+            onPrivateMessage = {
+                showUserListDrawer = false
+                if (isGroup) {
+                    onOpenPrivateMessage(
+                        targetUid,
+                        lpMember.displayName,
+                        lpMember.colorHex,
+                        lpMember.staffTier
+                    )
+                }
+            },
+            onViewProfile = {
+                showUserListDrawer = false
+                onOpenUserProfile(targetUid)
+            },
+            isTargetMuted = lpMember.isMuted,
+            isTargetRoomAdmin = lpMember.isSupervisor,
+            modSectionTitle = "Admin, Staff & Room Admin Controls",
+            banActionLabel = "Ban from Group",
+            makeRoomAdminLabel = "Make Room Admin",
+            removeRoomAdminLabel = "Remove Room Admin",
+            onMuteToggle = if (canMuteInGroup) {
+                { mute ->
+                    viewModel.setGroupMemberMuted(targetUid, lpMember.displayName, mute)
+                }
+            } else null,
+            onBounce = if (canBounceInGroup) {
+                {
+                    viewModel.bounceGroupMember(targetUid, lpMember.displayName)
+                }
+            } else null,
+            onBan = if (canBanInGroup) {
+                {
+                    viewModel.banGroupMember(
+                        targetUserId = targetUid,
+                        targetName = lpMember.displayName,
+                        alsoRemoveFromParticipants = isAppStaff
+                    )
+                }
+            } else null,
+            onToggleRoomAdmin = if (canMakeRoomAdminInGroup) {
+                {
+                    viewModel.setGroupSupervisor(
+                        targetUserId = targetUid,
+                        targetName = lpMember.displayName,
+                        makeSupervisor = !lpMember.isSupervisor
+                    )
+                }
+            } else null,
+            isTargetBlocked = targetIsBlockedByMe,
+            onBlockToggle = if (!isGroup && lpMember.staffTier != StaffTier.ADMIN) {
+                {
+                    showUserListDrawer = false
+                    if (targetIsBlockedByMe) {
+                        onUnblockContact(targetUid)
+                    } else {
+                        onBlockContact(targetUid, lpMember.displayName)
+                    }
+                }
+            } else null,
+            onDismiss = { longPressDmMember = null }
         )
     }
 

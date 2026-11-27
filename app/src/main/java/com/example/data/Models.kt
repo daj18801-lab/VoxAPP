@@ -12,6 +12,46 @@ sealed interface UiState<out T> {
     data class Error(val message: String) : UiState<Nothing>
 }
 
+/**
+ * Global username rules:
+ * - Maximum 10 characters long.
+ * - Regular users (and non-admin edits) cannot include symbols (letters, numbers, and spaces only).
+ * - App Admins may add symbols to a user's name (or their own) while staying within 10 characters.
+ */
+object UsernamePolicy {
+    const val MAX_LENGTH: Int = 10
+    val ADMIN_QUICK_SYMBOLS: List<String> = listOf("★", "✦", "⚡", "♛", "♦", "✓")
+
+    fun isAllowedStandardChar(ch: Char): Boolean = ch.isLetterOrDigit() || ch == ' '
+
+    fun containsSymbols(raw: String): Boolean = raw.any { !isAllowedStandardChar(it) }
+
+    fun filterStandardInput(raw: String): String =
+        raw.filter { isAllowedStandardChar(it) }.take(MAX_LENGTH)
+
+    fun sanitizeForNewUser(raw: String, fallback: String = "VoxUser"): String {
+        val cleaned = raw.trim()
+            .filter { isAllowedStandardChar(it) }
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(MAX_LENGTH)
+            .trim()
+        return cleaned.ifBlank { fallback.take(MAX_LENGTH) }
+    }
+
+    fun validate(raw: String, allowSymbols: Boolean): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return "Username cannot be empty."
+        if (trimmed.length > MAX_LENGTH) {
+            return "Username cannot be more than $MAX_LENGTH characters long."
+        }
+        if (!allowSymbols && containsSymbols(trimmed)) {
+            return "Username cannot contain symbols (letters and numbers only)."
+        }
+        return null
+    }
+}
+
 enum class StaffTier(val label: String) {
     USER("User"),
     SUPPORT("Support"),

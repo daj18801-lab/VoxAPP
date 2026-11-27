@@ -106,6 +106,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.ChatMessage
 import com.example.data.ChatRoom
+import com.example.data.DirectoryEntry
+import com.example.data.Friendship
 import com.example.data.MessageType
 import com.example.data.ParticipantRole
 import com.example.data.ROOM_REACTION_EMOJIS
@@ -126,6 +128,7 @@ import com.example.ui.components.SafetyTagChip
 import com.example.ui.components.SpeakingAvatarCircle
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.TopSnackbarOverlay
+import com.example.ui.components.UserListLongPressMenuDialog
 import com.example.ui.components.VoiceWaveformBars
 import com.example.ui.components.formatTimestampShort
 import com.example.ui.components.showTopMessage
@@ -151,6 +154,12 @@ fun RoomScreen(
     userProfile: UserProfile,
     staffCapabilities: StaffCapabilities,
     availableRooms: List<ChatRoom> = emptyList(),
+    directoryEntries: List<DirectoryEntry> = emptyList(),
+    friendships: List<Friendship> = emptyList(),
+    onSendFriendRequest: (DirectoryEntry) -> Unit = {},
+    onAcceptFriendRequest: (Friendship) -> Unit = {},
+    onOpenPrivateMessage: (targetUserId: String, targetName: String, targetColorHex: String, targetTier: StaffTier) -> Unit = { _, _, _, _ -> },
+    onOpenUserProfile: (String) -> Unit = {},
     onSendUserToRoom: (targetUserId: String, targetName: String, targetRoom: ChatRoom, fromRoomId: String, reason: String) -> Unit = { _, _, _, _, _ -> },
     onExitRoom: () -> Unit
 ) {
@@ -184,6 +193,7 @@ fun RoomScreen(
     var showParticipants by remember { mutableStateOf(false) }
     var showEditRoomDialog by remember { mutableStateOf(false) }
     var actionTarget by remember { mutableStateOf<ActionTarget?>(null) }
+    var longPressParticipant by remember { mutableStateOf<RoomParticipant?>(null) }
     var reportTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var suspendTarget by remember { mutableStateOf<ActionTarget?>(null) }
     var supportSuspensionTarget by remember { mutableStateOf<ActionTarget?>(null) }
@@ -747,6 +757,11 @@ fun RoomScreen(
                                 showParticipants = false
                                 actionTarget = ActionTarget(p.userId, p.displayName, p.staffTierEnum(), p, null)
                             },
+                            onLongPressParticipant = { p ->
+                                if (p.userId != viewModel.currentUserId) {
+                                    longPressParticipant = p
+                                }
+                            },
                             onApproveSpeaker = { p ->
                                 viewModel.changeParticipantRole(
                                     p.userId,
@@ -846,6 +861,120 @@ fun RoomScreen(
     }
 
     // Participants list is now rendered as a right-side slide-over drawer inside the root Box above.
+
+    val lpParticipant = longPressParticipant
+    if (lpParticipant != null && room != null) {
+        val targetUid = lpParticipant.userId
+        val targetTier = lpParticipant.staffTierEnum()
+        val targetDirEntry = remember(directoryEntries, targetUid) {
+            directoryEntries.firstOrNull { it.userId == targetUid }
+        }
+        val targetFriendship = remember(friendships, targetUid, viewModel.currentUserId) {
+            friendships.firstOrNull { it.otherUserId(viewModel.currentUserId) == targetUid }
+        }
+        val actorDisplay = userProfile.effectiveDisplayName()
+        val isSelfTarget = targetUid == viewModel.currentUserId
+        val isMod = room.hasModPrivileges(viewModel.currentUserId, staffCapabilities.tier)
+        val canBan = room.canBanInRoom(viewModel.currentUserId, staffCapabilities.tier)
+        val canManageCoAdmins = room.canManageCoAdmins(viewModel.currentUserId, staffCapabilities.tier)
+        val targetIsHost = targetUid == room.hostId
+        val targetIsCoAdmin = room.isCoAdmin(targetUid)
+        val targetIsMuted = room.mutedUserIds.contains(targetUid) || lpParticipant.mutedByMod
+        val canModerateTarget = isMod && !isSelfTarget && targetTier != StaffTier.ADMIN &&
+            (!targetIsHost || staffCapabilities.isStaff)
+        val roleSubtitle = when {
+            targetTier == StaffTier.ADMIN -> "App Owner Administrator"
+            targetTier == StaffTier.SUPPORT -> "Support Staff"
+            targetIsHost -> "Room Administrator"
+            targetIsCoAdmin -> "Room Co-Admin"
+            else -> lpParticipant.roleEnum().label
+        }
+
+        UserListLongPressMenuDialog(
+            targetUserId = targetUid,
+            targetDisplayName = lpParticipant.displayName,
+            targetColorHex = lpParticipant.avatarColorHex,
+            targetPhotoBase64 = targetDirEntry?.photoBase64.orEmpty(),
+            targetTier = targetTier,
+            targetRoleSubtitle = roleSubtitle,
+            isTargetRoomLeader = targetIsHost || targetIsCoAdmin,
+            currentUserId = viewModel.currentUserId,
+            friendship = targetFriendship,
+            onAddFriend = {
+                val entry = targetDirEntry ?: DirectoryEntry(
+                    userId = targetUid,
+                    displayName = lpParticipant.displayName,
+                    avatarColorHex = lpParticipant.avatarColorHex,
+                    staffTier = targetTier.name
+                )
+                onSendFriendRequest(entry)
+            },
+            onAcceptFriendRequest = { friendship ->
+                onAcceptFriendRequest(friendship)
+            },
+            onPrivateMessage = {
+                showParticipants = false
+                onOpenPrivateMessage(
+                    targetUid,
+                    lpParticipant.displayName,
+                    lpParticipant.avatarColorHex,
+                    targetTier
+                )
+            },
+            onViewProfile = {
+                showParticipants = false
+                onOpenUserProfile(targetUid)
+            },
+            isTargetMuted = targetIsMuted,
+            isTargetRoomAdmin = targetIsCoAdmin,
+            modSectionTitle = "Admin, Staff & Room Admin Controls",
+            banActionLabel = "Ban from Room",
+            makeRoomAdminLabel = "Make Room Admin",
+            removeRoomAdminLabel = "Remove Room Admin",
+            onMuteToggle = if (canModerateTarget) {
+                { mute ->
+                    viewModel.toggleMuteParticipant(
+                        targetUserId = targetUid,
+                        targetName = lpParticipant.displayName,
+                        actorName = actorDisplay,
+                        mute = mute
+                    )
+                }
+            } else null,
+            onBounce = if (canModerateTarget) {
+                {
+                    viewModel.bounceUser(
+                        targetUserId = targetUid,
+                        targetName = lpParticipant.displayName,
+                        actorName = actorDisplay,
+                        reason = "Bounced by $actorDisplay"
+                    )
+                }
+            } else null,
+            onBan = if (canModerateTarget && canBan && (!targetIsHost || staffCapabilities.isAdmin)) {
+                {
+                    viewModel.kickOrBanUser(
+                        targetUserId = targetUid,
+                        targetName = lpParticipant.displayName,
+                        actorName = actorDisplay,
+                        ban = true,
+                        reason = "Banned by $actorDisplay"
+                    )
+                }
+            } else null,
+            onToggleRoomAdmin = if (canModerateTarget && canManageCoAdmins && !targetIsHost) {
+                {
+                    viewModel.changeParticipantRole(
+                        targetUserId = targetUid,
+                        targetName = lpParticipant.displayName,
+                        actorName = actorDisplay,
+                        newRole = if (targetIsCoAdmin) ParticipantRole.SPEAKER else ParticipantRole.MODERATOR
+                    )
+                }
+            } else null,
+            onDismiss = { longPressParticipant = null }
+        )
+    }
 
     val currentTarget = actionTarget
     if (currentTarget != null && room != null) {

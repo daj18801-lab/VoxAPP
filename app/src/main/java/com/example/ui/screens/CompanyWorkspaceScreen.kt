@@ -100,6 +100,7 @@ import com.example.data.EmployeeRequestStatus
 import com.example.data.ProTier
 import com.example.data.StaffTier
 import com.example.data.UserProfile
+import com.example.data.UsernamePolicy
 import com.example.data.WorkOrder
 import com.example.data.WorkOrderPriority
 import com.example.data.WorkOrderStatus
@@ -1588,8 +1589,11 @@ fun SubAccountBasicProfileScreen(
                     }
                     OutlinedTextField(
                         value = nameInput,
-                        onValueChange = { nameInput = it.take(40) },
+                        onValueChange = { nameInput = UsernamePolicy.filterStandardInput(it) },
                         label = { Text("Display Name") },
+                        supportingText = {
+                            Text("${nameInput.length}/${UsernamePolicy.MAX_LENGTH} · Letters & numbers only (no symbols)")
+                        },
                         singleLine = true,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
@@ -1994,9 +1998,12 @@ private fun CreateSubAccountDialog(
                 )
                 OutlinedTextField(
                     value = subName,
-                    onValueChange = { subName = it.take(40) },
+                    onValueChange = { subName = UsernamePolicy.filterStandardInput(it) },
                     label = { Text("Employee Sub-Name") },
-                    placeholder = { Text("e.g., Truck 12 - Mike") },
+                    placeholder = { Text("e.g., Mike12") },
+                    supportingText = {
+                        Text("${subName.length}/${UsernamePolicy.MAX_LENGTH} · Letters & numbers only (no symbols)")
+                    },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()

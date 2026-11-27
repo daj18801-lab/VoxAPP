@@ -2,7 +2,9 @@ package com.example.media
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.ActivityOptions
 import android.app.KeyguardManager
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -163,12 +165,15 @@ class PrivateCallForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
+        val lockScreenEnabled = DirectMessageNotificationPrefs.isLockScreenPttEnabled(this)
+        val effectiveChannelId = if (pttMode && lockScreenEnabled) LOCK_SCREEN_CHANNEL_ID else CHANNEL_ID
+
+        val notificationBuilder = NotificationCompat.Builder(this, effectiveChannelId)
             .setSmallIcon(R.drawable.ic_stat_message)
             .setColor(if (pttTransmitting) 0xFFFF4D6D.toInt() else 0xFF0088FF.toInt())
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(if (pttMode && lockScreenEnabled) NotificationCompat.PRIORITY_DEFAULT else NotificationCompat.PRIORITY_LOW)
             .setSilent(true)
             .setContentIntent(openPendingIntent)
 
@@ -185,7 +190,9 @@ class PrivateCallForegroundService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val lockScreenIntent = Intent(this, LockScreenPttActivity::class.java).apply {
-                this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             }
             val lockScreenPendingIntent = PendingIntent.getActivity(
                 this,
@@ -193,11 +200,13 @@ class PrivateCallForegroundService : Service() {
                 lockScreenIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            val lockScreenEnabled = DirectMessageNotificationPrefs.isLockScreenPttEnabled(this)
             val isVttStandby = !LivePttSessionManager.activeThreadHasLiveListener.value ||
                 LivePttSessionManager.activeThreadSenderSelfVttOn.value ||
                 LivePttSessionManager.isPttVoiceToTextEnabled.value ||
                 LivePttSessionManager.isPttSilentMode.value
+            if (lockScreenEnabled) {
+                notificationBuilder.setContentIntent(lockScreenPendingIntent)
+            }
             notificationBuilder
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentTitle(
@@ -212,8 +221,8 @@ class PrivateCallForegroundService : Service() {
                     when {
                         pttTransmitting && isVttStandby -> "Transcribing Voice-to-Text — no live audio sent"
                         pttTransmitting -> "Streaming live audio — release button or tap Mute"
-                        isVttStandby && lockScreenEnabled -> "Peer PTT off or VTT mode — tap Lock-Screen PTT for Voice-to-Text"
-                        lockScreenEnabled -> "Tap Lock-Screen PTT or hold floating button to stream live audio"
+                        isVttStandby && lockScreenEnabled -> "Peer PTT off or VTT mode — tap to open Lock-Screen PTT"
+                        lockScreenEnabled -> "Tap to open Lock-Screen PTT or hold floating button"
                         else -> "Hold floating button or tap Talk Live to stream live audio"
                     }
                 )
@@ -317,7 +326,23 @@ class PrivateCallForegroundService : Service() {
                     Intent.FLAG_ACTIVITY_SINGLE_TOP or
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             }
-            startActivity(intent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val options = ActivityOptions.makeBasic()
+                    .setPendingIntentBackgroundActivityStartMode(
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                    )
+                    .toBundle()
+                val pi = PendingIntent.getActivity(
+                    this,
+                    NOTIFICATION_ID + 4,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                runCatching { pi.send(this, 0, null, null, null, null, options) }
+                    .onFailure { startActivity(intent) }
+            } else {
+                startActivity(intent)
+            }
         } catch (err: Exception) {
             Log.w(TAG, "Unable to launch LockScreenPttActivity on screen lock", err)
         }
@@ -766,6 +791,7 @@ class PrivateCallForegroundService : Service() {
     companion object {
         private const val TAG = "PrivateCallFgService"
         private const val CHANNEL_ID = "voxstage_private_call"
+        private const val LOCK_SCREEN_CHANNEL_ID = "voxstage_lock_screen_ptt_v2"
         private const val NOTIFICATION_ID = 49_201
         private const val ACTION_START_CALL = "com.example.media.ACTION_START_PRIVATE_CALL"
         private const val ACTION_START_PTT = "com.example.media.ACTION_START_LIVE_PTT"
@@ -812,6 +838,20 @@ class PrivateCallForegroundService : Service() {
                         setShowBadge(false)
                     }
                     manager.createNotificationChannel(channel)
+                }
+                if (manager.getNotificationChannel(LOCK_SCREEN_CHANNEL_ID) == null) {
+                    val lockChannel = NotificationChannel(
+                        LOCK_SCREEN_CHANNEL_ID,
+                        "Lock-Screen Push-to-Talk",
+                        NotificationManager.IMPORTANCE_DEFAULT
+                    ).apply {
+                        description = "Shows quick Push-to-Talk controls on your lock screen."
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                        setSound(null, null)
+                        enableVibration(false)
+                        setShowBadge(false)
+                    }
+                    manager.createNotificationChannel(lockChannel)
                 }
             }
         }

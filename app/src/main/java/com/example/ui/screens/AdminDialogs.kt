@@ -49,6 +49,7 @@ import com.example.data.AlertSeverity
 import com.example.data.ChatRoom
 import com.example.data.UserAlert
 import com.example.data.UserProfile
+import com.example.data.UsernamePolicy
 import com.example.ui.components.StaffTierBadge
 import com.example.ui.components.usernameColor
 import com.example.ui.theme.LiveCoral
@@ -405,13 +406,42 @@ fun EditUserAdminDialog(
             ) {
                 OutlinedTextField(
                     value = displayName,
-                    onValueChange = { displayName = it.take(40) },
-                    label = { Text("Display Name") },
+                    onValueChange = { displayName = it.take(UsernamePolicy.MAX_LENGTH) },
+                    label = { Text("Display Name (Admin: symbols allowed)") },
+                    supportingText = {
+                        Text("${displayName.length}/${UsernamePolicy.MAX_LENGTH} · Max ${UsernamePolicy.MAX_LENGTH} chars · Admin can add symbols")
+                    },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("admin_edit_user_name")
                 )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Add symbol:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    UsernamePolicy.ADMIN_QUICK_SYMBOLS.forEachIndexed { idx, sym ->
+                        FilterChip(
+                            selected = false,
+                            enabled = displayName.length + sym.length <= UsernamePolicy.MAX_LENGTH,
+                            onClick = {
+                                if (displayName.length + sym.length <= UsernamePolicy.MAX_LENGTH) {
+                                    displayName += sym
+                                }
+                            },
+                            label = { Text(sym) },
+                            modifier = Modifier.testTag("admin_user_name_symbol_$idx")
+                        )
+                    }
+                }
                 OutlinedTextField(
                     value = handle,
                     onValueChange = { handle = it.replace(" ", "_").take(30) },

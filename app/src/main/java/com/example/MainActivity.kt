@@ -2,11 +2,16 @@ package com.example
 
 import android.Manifest
 import android.app.Activity
+import android.app.KeyguardManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -263,9 +268,50 @@ class MainActivity : ComponentActivity() {
     private val _pendingDmThreadId = MutableStateFlow<String?>(null)
     private val pendingDmThreadId = _pendingDmThreadId.asStateFlow()
     private var isVolumeDownPttHeld = false
+    private var isActivityForeground = false
+    private var lastLockScreenLaunchMs = 0L
+    private var screenOffReceiverRegistered = false
+
+    private val foregroundScreenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_SCREEN_OFF) return
+            if (!isActivityForeground) return
+            maybeLaunchLockScreenPttFromForeground()
+        }
+    }
+
+    private fun maybeLaunchLockScreenPttFromForeground() {
+        if (!DirectMessageNotificationPrefs.isLockScreenPttEnabled(this)) return
+        if (LivePttSessionManager.activeThreadId.value.isNullOrBlank()) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLockScreenLaunchMs < 1_500L) return
+        lastLockScreenLaunchMs = now
+        runCatching {
+            val lockIntent = Intent(this, com.example.media.LockScreenPttActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+            }
+            startActivity(lockIntent)
+        }.onFailure { err ->
+            Log.w("MainActivity", "Unable to launch LockScreenPttActivity on screen lock", err)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LivePttSessionManager.syncAudioPrefs(this)
+        if (!screenOffReceiverRegistered) {
+            runCatching {
+                ContextCompat.registerReceiver(
+                    this,
+                    foregroundScreenOffReceiver,
+                    IntentFilter(Intent.ACTION_SCREEN_OFF),
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+                screenOffReceiverRegistered = true
+            }
+        }
         handleNotificationIntent(intent)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(
@@ -284,6 +330,14 @@ class MainActivity : ComponentActivity() {
                 onConsumePendingDmThread = { _pendingDmThreadId.value = null }
             )
         }
+    }
+
+    override fun onDestroy() {
+        if (screenOffReceiverRegistered) {
+            screenOffReceiverRegistered = false
+            runCatching { unregisterReceiver(foregroundScreenOffReceiver) }
+        }
+        super.onDestroy()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -325,11 +379,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        isActivityForeground = true
         LivePttSessionManager.onAppForegrounded(this)
     }
 
     override fun onPause() {
         releaseVolumeDownPttIfHeld()
+        val pm = getSystemService(POWER_SERVICE) as? PowerManager
+        val km = getSystemService(KEYGUARD_SERVICE) as? KeyguardManager
+        if (pm?.isInteractive == false || km?.isKeyguardLocked == true) {
+            maybeLaunchLockScreenPttFromForeground()
+        }
         super.onPause()
     }
 
@@ -341,6 +401,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        isActivityForeground = false
         releaseVolumeDownPttIfHeld()
         super.onStop()
         LivePttSessionManager.onAppBackgrounded(this)
@@ -2377,6 +2438,24 @@ private fun AuthenticatedVoxStageApp(
                                             userProfile = activeProfile,
                                             myStaffTier = staffCapabilities.tier,
                                             directoryEntries = directoryEntries,
+                                            friendships = friendships,
+                                            onBlockContact = { targetUid, targetName ->
+                                                mainViewModel.blockContact(targetUid, targetName)
+                                            },
+                                            onUnblockContact = mainViewModel::unblockUser,
+                                            onSendFriendRequest = mainViewModel::sendFriendRequest,
+                                            onAcceptFriendRequest = mainViewModel::acceptFriendRequest,
+                                            onOpenPrivateMessage = { otherUid, otherName, otherColor, otherTier ->
+                                                mainViewModel.startPrivateChat(
+                                                    otherUserId = otherUid,
+                                                    otherName = otherName,
+                                                    otherColorHex = otherColor,
+                                                    otherTier = otherTier,
+                                                    onThreadReady = { nextThreadId ->
+                                                        navController.navigate("dm/$nextThreadId")
+                                                    }
+                                                )
+                                            },
                                             onOpenUserProfile = ::openUserProfile,
                                             onOpenBuyPoints = ::openProfileBuyPoints,
                                             onToggleDnd = mainViewModel::setDoNotDisturb,
@@ -2419,6 +2498,22 @@ private fun AuthenticatedVoxStageApp(
                                             userProfile = activeProfile,
                                             staffCapabilities = staffCapabilities,
                                             availableRooms = liveRoomsList,
+                                            directoryEntries = directoryEntries,
+                                            friendships = friendships,
+                                            onSendFriendRequest = mainViewModel::sendFriendRequest,
+                                            onAcceptFriendRequest = mainViewModel::acceptFriendRequest,
+                                            onOpenPrivateMessage = { otherUid, otherName, otherColor, otherTier ->
+                                                mainViewModel.startPrivateChat(
+                                                    otherUserId = otherUid,
+                                                    otherName = otherName,
+                                                    otherColorHex = otherColor,
+                                                    otherTier = otherTier,
+                                                    onThreadReady = { nextThreadId ->
+                                                        navController.navigate("dm/$nextThreadId")
+                                                    }
+                                                )
+                                            },
+                                            onOpenUserProfile = ::openUserProfile,
                                             onExitRoom = { navController.popBackStack() }
                                         )
                                     }

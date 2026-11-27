@@ -1,8 +1,10 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -74,6 +76,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -755,6 +759,7 @@ fun ParticipantsSheetContent(
     currentUserId: String,
     staffCapabilities: StaffCapabilities,
     onSelectParticipant: (RoomParticipant) -> Unit,
+    onLongPressParticipant: (RoomParticipant) -> Unit = {},
     onApproveSpeaker: (RoomParticipant) -> Unit,
     onClose: (() -> Unit)? = null
 ) {
@@ -849,6 +854,12 @@ fun ParticipantsSheetContent(
                         )
                     }
                 }
+                Text(
+                    text = "Long-press a name for quick actions",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    modifier = Modifier.padding(top = 2.dp)
+                )
             }
             if (onClose != null) {
                 IconButton(
@@ -883,7 +894,8 @@ fun ParticipantsSheetContent(
                     isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                     showApprove = false,
                     onApprove = {},
-                    onClick = { onSelectParticipant(p) }
+                    onClick = { onSelectParticipant(p) },
+                    onLongClick = { onLongPressParticipant(p) }
                 )
             }
         }
@@ -901,7 +913,8 @@ fun ParticipantsSheetContent(
                     isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                     showApprove = isMod,
                     onApprove = { onApproveSpeaker(p) },
-                    onClick = { onSelectParticipant(p) }
+                    onClick = { onSelectParticipant(p) },
+                    onLongClick = { onLongPressParticipant(p) }
                 )
             }
         }
@@ -918,7 +931,8 @@ fun ParticipantsSheetContent(
                 isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                 showApprove = false,
                 onApprove = {},
-                onClick = { onSelectParticipant(p) }
+                onClick = { onSelectParticipant(p) },
+                onLongClick = { onLongPressParticipant(p) }
             )
         }
 
@@ -935,13 +949,15 @@ fun ParticipantsSheetContent(
                     isMuted = p.mutedByMod || room.mutedUserIds.contains(p.userId),
                     showApprove = false,
                     onApprove = {},
-                    onClick = { onSelectParticipant(p) }
+                    onClick = { onSelectParticipant(p) },
+                    onLongClick = { onLongPressParticipant(p) }
                 )
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ParticipantRosterRow(
     participant: RoomParticipant,
@@ -949,15 +965,27 @@ private fun ParticipantRosterRow(
     isMuted: Boolean,
     showApprove: Boolean,
     onApprove: () -> Unit,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
 ) {
     val tier = participant.staffTierEnum()
+    val haptic = LocalHapticFeedback.current
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clip(RoundedCornerShape(14.dp))
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = {
+                    if (!isSelf) {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onLongClick()
+                    }
+                }
+            )
+            .testTag("room_user_list_row_${participant.userId}")
     ) {
         Row(
             modifier = Modifier.padding(8.dp),

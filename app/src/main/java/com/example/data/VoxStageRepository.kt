@@ -649,7 +649,7 @@ class VoxStageRepository(
             val resolvedPhoto: String
             val resolvedDmPolicy: DmPolicy
             if (!snapshot.exists()) {
-                val safeName = displayName.trim().ifBlank { "Studio Host" }.take(40)
+                val safeName = UsernamePolicy.sanitizeForNewUser(displayName, fallback = "VoxUser")
                 val rawHandle = emailPrefix.lowercase()
                     .replace(Regex("[^a-z0-9_\\-]"), "")
                     .ifBlank { "vox_${uid.take(6).lowercase()}" }
@@ -1293,22 +1293,48 @@ class VoxStageRepository(
             ?: return Result.failure(IllegalStateException("Not signed in"))
         val path = "users/$uid"
         return try {
-            val safeName = displayName.trim().take(40)
+            val trimmedName = displayName.trim()
             val safeHandle = handle.trim().replace(" ", "_").take(30)
             val safeBio = bio.trim().take(200)
-            require(safeName.isNotEmpty()) { "Display name cannot be empty." }
+            require(trimmedName.isNotEmpty()) { "Display name cannot be empty." }
             require(safeHandle.length >= 2) { "Handle must be at least 2 characters." }
             require(Regex("^#[0-9A-Fa-f]{6}$").matches(avatarColorHex)) { "Invalid color hex." }
             require(age == 0L || age in 13L..120L) { "Age must be between 13 and 120 (or left blank)." }
 
+            val roleTierFromServer = runCatching {
+                val roleDoc = db.collection("staffRoles").document(uid).get().await()
+                if (roleDoc.exists()) StaffTier.fromRaw(roleDoc.getString("tier")) else StaffTier.USER
+            }.getOrDefault(StaffTier.USER)
+            val isRealAdmin = currentStaffTier == StaffTier.ADMIN || roleTierFromServer == StaffTier.ADMIN
+            val isRealStaff = currentStaffTier.isStaff() || roleTierFromServer.isStaff()
+
+            val currentUserDoc = runCatching {
+                db.collection("users").document(uid).get().await()
+            }.getOrNull()
+            val existingName = currentUserDoc?.getString("displayName")
+                ?.trim().orEmpty()
+
+            // Enforce 10-character max and no symbols for non-admins whenever the name is changed.
+            // If an Admin previously added symbols to this user's name and the user is only saving
+            // other profile settings without editing their name, preserve their existing name.
+            val nameChanged = trimmedName != existingName
+            if (isRealAdmin) {
+                UsernamePolicy.validate(trimmedName, allowSymbols = true)?.let { err ->
+                    return Result.failure(IllegalArgumentException(err))
+                }
+            } else if (nameChanged || existingName.isBlank()) {
+                UsernamePolicy.validate(trimmedName, allowSymbols = false)?.let { err ->
+                    return Result.failure(IllegalArgumentException(err))
+                }
+            }
+            val safeName = if (!isRealAdmin && !nameChanged && existingName.isNotBlank()) {
+                existingName.take(40)
+            } else {
+                trimmedName.take(UsernamePolicy.MAX_LENGTH)
+            }
+
             // Block non-staff users from changing their username or handle to a Staff/Admin name
             // and automatically file an impersonation report to Staff + log in their moderation file.
-            val isRealStaff = currentStaffTier.isStaff() || runCatching {
-                val roleDoc = db.collection("staffRoles").document(uid).get().await()
-                val roleTier = StaffTier.fromRaw(roleDoc.getString("tier"))
-                roleDoc.exists() && roleTier.isStaff()
-            }.getOrDefault(false)
-
             if (!isRealStaff) {
                 val impersonationMatch = detectStaffOrAdminNameImpersonation(
                     uid = uid,
@@ -1316,19 +1342,15 @@ class VoxStageRepository(
                     candidateHandle = safeHandle
                 )
                 if (impersonationMatch != null) {
-                    val currentUserDoc = runCatching {
-                        db.collection("users").document(uid).get().await()
-                    }.getOrNull()
-                    val existingName = currentUserDoc?.getString("displayName")
-                        ?.trim()?.ifBlank { "Member" } ?: "Member"
+                    val existingNameForReport = existingName.ifBlank { "Member" }
                     runCatching {
                         recordAutoModReportAndUserFile(
                             uid = uid,
-                            targetName = existingName,
+                            targetName = existingNameForReport,
                             roomId = "AUTOMOD_NAME_IMPERSONATION",
                             roomTitle = "Staff/Admin Name Impersonation",
                             category = ReportCategory.IMPERSONATION,
-                            reportDetails = "Blocked attempt by $existingName to change username to \"$safeName\" (@$safeHandle), matching $impersonationMatch.",
+                            reportDetails = "Blocked attempt by $existingNameForReport to change username to \"$safeName\" (@$safeHandle), matching $impersonationMatch.",
                             noteReason = "Blocked Staff/Admin username impersonation attempt: tried to set name \"$safeName\" (@$safeHandle), matching $impersonationMatch."
                         )
                     }
@@ -1520,11 +1542,14 @@ class VoxStageRepository(
             ?: return Result.failure(IllegalStateException("Not signed in"))
         val path = "users/$targetUserId"
         return try {
-            val safeName = displayName.trim().take(40)
+            val trimmedName = displayName.trim()
+            UsernamePolicy.validate(trimmedName, allowSymbols = true)?.let { err ->
+                return Result.failure(IllegalArgumentException(err))
+            }
+            val safeName = trimmedName.take(UsernamePolicy.MAX_LENGTH)
             val safeHandle = handle.trim().replace(" ", "_").take(30)
             val safeBio = bio.trim().take(200)
             val safeReason = suspensionReason.trim().take(200)
-            require(safeName.isNotEmpty()) { "Display name cannot be empty." }
             require(safeHandle.length >= 2) { "Handle must be at least 2 characters." }
 
             val userUpdates = mutableMapOf<String, Any>(
@@ -11371,7 +11396,7 @@ class VoxStageRepository(
             ?: return Result.failure(IllegalStateException("Not signed in"))
         val path = "users/$uid"
         return try {
-            val cleanName = customDisplayName.trim().take(40)
+            val cleanName = customDisplayName.trim().take(UsernamePolicy.MAX_LENGTH)
             val cleanColor = customNameColorHex.trim().uppercase().let { raw ->
                 if (raw.isBlank()) ""
                 else {
@@ -12204,7 +12229,12 @@ class VoxStageRepository(
         if (!ownerProfile.canManageCompanySubAccounts(ownerTier)) {
             return Result.failure(IllegalStateException("VIP Pro or Business Account is required to create employee sub-names."))
         }
-        val cleanSub = subName.trim().take(40)
+        val trimmedSub = subName.trim()
+        val allowSymbols = ownerTier == StaffTier.ADMIN
+        UsernamePolicy.validate(trimmedSub, allowSymbols = allowSymbols)?.let { err ->
+            return Result.failure(IllegalArgumentException(err))
+        }
+        val cleanSub = trimmedSub.take(UsernamePolicy.MAX_LENGTH)
         if (cleanSub.length < 2) {
             return Result.failure(IllegalArgumentException("Employee sub-name must be at least 2 characters."))
         }
@@ -12595,7 +12625,11 @@ class VoxStageRepository(
     ): Result<Unit> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(IllegalStateException("Not signed in"))
-        val cleanName = newDisplayName.trim().take(40)
+        val trimmedName = newDisplayName.trim()
+        UsernamePolicy.validate(trimmedName, allowSymbols = false)?.let { err ->
+            return Result.failure(IllegalArgumentException(err))
+        }
+        val cleanName = trimmedName.take(UsernamePolicy.MAX_LENGTH)
         if (cleanName.length < 2) {
             return Result.failure(IllegalArgumentException("Display name must be at least 2 characters."))
         }

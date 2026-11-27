@@ -1,8 +1,10 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +39,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -58,7 +62,7 @@ import com.example.ui.theme.SafetyEmerald
 import com.example.ui.theme.SnapBlue
 import com.example.ui.theme.VoiceCyan
 
-private data class DmMemberRowModel(
+data class DmUserListMember(
     val uid: String,
     val displayName: String,
     val colorHex: String,
@@ -92,6 +96,7 @@ fun DmUserListDrawerContent(
     canManageGroup: Boolean,
     nowMillis: Long,
     onSelectUser: (String) -> Unit,
+    onLongPressUser: (DmUserListMember) -> Unit = {},
     onOpenGroupControls: () -> Unit,
     onReportUser: ((uid: String, displayName: String) -> Unit)? = null,
     onClose: () -> Unit
@@ -159,7 +164,7 @@ fun DmUserListDrawerContent(
                 else -> false
             }
             val isPttEnabled = thread.isPttEnabledFor(uid)
-            DmMemberRowModel(
+            DmUserListMember(
                 uid = uid,
                 displayName = name,
                 colorHex = colorHex,
@@ -175,7 +180,7 @@ fun DmUserListDrawerContent(
                 isPttEnabled = isPttEnabled
             )
         }.sortedWith(
-            compareByDescending<DmMemberRowModel> { it.isOnMic }
+            compareByDescending<DmUserListMember> { it.isOnMic }
                 .thenByDescending { it.isGroupAdmin }
                 .thenByDescending { it.isSupervisor || it.isSupport }
                 .thenByDescending { it.status == PresenceStatus.ONLINE }
@@ -267,6 +272,12 @@ fun DmUserListDrawerContent(
                         )
                     }
                 }
+                Text(
+                    text = "Long-press a name for quick actions",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    modifier = Modifier.padding(top = 2.dp)
+                )
             }
             IconButton(
                 onClick = onClose,
@@ -317,6 +328,7 @@ fun DmUserListDrawerContent(
             leaders.forEach { member ->
                 DmUserListRow(
                     member = member,
+                    isCompanyThread = thread.isCompanyThread(),
                     showReportAction = thread.isGroup && !member.isSelf && onReportUser != null,
                     onReport = {
                         onClose()
@@ -326,6 +338,11 @@ fun DmUserListDrawerContent(
                         if (!member.isSelf) {
                             onClose()
                             onSelectUser(member.uid)
+                        }
+                    },
+                    onLongClick = {
+                        if (!member.isSelf) {
+                            onLongPressUser(member)
                         }
                     }
                 )
@@ -341,6 +358,7 @@ fun DmUserListDrawerContent(
             regularMembers.forEach { member ->
                 DmUserListRow(
                     member = member,
+                    isCompanyThread = thread.isCompanyThread(),
                     showReportAction = thread.isGroup && !member.isSelf && onReportUser != null,
                     onReport = {
                         onClose()
@@ -351,6 +369,11 @@ fun DmUserListDrawerContent(
                             onClose()
                             onSelectUser(member.uid)
                         }
+                    },
+                    onLongClick = {
+                        if (!member.isSelf) {
+                            onLongPressUser(member)
+                        }
                     }
                 )
             }
@@ -358,20 +381,34 @@ fun DmUserListDrawerContent(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DmUserListRow(
-    member: DmMemberRowModel,
+    member: DmUserListMember,
+    isCompanyThread: Boolean = false,
     showReportAction: Boolean = false,
     onReport: () -> Unit = {},
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {}
 ) {
     val isLeader = member.isGroupAdmin || member.isSupervisor || member.isSupport
+    val haptic = LocalHapticFeedback.current
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = !member.isSelf, onClick = onClick)
+            .clip(RoundedCornerShape(14.dp))
+            .combinedClickable(
+                enabled = !member.isSelf,
+                onClick = onClick,
+                onLongClick = {
+                    if (!member.isSelf) {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onLongClick()
+                    }
+                }
+            )
             .testTag("dm_user_list_row_${member.uid}")
     ) {
         Row(
@@ -442,7 +479,7 @@ private fun DmUserListRow(
                 ) {
                     val roleLabel = when {
                         member.isGroupAdmin -> "Group Admin"
-                        member.isSupervisor -> "Supervisor"
+                        member.isSupervisor -> if (isCompanyThread) "Supervisor" else "Room Admin"
                         member.isSupport -> "Group Support"
                         else -> null
                     }

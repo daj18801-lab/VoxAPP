@@ -125,6 +125,7 @@ import com.example.data.StaffTier
 import com.example.data.UiState
 import com.example.data.UserProfile
 import com.example.data.UserSex
+import com.example.data.UsernamePolicy
 import com.example.data.formatUsdCents
 import com.example.media.LivePttSessionManager
 import com.example.media.LockScreenPttActivity
@@ -1341,10 +1342,31 @@ fun ProfileScreen(
                                         style = MaterialTheme.typography.titleMedium
                                     )
 
+                                    val hasAdminStyledName = !staffCapabilities.isAdmin &&
+                                        displayName == (userProfile?.displayName ?: "") &&
+                                        (UsernamePolicy.containsSymbols(displayName) || displayName.length > UsernamePolicy.MAX_LENGTH)
                                     OutlinedTextField(
                                         value = displayName,
-                                        onValueChange = { displayName = it.take(40) },
+                                        onValueChange = { raw ->
+                                            displayName = if (staffCapabilities.isAdmin) {
+                                                raw.take(UsernamePolicy.MAX_LENGTH)
+                                            } else {
+                                                UsernamePolicy.filterStandardInput(raw)
+                                            }
+                                        },
                                         label = { Text("Display Name") },
+                                        supportingText = {
+                                            Text(
+                                                when {
+                                                    staffCapabilities.isAdmin ->
+                                                        "${displayName.length}/${UsernamePolicy.MAX_LENGTH} · Admin: symbols allowed"
+                                                    hasAdminStyledName ->
+                                                        "Admin-styled name · Editing enforces ${UsernamePolicy.MAX_LENGTH} chars max, no symbols"
+                                                    else ->
+                                                        "${displayName.length}/${UsernamePolicy.MAX_LENGTH} · Letters & numbers only (no symbols)"
+                                                }
+                                            )
+                                        },
                                         singleLine = true,
                                         modifier = Modifier
                                             .fillMaxWidth()

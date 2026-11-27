@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.IntOffset
 import com.example.data.AdminPreviewMode
 import com.example.data.StaffTier
 import com.example.data.UserProfile
+import com.example.data.UsernamePolicy
 import com.example.ui.theme.LiveCoral
 import com.example.ui.theme.ModAmber
 import com.example.ui.theme.SafetyEmerald
@@ -539,9 +540,12 @@ fun AdminSandboxControlCard(
 
                     OutlinedTextField(
                         value = draftName,
-                        onValueChange = { draftName = it.take(40) },
+                        onValueChange = { draftName = it.take(UsernamePolicy.MAX_LENGTH) },
                         label = { Text("Custom Display Name") },
-                        placeholder = { Text("Enter any name (leave blank to keep real name)") },
+                        placeholder = { Text("Up to ${UsernamePolicy.MAX_LENGTH} chars (leave blank to keep real name)") },
+                        supportingText = {
+                            Text("${draftName.length}/${UsernamePolicy.MAX_LENGTH} · Admin: symbols allowed")
+                        },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()

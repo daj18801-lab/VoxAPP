@@ -352,12 +352,14 @@ class LockScreenPttActivity : ComponentActivity() {
 
         try {
             val recognizer = ensureSpeechRecognizer()
+            val langTag = Locale.getDefault().toLanguageTag().ifBlank { "en-US" }
             val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(
                     RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
                 )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, langTag)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, langTag)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
@@ -640,6 +642,7 @@ private fun LockScreenPttContent(
     val activeThreadHasLiveListener by LivePttSessionManager.activeThreadHasLiveListener.collectAsStateWithLifecycle()
     val activeThreadSenderSelfVttOn by LivePttSessionManager.activeThreadSenderSelfVttOn.collectAsStateWithLifecycle()
     val isVttFinalizing by LivePttSessionManager.isVttFinalizing.collectAsStateWithLifecycle()
+    val isSpeechRecognizerReady by LivePttSessionManager.isSpeechRecognizerReady.collectAsStateWithLifecycle()
     val livePttTranscript by LivePttSessionManager.livePttTranscript.collectAsStateWithLifecycle()
     val lastPttTranscriptFeedback by LivePttSessionManager.lastPttTranscriptFeedback.collectAsStateWithLifecycle()
     val lastIncomingBeep by LivePttSessionManager.lastIncomingBeep.collectAsStateWithLifecycle()
@@ -1041,7 +1044,22 @@ private fun LockScreenPttContent(
                                     }
                                 }
                             } else if (latestIsLocalVttOnly && !targetPttTid.isNullOrBlank()) {
-                                // Voice-to-Text ON or PTT Silent ON: NEVER transmit live audio — send voice-to-text to PTT peer.
+                                val hasMic = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!hasMic) {
+                                    (context as? android.app.Activity)?.let { act ->
+                                        androidx.core.app.ActivityCompat.requestPermissions(
+                                            act,
+                                            arrayOf(Manifest.permission.RECORD_AUDIO),
+                                            201
+                                        )
+                                    }
+                                    waitForUpOrCancellation()
+                                    return@awaitEachGesture
+                                }
+                                // Voice-to-Text ON or peer PTT OFF: NEVER transmit live audio — send voice-to-text to PTT peer.
                                 // Supports both hold-to-speak and quick tap-to-speak.
                                 if (latestIsTransmitting) {
                                     LivePttSessionManager.setTransmitting(
@@ -1062,7 +1080,7 @@ private fun LockScreenPttContent(
                                     )
                                     waitForUpOrCancellation()
                                     val heldMs = SystemClock.elapsedRealtime() - downAtMs
-                                    if (heldMs >= 400L) {
+                                    if (heldMs >= 450L) {
                                         LivePttSessionManager.setTransmitting(
                                             context = context,
                                             transmitting = false,
@@ -1118,7 +1136,8 @@ private fun LockScreenPttContent(
                             voiceReplyModeActive && isDictating -> "LISTENING"
                             voiceReplyModeActive -> "PRESS TO REPLY"
                             isLocalPttVttOnlyMode && isVttFinalizing -> "SENDING…"
-                            isLocalPttVttOnlyMode && isTransmitting -> "LISTENING"
+                            isLocalPttVttOnlyMode && isTransmitting ->
+                                if (isSpeechRecognizerReady) "LISTENING" else "STARTING…"
                             isLocalPttVttOnlyMode -> "VOICE TO TEXT"
                             isTransmitting -> "TALKING"
                             else -> "HOLD TO TALK"
